@@ -11,11 +11,13 @@ MockAgent::MockAgent(std::optional<std::uint32_t> random_seed)
     : random_engine_(random_seed.value_or(std::random_device{}())) {}
 
 std::vector<int> MockAgent::infer(
-    const std::vector<std::shared_ptr<const BufferedFrame>>& observation
+    const std::vector<std::shared_ptr<const BufferedFrame>>& observation,
+    const std::vector<AppliedActionRecord>& applied_action_history
 ) {
     if (observation.empty()) {
         throw std::invalid_argument("mock inference requires at least one frame");
     }
+    static_cast<void>(applied_action_history);
     std::lock_guard lock(mutex_);
     std::array<int, 10> available{};
     std::iota(available.begin(), available.end(), 0);

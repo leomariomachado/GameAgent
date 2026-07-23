@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ActionHistory.h"
 #include "FrameBuffer.h"
 
 #include <cstdint>
@@ -16,7 +17,8 @@ public:
     explicit MockAgent(std::optional<std::uint32_t> random_seed = std::nullopt);
 
     std::vector<int> infer(
-        const std::vector<std::shared_ptr<const BufferedFrame>>& observation
+        const std::vector<std::shared_ptr<const BufferedFrame>>& observation,
+        const std::vector<AppliedActionRecord>& applied_action_history
     );
 
 private:

@@ -27,6 +27,7 @@ add_subdirectory(
 
 add_library(
         GameAgentMockCore
+        src/ActionHistory.cpp
         src/FrameBuffer.cpp
         src/HttpServer.cpp
         src/MockAgent.cpp
@@ -108,5 +109,18 @@ if (BUILD_TESTING)
     add_test(
             NAME gameagent_websocket_server
             COMMAND test_gameagent_websocket_server
+    )
+
+    add_executable(
+            test_gameagent_action_history
+            tests/test_action_history.cpp
+    )
+    target_link_libraries(
+            test_gameagent_action_history
+            PRIVATE GameAgentMockCore
+    )
+    add_test(
+            NAME gameagent_action_history
+            COMMAND test_gameagent_action_history
     )
 endif()

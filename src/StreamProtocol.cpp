@@ -1,5 +1,7 @@
 #include "StreamProtocol.h"
 
+#include <json.hpp>
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -238,6 +240,74 @@ std::vector<std::uint8_t> decode_base64(std::string_view encoded) {
         }
     }
     return decoded;
+}
+
+ClientTextMessage parse_client_text_message(std::string_view payload) {
+    const nlohmann::json request = nlohmann::json::parse(payload);
+    if (!request.is_object()) {
+        throw std::invalid_argument("client text message must be a JSON object");
+    }
+
+    const std::string type = request.value("type", "frame");
+    if (type == "action_ack") {
+        if (!request.contains("protocol_version") ||
+            !request["protocol_version"].is_number_integer() ||
+            request["protocol_version"].get<int>() !=
+                static_cast<int>(kActionProtocolVersion)) {
+            throw std::invalid_argument("action_ack protocol_version must be 2");
+        }
+        if (!request.contains("decision_id") ||
+            !request["decision_id"].is_number_unsigned() ||
+            request["decision_id"].get<std::uint64_t>() == 0) {
+            throw std::invalid_argument("action_ack decision_id must be a positive uint64");
+        }
+        if (!request.contains("applied_timestamp_ms") ||
+            !request["applied_timestamp_ms"].is_number_integer() ||
+            request["applied_timestamp_ms"].get<std::int64_t>() <= 0) {
+            throw std::invalid_argument("action_ack applied_timestamp_ms must be positive");
+        }
+        if (!request.contains("applied_commands") ||
+            !request["applied_commands"].is_array()) {
+            throw std::invalid_argument("action_ack applied_commands must be an array");
+        }
+
+        std::array<bool, 10> seen{};
+        std::vector<int> commands;
+        commands.reserve(request["applied_commands"].size());
+        for (const auto& value : request["applied_commands"]) {
+            if (!value.is_number_integer()) {
+                throw std::invalid_argument("action_ack commands must be integers");
+            }
+            const int command = value.get<int>();
+            if (command < 0 || command >= static_cast<int>(seen.size())) {
+                throw std::invalid_argument("action_ack command is outside the 0..9 range");
+            }
+            if (seen[static_cast<std::size_t>(command)]) {
+                throw std::invalid_argument("action_ack commands must be unique");
+            }
+            seen[static_cast<std::size_t>(command)] = true;
+            commands.push_back(command);
+        }
+        return ActionAcknowledgement{
+            .decision_id = request["decision_id"].get<std::uint64_t>(),
+            .applied_timestamp_ms = request["applied_timestamp_ms"].get<std::int64_t>(),
+            .applied_commands = std::move(commands),
+        };
+    }
+
+    if (type != "frame" || !request.contains("frame_id") ||
+        !request["frame_id"].is_number_unsigned() ||
+        !request.contains("timestamp_ms") || !request["timestamp_ms"].is_number_integer() ||
+        !request.contains("jpeg_base64") || !request["jpeg_base64"].is_string()) {
+        throw std::invalid_argument(
+            "frame message must contain unsigned frame_id, integer timestamp_ms and jpeg_base64"
+        );
+    }
+    return FrameEnvelope{
+        .frame_id = request["frame_id"].get<std::uint64_t>(),
+        .timestamp_ms = request["timestamp_ms"].get<std::int64_t>(),
+        .jpeg = decode_base64(request["jpeg_base64"].get_ref<const std::string&>()),
+    };
 }
 
 std::string websocket_accept_key(std::string_view client_key) {

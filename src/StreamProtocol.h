@@ -5,6 +5,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace gameagent {
@@ -20,6 +21,14 @@ struct FrameEnvelope {
     std::vector<std::uint8_t> jpeg;
 };
 
+struct ActionAcknowledgement {
+    std::uint64_t decision_id = 0;
+    std::int64_t applied_timestamp_ms = 0;
+    std::vector<int> applied_commands;
+};
+
+using ClientTextMessage = std::variant<FrameEnvelope, ActionAcknowledgement>;
+
 FrameEnvelope parse_binary_frame_envelope(std::span<const std::uint8_t> payload);
 
 std::vector<std::uint8_t> make_binary_frame_envelope(
@@ -29,6 +38,8 @@ std::vector<std::uint8_t> make_binary_frame_envelope(
 );
 
 std::vector<std::uint8_t> decode_base64(std::string_view encoded);
+
+ClientTextMessage parse_client_text_message(std::string_view payload);
 
 std::string websocket_accept_key(std::string_view client_key);
 

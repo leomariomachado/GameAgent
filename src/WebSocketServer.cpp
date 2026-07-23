@@ -1,5 +1,6 @@
 #include "WebSocketServer.h"
 
+#include "ActionHistory.h"
 #include "FrameBuffer.h"
 #include "MockAgent.h"
 #include "StreamProtocol.h"
@@ -460,24 +461,6 @@ void send_close(ConnectionWriter& writer, std::uint16_t code, std::string_view m
     writer.send_frame(0x8U, payload);
 }
 
-FrameEnvelope parse_text_frame(std::span<const std::uint8_t> payload) {
-    const std::string text(payload.begin(), payload.end());
-    const nlohmann::json request = nlohmann::json::parse(text);
-    if (!request.is_object() || !request.contains("frame_id") ||
-        !request["frame_id"].is_number_unsigned() || !request.contains("timestamp_ms") ||
-        !request["timestamp_ms"].is_number_integer() || !request.contains("jpeg_base64") ||
-        !request["jpeg_base64"].is_string()) {
-        throw std::invalid_argument(
-            "text frame must contain unsigned frame_id, integer timestamp_ms and jpeg_base64"
-        );
-    }
-    return FrameEnvelope{
-        .frame_id = request["frame_id"].get<std::uint64_t>(),
-        .timestamp_ms = request["timestamp_ms"].get<std::int64_t>(),
-        .jpeg = decode_base64(request["jpeg_base64"].get_ref<const std::string&>()),
-    };
-}
-
 std::shared_ptr<const BufferedFrame> decode_frame(
     const FrameEnvelope& envelope,
     std::size_t maximum_jpeg_bytes,
@@ -672,10 +655,16 @@ void handle_websocket_connection(
     const std::atomic_bool& stop_requested
 ) {
     CircularFrameBuffer buffer(options.frame_buffer_capacity);
+    ActionHistory action_history(
+        std::max<std::size_t>(64U, options.applied_action_history_size * 8U)
+    );
     ConnectionWriter writer(socket);
     std::atomic_bool connected{true};
     std::atomic<std::uint64_t> received_frames{0};
     std::atomic<std::uint64_t> decode_errors{0};
+    std::atomic<std::uint64_t> acknowledgements_received{0};
+    std::atomic<std::uint64_t> acknowledgements_rejected{0};
+    std::atomic<std::uint64_t> client_message_errors{0};
 
     std::jthread inference_thread([&](std::stop_token thread_stop) {
         std::uint64_t decision_id = 0;
@@ -689,7 +678,12 @@ void handle_websocket_connection(
             const auto inference_start = Clock::now();
             const auto observation = buffer.latest(options.observation_frames);
             if (!observation.empty()) {
-                const std::vector<int> commands = agent.infer(observation);
+                const auto applied_actions = action_history.latest_applied(
+                    options.applied_action_history_size
+                );
+                const std::vector<int> commands = agent.infer(
+                    observation, applied_actions
+                );
                 const auto inference_end = Clock::now();
                 const double inference_ms = std::chrono::duration<double, std::milli>(
                     inference_end - inference_start
@@ -707,12 +701,13 @@ void handle_websocket_connection(
                     frame_ids.push_back(frame->frame_id);
                 }
 
+                const std::uint64_t current_decision_id = ++decision_id;
                 nlohmann::json response{
                     {"protocol_version", kActionProtocolVersion},
                     {"type", "action"},
                     {"action_mode", kActionMode},
                     {"commands", commands},
-                    {"decision_id", ++decision_id},
+                    {"decision_id", current_decision_id},
                     {"frame_id", latest->frame_id},
                     {"frame_ids", frame_ids},
                     {"timestamp_ms", now_ms},
@@ -726,8 +721,20 @@ void handle_websocket_connection(
                         {"frames_received", received_frames.load()},
                         {"frames_dropped", buffer.dropped_total()},
                         {"decode_errors", decode_errors.load()},
+                        {"client_message_errors", client_message_errors.load()},
+                        {"acknowledgements_received", acknowledgements_received.load()},
+                        {"acknowledgements_rejected", acknowledgements_rejected.load()},
+                        {"applied_action_history_size", applied_actions.size()},
+                        {"last_applied_decision_id",
+                         action_history.last_applied_decision_id()},
                     }},
                 };
+                action_history.record_sent(
+                    current_decision_id,
+                    latest->frame_id,
+                    commands,
+                    now_ms
+                );
                 if (!writer.send_json(response)) {
                     connected.store(false);
                     shutdown(socket, SHUT_RDWR);
@@ -816,11 +823,92 @@ void handle_websocket_connection(
                 throw std::invalid_argument("unsupported WebSocket opcode");
             }
 
+            bool processing_frame_message = message_opcode == 0x2U;
             try {
                 const std::int64_t received_ms = epoch_milliseconds();
-                FrameEnvelope envelope = message_opcode == 0x2U
-                    ? parse_binary_frame_envelope(message_payload)
-                    : parse_text_frame(message_payload);
+                if (message_opcode == 0x1U) {
+                    const std::string text(message_payload.begin(), message_payload.end());
+                    ClientTextMessage client_message = parse_client_text_message(text);
+                    if (std::holds_alternative<ActionAcknowledgement>(client_message)) {
+                        const auto result = action_history.acknowledge(
+                            std::get<ActionAcknowledgement>(client_message),
+                            received_ms
+                        );
+                        if (!result.accepted) {
+                            acknowledgements_rejected.fetch_add(1);
+                            writer.send_json({
+                                {"protocol_version", kActionProtocolVersion},
+                                {"type", "warning"},
+                                {"message", result.reason},
+                            });
+                            std::cerr << "[ACTION_ACK] connection=" << connection_id
+                                      << " rejected: " << result.reason << '\n';
+                        } else {
+                            acknowledgements_received.fetch_add(1);
+                            metrics.write({
+                                {"protocol_version", kActionProtocolVersion},
+                                {"event", "action_ack"},
+                                {"connection_id", connection_id},
+                                {"decision_id", result.applied.decision_id},
+                                {"based_on_frame_id",
+                                 result.applied.based_on_frame_id},
+                                {"applied_commands", result.applied.commands},
+                                {"commands_match", result.commands_match},
+                                {"generated_timestamp_ms",
+                                 result.applied.generated_timestamp_ms},
+                                {"applied_timestamp_ms",
+                                 result.applied.applied_timestamp_ms},
+                                {"acknowledgement_received_timestamp_ms",
+                                 result.applied
+                                     .acknowledgement_received_timestamp_ms},
+                                {"server_roundtrip_ms",
+                                 result.server_roundtrip_ms},
+                            });
+                            if (!result.commands_match) {
+                                std::cerr
+                                    << "[ACTION_ACK] connection=" << connection_id
+                                    << " decision="
+                                    << result.applied.decision_id
+                                    << " applied state differs from sent state\n";
+                            }
+                        }
+                        continue;
+                    }
+                    processing_frame_message = true;
+                    FrameEnvelope envelope = std::move(
+                        std::get<FrameEnvelope>(client_message)
+                    );
+                    if (envelope.jpeg.size() > options.max_jpeg_bytes) {
+                        throw std::invalid_argument(
+                            "JPEG exceeds configured size limit"
+                        );
+                    }
+                    const std::uint64_t received_count =
+                        received_frames.fetch_add(1) + 1U;
+                    auto decoded = decode_frame(
+                        envelope, options.max_jpeg_bytes, received_ms
+                    );
+                    const FramePushResult push_result =
+                        buffer.push(std::move(decoded));
+                    if (push_result == FramePushResult::rejected_stale) {
+                        writer.send_json({
+                            {"protocol_version", kActionProtocolVersion},
+                            {"type", "warning"},
+                            {"message", "stale or duplicate frame discarded"},
+                        });
+                    } else {
+                        save_frame_if_enabled(
+                            options,
+                            connection_id,
+                            envelope,
+                            received_count,
+                            received_ms
+                        );
+                    }
+                    continue;
+                }
+
+                FrameEnvelope envelope = parse_binary_frame_envelope(message_payload);
                 if (envelope.jpeg.size() > options.max_jpeg_bytes) {
                     throw std::invalid_argument("JPEG exceeds configured size limit");
                 }
@@ -831,6 +919,7 @@ void handle_websocket_connection(
                 const FramePushResult push_result = buffer.push(std::move(decoded));
                 if (push_result == FramePushResult::rejected_stale) {
                     writer.send_json({
+                        {"protocol_version", kActionProtocolVersion},
                         {"type", "warning"},
                         {"message", "stale or duplicate frame discarded"},
                     });
@@ -844,12 +933,18 @@ void handle_websocket_connection(
                     );
                 }
             } catch (const std::exception& error) {
-                decode_errors.fetch_add(1);
+                if (processing_frame_message) {
+                    decode_errors.fetch_add(1);
+                } else {
+                    client_message_errors.fetch_add(1);
+                }
                 writer.send_json({
+                    {"protocol_version", kActionProtocolVersion},
                     {"type", "error"},
                     {"message", error.what()},
                 });
-                std::cerr << "[FRAME] connection=" << connection_id
+                std::cerr << (processing_frame_message ? "[FRAME]" : "[CLIENT_MESSAGE]")
+                          << " connection=" << connection_id
                           << " rejected: " << error.what() << '\n';
             }
         }
@@ -869,11 +964,18 @@ void handle_websocket_connection(
         {"frames_received", received_frames.load()},
         {"frames_dropped", buffer.dropped_total()},
         {"decode_errors", decode_errors.load()},
+        {"acknowledgements_received", acknowledgements_received.load()},
+        {"acknowledgements_rejected", acknowledgements_rejected.load()},
+        {"client_message_errors", client_message_errors.load()},
+        {"last_applied_decision_id", action_history.last_applied_decision_id()},
     });
     std::cout << "[DISCONNECT] connection=" << connection_id
               << " received=" << received_frames.load()
               << " dropped=" << buffer.dropped_total()
               << " decode_errors=" << decode_errors.load()
+              << " acknowledgements=" << acknowledgements_received.load()
+              << " rejected_acknowledgements="
+              << acknowledgements_rejected.load()
               << "; waiting for a new client\n";
 }
 
@@ -882,7 +984,9 @@ void handle_websocket_connection(
 WebSocketServer::WebSocketServer(WebSocketServerOptions options)
     : options_(std::move(options)) {
     if (options_.host.empty() || options_.port == 0 || options_.frame_buffer_capacity == 0 ||
-        options_.observation_frames == 0 || options_.max_jpeg_bytes == 0 ||
+        options_.observation_frames == 0 ||
+        options_.applied_action_history_size == 0 ||
+        options_.max_jpeg_bytes == 0 ||
         options_.decision_interval.count() <= 0 || options_.failsafe_timeout.count() <= 0 ||
         options_.save_every_n_frames == 0) {
         throw std::invalid_argument("invalid WebSocket server configuration");
@@ -936,6 +1040,8 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                     {"failsafe_timeout_ms", options_.failsafe_timeout.count()},
                     {"buffer_capacity", options_.frame_buffer_capacity},
                     {"observation_frames", options_.observation_frames},
+                    {"applied_action_history_size",
+                     options_.applied_action_history_size},
                     {"save_frames", options_.save_frames},
                 });
                 continue;

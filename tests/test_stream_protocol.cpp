@@ -46,6 +46,19 @@ int main() {
         require(frame[0] == 0x81U, "server text frame must be final text");
         require(frame[1] == action.size(), "short WebSocket payload length mismatch");
 
+        const auto acknowledgement = gameagent::parse_client_text_message(
+            R"({"protocol_version":2,"type":"action_ack","decision_id":7,"applied_commands":[],"applied_timestamp_ms":1784740000200})"
+        );
+        require(
+            std::holds_alternative<gameagent::ActionAcknowledgement>(acknowledgement),
+            "action_ack was not recognized"
+        );
+        const auto& parsed_ack =
+            std::get<gameagent::ActionAcknowledgement>(acknowledgement);
+        require(parsed_ack.decision_id == 7, "action_ack decision ID mismatch");
+        require(parsed_ack.applied_commands.empty(),
+                "empty applied command state was not preserved");
+
         std::cout << "[PASS] GameAgent stream protocol test passed\n";
         return 0;
     } catch (const std::exception& error) {

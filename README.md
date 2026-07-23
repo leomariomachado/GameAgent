@@ -78,7 +78,12 @@ so the existing GameAgent JSON parser can continue reading it:
     "buffer_size": 32,
     "frames_received": 417,
     "frames_dropped": 385,
-    "decode_errors": 0
+    "decode_errors": 0,
+    "client_message_errors": 0,
+    "acknowledgements_received": 119,
+    "acknowledgements_rejected": 0,
+    "applied_action_history_size": 8,
+    "last_applied_decision_id": 119
   }
 }
 ```
@@ -88,6 +93,24 @@ not a list of taps: listed commands remain pressed until a newer decision
 replaces the state. An empty array is an intentional neutral action and releases
 all controls. A client must also release all controls after the advertised
 failsafe timeout or immediately on disconnect.
+
+After applying every valid state, the client confirms what was actually applied
+with a text WebSocket message:
+
+```json
+{
+  "protocol_version": 2,
+  "type": "action_ack",
+  "decision_id": 120,
+  "applied_commands": [9, 3],
+  "applied_timestamp_ms": 1784740000182
+}
+```
+
+The server validates the ID against actions sent on the same connection, records
+whether the applied set matches the requested set, and keeps the newest confirmed
+states in an in-memory action history. The agent receives this confirmed history
+alongside the decoded frame observation. No disk access is involved.
 
 The mock returns 3 to 10 distinct simultaneous commands:
 
@@ -143,6 +166,7 @@ also contains `frames.jsonl`, mapping filenames to frame IDs and timestamps.
 | `GAMEAGENT_PORT` | `8080` | server port |
 | `GAMEAGENT_FRAME_BUFFER_CAPACITY` | `32` | decoded frames retained |
 | `GAMEAGENT_OBSERVATION_FRAMES` | `8` | newest frames used by the agent |
+| `GAMEAGENT_ACTION_HISTORY_SIZE` | `8` | newest client-confirmed states given to the agent |
 | `GAMEAGENT_DECISION_INTERVAL_MS` | `50` | inference loop interval |
 | `GAMEAGENT_FAILSAFE_TIMEOUT_MS` | `200` | client safety release timeout advertised in every action |
 | `GAMEAGENT_MAX_JPEG_MB` | `8` | maximum JPEG payload |
@@ -252,7 +276,10 @@ The included client has no third-party Python dependencies. It sends a chosen
 JPEG repeatedly using the binary protocol and prints action messages. It adds
 `client_frame_to_action_ms` locally using the Mac's monotonic clock; unlike an
 absolute timestamp comparison, this measures frame-to-action round-trip latency
-without requiring the Mac and Pod clocks to agree:
+without requiring the Mac and Pod clocks to agree.
+
+It also sends an `action_ack` for every validated action, using the state applied
+by its local protocol-v2 state machine.
 
 ```bash
 export GAMEAGENT_API_TOKEN='YOUR_TOKEN'

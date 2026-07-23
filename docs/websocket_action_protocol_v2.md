@@ -25,7 +25,12 @@ must remain pressed until the next valid action arrives.
     "buffer_size": 32,
     "frames_received": 456,
     "frames_dropped": 424,
-    "decode_errors": 0
+    "decode_errors": 0,
+    "client_message_errors": 0,
+    "acknowledgements_received": 122,
+    "acknowledgements_rejected": 0,
+    "applied_action_history_size": 8,
+    "last_applied_decision_id": 122
   }
 }
 ```
@@ -51,6 +56,39 @@ current_commands = new_commands
 The client ignores repeated or older decision IDs. It releases all controls
 immediately on disconnect and when no valid action arrives within
 `failsafe_timeout_ms`.
+
+## Applied-action acknowledgement
+
+Immediately after applying a valid action state, the client sends one WebSocket
+text message:
+
+```json
+{
+  "protocol_version": 2,
+  "type": "action_ack",
+  "decision_id": 123,
+  "applied_commands": [9, 3],
+  "applied_timestamp_ms": 1784740000182
+}
+```
+
+`applied_commands` is the complete state that the client actually left active,
+not a copy made before input injection. It may be empty and its order is
+irrelevant. Values must be unique integers from 0 through 9.
+
+The server accepts only monotonically increasing IDs that refer to a decision
+sent on the current connection. It retains the latest confirmed states in
+memory as multi-hot vectors and provides them to the agent's temporal input.
+If the applied set differs from the sent set, the ACK remains valid but is
+recorded with `commands_match=false`.
+
+The server records `server_roundtrip_ms` using only its own clock. The client's
+`applied_timestamp_ms` is retained for timeline alignment, but cross-machine
+latency calculations require synchronized clocks.
+
+No acknowledgement is sent for malformed, stale, or ignored actions. On
+reconnection, both decision ordering and applied-action history restart for the
+new connection.
 
 ## Command mapping
 

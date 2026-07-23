@@ -15,7 +15,9 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -199,6 +201,49 @@ nlohmann::json send_one_frame_and_receive_action(int socket_fd, std::uint64_t fr
     return receive_json_frame(socket_fd);
 }
 
+void send_action_acknowledgement(
+    int socket_fd,
+    const nlohmann::json& action
+) {
+    const nlohmann::json acknowledgement{
+        {"protocol_version", 2},
+        {"type", "action_ack"},
+        {"decision_id", action.at("decision_id")},
+        {"applied_commands", action.at("commands")},
+        {"applied_timestamp_ms",
+         std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch()
+         ).count()},
+    };
+    const std::string text = acknowledgement.dump();
+    send_masked_frame(
+        socket_fd,
+        0x1U,
+        std::span<const std::uint8_t>(
+            reinterpret_cast<const std::uint8_t*>(text.data()), text.size()
+        )
+    );
+}
+
+nlohmann::json receive_action_with_acknowledgement_visible(
+    int socket_fd,
+    std::uint64_t acknowledged_decision_id
+) {
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        nlohmann::json action = receive_json_frame(socket_fd);
+        if (action.value("type", "") != "action") {
+            continue;
+        }
+        if (action["metrics"].value("last_applied_decision_id", 0U) ==
+            acknowledged_decision_id) {
+            return action;
+        }
+    }
+    throw std::runtime_error(
+        "confirmed action was not visible after ten server decisions"
+    );
+}
+
 void close_websocket(int socket_fd) {
     const std::array<std::uint8_t, 2> normal_close{0x03U, 0xe8U};
     try {
@@ -230,6 +275,7 @@ int main() {
             .port = port,
             .frame_buffer_capacity = 4,
             .observation_frames = 2,
+            .applied_action_history_size = 2,
             .max_jpeg_bytes = 1024U * 1024U,
             .decision_interval = std::chrono::milliseconds(20),
             .failsafe_timeout = std::chrono::milliseconds(100),
@@ -266,6 +312,25 @@ int main() {
         require(first_action.value("frame_id", 0U) == 11U, "first action used wrong frame");
         require(first_action["commands"].size() >= 3 && first_action["commands"].size() <= 10,
                 "first action command count is outside 3..10");
+        send_action_acknowledgement(first_client, first_action);
+        const nlohmann::json action_after_first_ack =
+            receive_action_with_acknowledgement_visible(
+                first_client,
+                first_action["decision_id"].get<std::uint64_t>()
+            );
+        require(
+            action_after_first_ack["metrics"].value(
+                "last_applied_decision_id", 0U
+            ) == first_action["decision_id"].get<std::uint64_t>(),
+            "confirmed action was not exposed to the next agent observation"
+        );
+        require(
+            action_after_first_ack["metrics"].value(
+                "applied_action_history_size", 0U
+            ) == 1U,
+            "confirmed action history size was not exposed"
+        );
+        send_action_acknowledgement(first_client, action_after_first_ack);
         close_websocket(first_client);
         first_client = -1;
 
@@ -274,6 +339,19 @@ int main() {
         require(second_action.value("type", "") == "action", "reconnect response is not an action");
         require(second_action.value("frame_id", 0U) == 1U,
                 "new connection did not start with a fresh buffer");
+        send_action_acknowledgement(second_client, second_action);
+        const nlohmann::json action_after_second_ack =
+            receive_action_with_acknowledgement_visible(
+                second_client,
+                second_action["decision_id"].get<std::uint64_t>()
+            );
+        require(
+            action_after_second_ack["metrics"].value(
+                "last_applied_decision_id", 0U
+            ) == second_action["decision_id"].get<std::uint64_t>(),
+            "reconnected client acknowledgement was not retained"
+        );
+        send_action_acknowledgement(second_client, action_after_second_ack);
         close_websocket(second_client);
         second_client = -1;
 
@@ -284,6 +362,15 @@ int main() {
         }
         require(std::filesystem::exists(root / "metrics.jsonl"),
                 "WebSocket metrics file was not created");
+        std::ifstream metrics_input(root / "metrics.jsonl");
+        const std::string metrics_text{
+            std::istreambuf_iterator<char>(metrics_input),
+            std::istreambuf_iterator<char>()
+        };
+        require(metrics_text.find(R"("event":"action_ack")") != std::string::npos,
+                "accepted action acknowledgement was not recorded");
+        require(metrics_text.find(R"("commands_match":true)") != std::string::npos,
+                "acknowledged applied commands did not match the sent state");
         const std::filesystem::path capture_session =
             root / "captures" / ("session_" + std::to_string(getpid()));
         require(

@@ -15,6 +15,7 @@ struct WebSocketServerOptions {
     std::uint16_t port = 8080;
     std::size_t frame_buffer_capacity = 32;
     std::size_t observation_frames = 8;
+    std::size_t applied_action_history_size = 8;
     std::size_t max_jpeg_bytes = 8U * 1024U * 1024U;
     std::chrono::milliseconds decision_interval{50};
     std::chrono::milliseconds failsafe_timeout{200};

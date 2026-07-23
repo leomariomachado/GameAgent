@@ -80,6 +80,7 @@ void print_help(const char* executable) {
         << "  --port PORT             WebSocket port (default: 8080)\n"
         << "  --buffer-frames N       Circular buffer capacity (default: 32)\n"
         << "  --observation-frames N  Frames used per decision (default: 8)\n"
+        << "  --action-history N      Confirmed actions given to the agent (default: 8)\n"
         << "  --interval-ms MS        Decision interval (default: 50)\n"
         << "  --failsafe-ms MS        Client release timeout advertised by server (default: 200)\n"
         << "  --max-jpeg-mb MB        Maximum JPEG size (default: 8)\n"
@@ -104,6 +105,9 @@ int main(int argc, char** argv) {
         );
         server_options.observation_frames = parse_positive_size(
             environment_or("GAMEAGENT_OBSERVATION_FRAMES", "8"), "observation frames"
+        );
+        server_options.applied_action_history_size = parse_positive_size(
+            environment_or("GAMEAGENT_ACTION_HISTORY_SIZE", "8"), "action history size"
         );
         server_options.decision_interval = std::chrono::milliseconds(parse_positive_size(
             environment_or("GAMEAGENT_DECISION_INTERVAL_MS", "50"), "decision interval"
@@ -159,6 +163,10 @@ int main(int argc, char** argv) {
             } else if (argument == "--observation-frames") {
                 server_options.observation_frames = parse_positive_size(
                     require_value(argument), "observation frames"
+                );
+            } else if (argument == "--action-history") {
+                server_options.applied_action_history_size = parse_positive_size(
+                    require_value(argument), "action history size"
                 );
             } else if (argument == "--interval-ms") {
                 server_options.decision_interval = std::chrono::milliseconds(
@@ -220,6 +228,8 @@ int main(int argc, char** argv) {
             << "protocolo de acao: v2/state, failsafe="
             << server_options.failsafe_timeout.count() << " ms\n"
             << "buffer circular: " << server_options.frame_buffer_capacity << " frames\n"
+            << "historico confirmado: " << server_options.applied_action_history_size
+            << " acoes\n"
             << "salvamento de frames: "
             << (server_options.save_frames ? "habilitado (debug)" : "desabilitado")
             << '\n'

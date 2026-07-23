@@ -176,6 +176,20 @@ def main() -> int:
                         }
                         current_commands = new_commands
                         last_decision_id = decision_id
+                        acknowledgement = {
+                            "protocol_version": 2,
+                            "type": "action_ack",
+                            "decision_id": decision_id,
+                            "applied_commands": sorted(current_commands),
+                            "applied_timestamp_ms": time.time_ns() // 1_000_000,
+                        }
+                        send_client_frame(
+                            connection,
+                            0x1,
+                            json.dumps(
+                                acknowledgement, separators=(",", ":")
+                            ).encode("utf-8"),
+                        )
                         received += 1
                         used_frame_id = message.get("frame_id")
                         if used_frame_id in sent_at:

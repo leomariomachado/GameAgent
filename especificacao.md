@@ -20,13 +20,16 @@ Substituir o fluxo HTTP atual por uma conexão WebSocket persistente capaz de:
 ### WebSocket
 
 ```text
-wss://54x9n8p474bqla-8080.proxy.runpod.net/ws
+wss://<POD_ID>-8080.proxy.runpod.net/ws
 ```
+
+O endereço deve ser configurável no cliente, porque o `POD_ID` muda quando um
+novo Pod é criado. Não fixar o endereço no código-fonte.
 
 ### Health check
 
 ```text
-https://54x9n8p474bqla-8080.proxy.runpod.net/health
+https://<POD_ID>-8080.proxy.runpod.net/health
 ```
 
 ### Autenticação
@@ -46,9 +49,8 @@ Authorization: Bearer SEU_TOKEN
 Exemplo com Qt:
 
 ```cpp
-QNetworkRequest request(
-    QUrl("wss://54x9n8p474bqla-8080.proxy.runpod.net/ws")
-);
+const QUrl serverUrl(configuredWebSocketUrl);
+QNetworkRequest request(serverUrl);
 
 request.setRawHeader(
     "Authorization",
@@ -292,7 +294,12 @@ O servidor envia mensagens WebSocket de texto contendo JSON:
     "buffer_size": 32,
     "frames_received": 456,
     "frames_dropped": 424,
-    "decode_errors": 0
+    "decode_errors": 0,
+    "client_message_errors": 0,
+    "acknowledgements_received": 122,
+    "acknowledgements_rejected": 0,
+    "applied_action_history_size": 8,
+    "last_applied_decision_id": 122
   }
 }
 ```
@@ -414,7 +421,85 @@ Comandos que permanecem no vetor não devem gerar eventos repetidos.
 
 ---
 
-## 13. Vetor vazio
+## 13. Confirmação da ação realmente aplicada
+
+Depois de atualizar o estado do emulador, o cliente deve enviar uma mensagem
+WebSocket de texto confirmando o resultado:
+
+```json
+{
+  "protocol_version": 2,
+  "type": "action_ack",
+  "decision_id": 123,
+  "applied_commands": [9, 3],
+  "applied_timestamp_ms": 1784740000182
+}
+```
+
+Regras:
+
+- enviar um `action_ack` para toda ação válida e aplicada;
+- enviar a confirmação mesmo quando o novo estado for igual ao anterior;
+- enviar a confirmação também para `commands: []`;
+- `applied_commands` deve representar o estado que ficou realmente ativo no
+  emulador depois dos eventos de teclado, e não apenas copiar a solicitação;
+- não enviar confirmação para ação inválida, ignorada ou com `decision_id`
+  antigo/duplicado;
+- uma decisão com `decision_id` novo deve ser confirmada mesmo se o vetor
+  `commands` for idêntico ao estado anterior;
+- usar no ACK exatamente o `decision_id` da ação aplicada;
+- obter `applied_timestamp_ms` depois da aplicação, em Unix epoch milliseconds;
+- não aguardar outra captura de frame para enviar o ACK.
+
+Exemplo Qt:
+
+```cpp
+void sendActionAcknowledgement(
+    quint64 decisionId,
+    const QSet<int>& actuallyAppliedCommands
+) {
+    QJsonArray applied;
+    QList<int> orderedCommands = actuallyAppliedCommands.values();
+    std::sort(orderedCommands.begin(), orderedCommands.end());
+    for (const int command : orderedCommands) {
+        applied.append(command);
+    }
+
+    const QJsonObject acknowledgement{
+        {"protocol_version", 2},
+        {"type", "action_ack"},
+        {"decision_id", static_cast<qint64>(decisionId)},
+        {"applied_commands", applied},
+        {"applied_timestamp_ms",
+         QDateTime::currentDateTimeUtc().toMSecsSinceEpoch()}
+    };
+
+    webSocket.sendTextMessage(
+        QJsonDocument(acknowledgement).toJson(QJsonDocument::Compact)
+    );
+}
+```
+
+A ordem correta do callback é:
+
+```text
+validar ação e decision_id
+→ calcular keyUp e keyDown
+→ aplicar os eventos no emulador
+→ atualizar currentCommands com o estado realmente ativo
+→ atualizar lastDecisionId
+→ reiniciar o failsafe
+→ enviar action_ack
+```
+
+O servidor valida a confirmação contra as decisões enviadas naquela mesma
+conexão. Ele mantém em memória os últimos estados confirmados, em formato
+vetorial multi-hot de 10 posições, e os fornece ao agente junto com os frames.
+Esse histórico é reiniciado ao reconectar.
+
+---
+
+## 14. Vetor vazio
 
 Isto é uma ação válida:
 
@@ -434,7 +519,7 @@ Não interpretar como erro, resposta ausente ou “manter ação anterior”.
 
 ---
 
-## 14. Botões simultâneos
+## 15. Botões simultâneos
 
 Exemplo:
 
@@ -456,7 +541,7 @@ A diferença de microssegundos entre eventos de teclado será percebida pelo emu
 
 ---
 
-## 15. Diagonais
+## 16. Diagonais
 
 As diagonais são representadas por duas direções:
 
@@ -473,7 +558,7 @@ Combinações opostas, como Cima+Baixo, podem aparecer no mock. Devem ser tolera
 
 ---
 
-## 16. Sequências
+## 17. Sequências
 
 Sequências são formadas por vários estados consecutivos.
 
@@ -495,7 +580,7 @@ Não criar macros nem filas locais de sequências nesta versão.
 
 ---
 
-## 17. Toques repetidos
+## 18. Toques repetidos
 
 Para apertar A duas vezes, o servidor deve produzir:
 
@@ -522,7 +607,7 @@ significa manter A pressionado, não apertar duas vezes.
 
 ---
 
-## 18. Failsafe
+## 19. Failsafe
 
 Cada ação informa:
 
@@ -547,7 +632,7 @@ O timeout não deve ser 50 ms, porque pequenas variações de rede poderiam caus
 
 ---
 
-## 19. Desconexão
+## 20. Desconexão
 
 Ao detectar desconexão:
 
@@ -577,7 +662,7 @@ Ela também deve ser chamada:
 
 ---
 
-## 20. Reconexão
+## 21. Reconexão
 
 Usar backoff:
 
@@ -597,7 +682,7 @@ Manter apenas uma conexão WebSocket ativa.
 
 ---
 
-## 21. Ping e conexão ociosa
+## 22. Ping e conexão ociosa
 
 Enviar ping WebSocket a cada 20–30 segundos.
 
@@ -607,7 +692,7 @@ A ausência de pong ou o fechamento da conexão deve iniciar o fluxo de reconex�
 
 ---
 
-## 22. Organização recomendada
+## 23. Organização recomendada
 
 Separar em componentes:
 
@@ -625,6 +710,7 @@ Separar em componentes:
 - cria o envelope binário;
 - envia frames;
 - recebe JSON;
+- envia `action_ack` imediatamente após a aplicação;
 - trata ping, desconexão e reconexão.
 
 ### `ControllerState`
@@ -641,7 +727,7 @@ A aplicação da ação não deve esperar a próxima captura.
 
 ---
 
-## 23. Métricas locais recomendadas
+## 24. Métricas locais recomendadas
 
 Registrar:
 
@@ -651,6 +737,8 @@ frames_sent
 frames_replaced_before_send
 actions_received
 actions_ignored
+action_acknowledgements_sent
+action_application_errors
 last_decision_id
 websocket_reconnects
 failsafe_releases
@@ -664,17 +752,22 @@ server_frame_age_ms
 inference_ms
 decode_errors
 frames_dropped
+acknowledgements_received
+acknowledgements_rejected
+applied_action_history_size
+last_applied_decision_id
 ```
 
 Não registrar o token nem o conteúdo completo dos JPEGs.
 
 ---
 
-## 24. Critérios de aceite
+## 25. Critérios de aceite
 
 A implementação estará correta quando:
 
-1. Conectar em `wss://54x9n8p474bqla-8080.proxy.runpod.net/ws`.
+1. Conectar ao endereço configurado no formato
+   `wss://<POD_ID>-8080.proxy.runpod.net/ws`.
 2. Enviar autenticação durante o upgrade.
 3. Capturar aproximadamente 15 fps.
 4. Enviar cada JPEG como mensagem binária `GAF1`.
@@ -692,10 +785,15 @@ A implementação estará correta quando:
 16. Liberar tudo imediatamente na desconexão.
 17. Reconectar automaticamente.
 18. Manter a interface responsiva.
+19. Enviar um `action_ack` após cada ação válida, inclusive estados repetidos e
+    o vetor vazio.
+20. Informar em `applied_commands` o estado realmente ativo após a injeção dos
+    controles.
+21. Não confirmar ações inválidas, antigas ou ignoradas.
 
 ---
 
-## 25. Testes obrigatórios
+## 26. Testes obrigatórios
 
 ### Manutenção
 
@@ -784,7 +882,33 @@ Esperado:
 ```text
 aplicar 10
 ignorar 9
+enviar ACK apenas para 10
 ```
+
+### Confirmação da aplicação
+
+Entrada:
+
+```text
+decision_id=20, commands=[9,3]
+```
+
+Esperado depois de aplicar os controles:
+
+```json
+{
+  "protocol_version": 2,
+  "type": "action_ack",
+  "decision_id": 20,
+  "applied_commands": [3, 9]
+}
+```
+
+A ordem de `applied_commands` é irrelevante.
+
+Se somente Direita tiver sido realmente aplicada por uma falha local, o ACK
+deve informar `[9]`. O servidor aceitará a confirmação e registrará
+`commands_match=false`.
 
 ### Failsafe
 
