@@ -544,14 +544,10 @@ void save_frame_if_enabled(
     const WebSocketServerOptions& options,
     std::uint64_t connection_id,
     const FrameEnvelope& envelope,
-    std::uint64_t received_count,
-    std::int64_t received_timestamp_ms
+    std::int64_t received_timestamp_ms,
+    bool& debug_frame_saved
 ) {
-    if (!options.save_frames || received_count % options.save_every_n_frames != 0) {
-        return;
-    }
-    const std::uint64_t saved_index = received_count / options.save_every_n_frames;
-    if (options.max_saved_frames != 0 && saved_index > options.max_saved_frames) {
+    if (!options.save_frames || debug_frame_saved) {
         return;
     }
     const std::filesystem::path directory = options.capture_directory /
@@ -583,6 +579,10 @@ void save_frame_if_enabled(
         {"jpeg_bytes", envelope.jpeg.size()},
         {"file", filename},
     }.dump() << '\n';
+    if (!metadata) {
+        throw std::runtime_error("could not save frame metadata in: " + directory.string());
+    }
+    debug_frame_saved = true;
 }
 
 SocketHandle create_listening_socket(const WebSocketServerOptions& options) {
@@ -665,6 +665,7 @@ void handle_websocket_connection(
     std::atomic<std::uint64_t> acknowledgements_received{0};
     std::atomic<std::uint64_t> acknowledgements_rejected{0};
     std::atomic<std::uint64_t> client_message_errors{0};
+    bool debug_frame_saved = false;
 
     std::jthread inference_thread([&](std::stop_token thread_stop) {
         std::uint64_t decision_id = 0;
@@ -883,8 +884,7 @@ void handle_websocket_connection(
                             "JPEG exceeds configured size limit"
                         );
                     }
-                    const std::uint64_t received_count =
-                        received_frames.fetch_add(1) + 1U;
+                    received_frames.fetch_add(1);
                     auto decoded = decode_frame(
                         envelope, options.max_jpeg_bytes, received_ms
                     );
@@ -901,8 +901,8 @@ void handle_websocket_connection(
                             options,
                             connection_id,
                             envelope,
-                            received_count,
-                            received_ms
+                            received_ms,
+                            debug_frame_saved
                         );
                     }
                     continue;
@@ -912,7 +912,7 @@ void handle_websocket_connection(
                 if (envelope.jpeg.size() > options.max_jpeg_bytes) {
                     throw std::invalid_argument("JPEG exceeds configured size limit");
                 }
-                const std::uint64_t received_count = received_frames.fetch_add(1) + 1U;
+                received_frames.fetch_add(1);
                 auto decoded = decode_frame(
                     envelope, options.max_jpeg_bytes, received_ms
                 );
@@ -928,8 +928,8 @@ void handle_websocket_connection(
                         options,
                         connection_id,
                         envelope,
-                        received_count,
-                        received_ms
+                        received_ms,
+                        debug_frame_saved
                     );
                 }
             } catch (const std::exception& error) {
@@ -988,7 +988,7 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
         options_.applied_action_history_size == 0 ||
         options_.max_jpeg_bytes == 0 ||
         options_.decision_interval.count() <= 0 || options_.failsafe_timeout.count() <= 0 ||
-        options_.save_every_n_frames == 0) {
+        options_.capture_directory.empty()) {
         throw std::invalid_argument("invalid WebSocket server configuration");
     }
     if (options_.observation_frames > options_.frame_buffer_capacity) {

@@ -16,8 +16,6 @@ export GAMEAGENT_DECISION_INTERVAL_MS="${GAMEAGENT_DECISION_INTERVAL_MS:-50}"
 export GAMEAGENT_FAILSAFE_TIMEOUT_MS="${GAMEAGENT_FAILSAFE_TIMEOUT_MS:-200}"
 export GAMEAGENT_MAX_JPEG_MB="${GAMEAGENT_MAX_JPEG_MB:-8}"
 export GAMEAGENT_SAVE_FRAMES="${GAMEAGENT_SAVE_FRAMES:-0}"
-export GAMEAGENT_SAVE_EVERY_N_FRAMES="${GAMEAGENT_SAVE_EVERY_N_FRAMES:-1}"
-export GAMEAGENT_MAX_SAVED_FRAMES="${GAMEAGENT_MAX_SAVED_FRAMES:-300}"
 
 if [[ ! -x "${GAMEAGENT_BINARY}" ]]; then
   echo "GameAgent executable not found: ${GAMEAGENT_BINARY}" >&2
@@ -49,7 +47,7 @@ echo "Confirmed action history: ${GAMEAGENT_ACTION_HISTORY_SIZE} states"
 echo "Decision interval: ${GAMEAGENT_DECISION_INTERVAL_MS} ms"
 echo "Action protocol: v2/state; failsafe ${GAMEAGENT_FAILSAFE_TIMEOUT_MS} ms"
 if [[ "${GAMEAGENT_SAVE_FRAMES}" == "1" ]]; then
-  echo "Frame capture: every ${GAMEAGENT_SAVE_EVERY_N_FRAMES} frame(s), maximum ${GAMEAGENT_MAX_SAVED_FRAMES} per connection"
+  echo "Frame capture: one debug JPEG per connection"
 else
   echo "Frame capture: disabled (in-memory path only)"
 fi

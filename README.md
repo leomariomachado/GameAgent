@@ -154,9 +154,10 @@ no image is re-encoded.
 
 For an explicit debug run, set `GAMEAGENT_SAVE_FRAMES=1`. The original compressed
 JPEG received from the client is then written to disk only after its decoded
-image has been accepted into the circular buffer. Debug capture remains bounded
-to the first 300 saved frames per connection by default. Each capture directory
-also contains `frames.jsonl`, mapping filenames to frame IDs and timestamps.
+image has been accepted into the circular buffer. Only the first valid JPEG is
+saved for each WebSocket connection; every later frame remains memory-only.
+Each capture directory also contains a one-line `frames.jsonl` mapping the
+sample filename to its frame ID and timestamps.
 
 ## Configuration
 
@@ -172,9 +173,7 @@ also contains `frames.jsonl`, mapping filenames to frame IDs and timestamps.
 | `GAMEAGENT_MAX_JPEG_MB` | `8` | maximum JPEG payload |
 | `GAMEAGENT_METRICS_PATH` | `metrics.jsonl` | JSONL metrics output |
 | `GAMEAGENT_CAPTURE_DIR` | `captures` | optional JPEG inspection output |
-| `GAMEAGENT_SAVE_FRAMES` | `0` | explicit debug persistence flag; zero keeps everything in memory |
-| `GAMEAGENT_SAVE_EVERY_N_FRAMES` | `1` | debug capture cadence when saving is enabled |
-| `GAMEAGENT_MAX_SAVED_FRAMES` | `300` | maximum saved JPEGs per connection; zero is unlimited |
+| `GAMEAGENT_SAVE_FRAMES` | `0` | save only the first valid JPEG from each connection; zero keeps everything in memory |
 | `GAMEAGENT_API_TOKEN` | unset | Bearer or X-API-Key credential |
 | `GAMEAGENT_RANDOM_SEED` | random | deterministic mock seed |
 
@@ -229,9 +228,7 @@ When `GAMEAGENT_SAVE_FRAMES=1`, captured frames are stored under:
 
 ```text
 /workspace/gameagent/captures/session_PROCESS_ID/connection_N/
-├── frame_1.jpg
-├── frame_2.jpg
-├── ...
+├── frame_FRAME_ID.jpg
 └── frames.jsonl
 ```
 
@@ -241,13 +238,10 @@ Normal production launch (no disk writes for frames):
 GAMEAGENT_SAVE_FRAMES=0 bash scripts/run_runpod_server.sh
 ```
 
-Short debug capture, saving at most 300 consecutive frames:
+Debug capture, saving only one sample JPEG per WebSocket connection:
 
 ```bash
-GAMEAGENT_SAVE_FRAMES=1 \
-GAMEAGENT_SAVE_EVERY_N_FRAMES=1 \
-GAMEAGENT_MAX_SAVED_FRAMES=300 \
-bash scripts/run_runpod_server.sh
+GAMEAGENT_SAVE_FRAMES=1 bash scripts/run_runpod_server.sh
 ```
 
 Health check from another machine:

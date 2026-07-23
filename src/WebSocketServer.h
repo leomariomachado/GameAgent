@@ -24,8 +24,6 @@ struct WebSocketServerOptions {
     std::filesystem::path metrics_path = "metrics.jsonl";
     std::filesystem::path capture_directory = "captures";
     bool save_frames = false;
-    std::size_t save_every_n_frames = 1;
-    std::size_t max_saved_frames = 300;
 };
 
 class WebSocketServer {

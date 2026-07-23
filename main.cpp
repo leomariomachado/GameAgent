@@ -51,14 +51,6 @@ std::size_t parse_positive_size(std::string_view text, std::string_view name) {
     return static_cast<std::size_t>(value);
 }
 
-std::size_t parse_nonnegative_size(std::string_view text, std::string_view name) {
-    const unsigned long long value = std::stoull(std::string(text));
-    if (value > 1'000'000ULL) {
-        throw std::invalid_argument(std::string(name) + " must be between 0 and 1000000");
-    }
-    return static_cast<std::size_t>(value);
-}
-
 bool parse_boolean(std::string value, std::string_view name) {
     for (char& character : value) {
         character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
@@ -86,9 +78,7 @@ void print_help(const char* executable) {
         << "  --max-jpeg-mb MB        Maximum JPEG size (default: 8)\n"
         << "  --metrics-path PATH     JSONL metrics path\n"
         << "  --capture-dir PATH      Optional frame capture directory\n"
-        << "  --save-frames           Enable JPEG persistence for debugging\n"
-        << "  --save-every N          Save every Nth JPEG when debugging\n"
-        << "  --max-saved N           Maximum JPEGs saved per connection; 0 is unlimited\n"
+        << "  --save-frames           Save one JPEG per connection for debugging\n"
         << "  --seed NUMBER           Deterministic random command seed\n"
         << "  --help                  Show this help\n";
 }
@@ -126,12 +116,6 @@ int main(int argc, char** argv) {
         );
         server_options.save_frames = parse_boolean(
             environment_or("GAMEAGENT_SAVE_FRAMES", "0"), "frame saving flag"
-        );
-        server_options.save_every_n_frames = parse_positive_size(
-            environment_or("GAMEAGENT_SAVE_EVERY_N_FRAMES", "1"), "save interval"
-        );
-        server_options.max_saved_frames = parse_nonnegative_size(
-            environment_or("GAMEAGENT_MAX_SAVED_FRAMES", "300"), "maximum saved frames"
         );
         if (const char* token = std::getenv("GAMEAGENT_API_TOKEN");
             token != nullptr && token[0] != '\0') {
@@ -184,14 +168,6 @@ int main(int argc, char** argv) {
                 server_options.capture_directory = require_value(argument);
             } else if (argument == "--save-frames") {
                 server_options.save_frames = true;
-            } else if (argument == "--save-every") {
-                server_options.save_every_n_frames = parse_positive_size(
-                    require_value(argument), "save interval"
-                );
-            } else if (argument == "--max-saved") {
-                server_options.max_saved_frames = parse_nonnegative_size(
-                    require_value(argument), "maximum saved frames"
-                );
             } else if (argument == "--seed") {
                 server_options.random_seed = static_cast<std::uint32_t>(
                     std::stoul(require_value(argument))

@@ -284,8 +284,6 @@ int main() {
             .metrics_path = root / "metrics.jsonl",
             .capture_directory = root / "captures",
             .save_frames = true,
-            .save_every_n_frames = 1,
-            .max_saved_frames = 1,
         });
         server_thread = std::thread([&] {
             try {
@@ -312,6 +310,10 @@ int main() {
         require(first_action.value("frame_id", 0U) == 11U, "first action used wrong frame");
         require(first_action["commands"].size() >= 3 && first_action["commands"].size() <= 10,
                 "first action command count is outside 3..10");
+        const nlohmann::json second_frame_action =
+            send_one_frame_and_receive_action(first_client, 12U);
+        require(second_frame_action.value("type", "") == "action",
+                "second frame response is not an action");
         send_action_acknowledgement(first_client, first_action);
         const nlohmann::json action_after_first_ack =
             receive_action_with_acknowledgement_visible(
@@ -377,6 +379,12 @@ int main() {
             std::filesystem::exists(capture_session / "connection_1" / "frame_11.jpg") &&
                 std::filesystem::exists(capture_session / "connection_1" / "frames.jsonl"),
             "first connection frame and metadata were not saved"
+        );
+        require(
+            !std::filesystem::exists(
+                capture_session / "connection_1" / "frame_12.jpg"
+            ),
+            "debug mode saved more than one JPEG for the connection"
         );
         require(
             std::filesystem::exists(capture_session / "connection_2" / "frame_1.jpg"),
