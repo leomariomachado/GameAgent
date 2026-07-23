@@ -1,0 +1,12 @@
+.DS_Store
+.idea/
+cmake-build-*/
+build/
+build-*/
+captures/
+metrics.jsonl
+__pycache__/
+*.pyc
+*.log
+.gameagent-token
+info*.txt
