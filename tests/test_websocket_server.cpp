@@ -308,8 +308,24 @@ int main() {
         require(first_action.value("failsafe_timeout_ms", 0) == 100,
                 "action failsafe timeout is incorrect");
         require(first_action.value("frame_id", 0U) == 11U, "first action used wrong frame");
-        require(first_action["commands"].size() >= 3 && first_action["commands"].size() <= 10,
-                "first action command count is outside 3..10");
+        require(first_action.value("mock_move", "").size() > 0,
+                "Sub-Zero move name was not returned");
+        require(first_action.value("mock_step", 0U) == 1U,
+                "Sub-Zero move did not start at step one");
+        require(first_action.value("mock_steps", 0U) >= 5U,
+                "Sub-Zero move length was not returned");
+        require(first_action.value("mock_step_duration_ms", 0) == 20,
+                "mock step duration does not match the decision interval");
+        require(first_action["commands"].is_array(),
+                "first action commands are not an array");
+        for (const auto& command : first_action["commands"]) {
+            require(
+                command.is_number_integer() &&
+                    command.get<int>() >= 0 &&
+                    command.get<int>() <= 9,
+                "Sub-Zero action contains an invalid command"
+            );
+        }
         const nlohmann::json second_frame_action =
             send_one_frame_and_receive_action(first_client, 12U);
         require(second_frame_action.value("type", "") == "action",

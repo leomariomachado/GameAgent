@@ -16,6 +16,7 @@ export GAMEAGENT_DECISION_INTERVAL_MS="${GAMEAGENT_DECISION_INTERVAL_MS:-50}"
 export GAMEAGENT_FAILSAFE_TIMEOUT_MS="${GAMEAGENT_FAILSAFE_TIMEOUT_MS:-200}"
 export GAMEAGENT_MAX_JPEG_MB="${GAMEAGENT_MAX_JPEG_MB:-8}"
 export GAMEAGENT_SAVE_FRAMES="${GAMEAGENT_SAVE_FRAMES:-0}"
+export GAMEAGENT_SUBZERO_FACING="${GAMEAGENT_SUBZERO_FACING:-right}"
 
 if [[ ! -x "${GAMEAGENT_BINARY}" ]]; then
   echo "GameAgent executable not found: ${GAMEAGENT_BINARY}" >&2
@@ -46,6 +47,7 @@ echo "Observation: ${GAMEAGENT_OBSERVATION_FRAMES} frames"
 echo "Confirmed action history: ${GAMEAGENT_ACTION_HISTORY_SIZE} states"
 echo "Decision interval: ${GAMEAGENT_DECISION_INTERVAL_MS} ms"
 echo "Action protocol: v2/state; failsafe ${GAMEAGENT_FAILSAFE_TIMEOUT_MS} ms"
+echo "Mock agent: Sub-Zero facing ${GAMEAGENT_SUBZERO_FACING}"
 if [[ "${GAMEAGENT_SAVE_FRAMES}" == "1" ]]; then
   echo "Frame capture: one debug JPEG per connection"
 else

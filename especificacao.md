@@ -280,7 +280,11 @@ O servidor envia mensagens WebSocket de texto contendo JSON:
   "protocol_version": 2,
   "type": "action",
   "action_mode": "state",
-  "commands": [9, 3],
+  "commands": [7],
+  "mock_move": "Congelar",
+  "mock_step": 1,
+  "mock_steps": 5,
+  "mock_step_duration_ms": 50,
   "decision_id": 123,
   "frame_id": 456,
   "frame_ids": [449, 450, 451, 452, 453, 454, 455, 456],
@@ -317,6 +321,11 @@ O cliente deve processar somente mensagens com:
 Mensagens inválidas devem ser registradas e ignoradas.
 
 Uma mensagem inválida não deve liberar imediatamente os controles. O failsafe cuidará disso se nenhuma ação válida chegar.
+
+Os campos `mock_move`, `mock_step`, `mock_steps` e
+`mock_step_duration_ms` existem somente para acompanhar o teste temporal do
+Sub-Zero. O cliente pode exibi-los ou registrá-los, mas deve ignorá-los para
+executar os controles. Campos JSON adicionais não tornam uma ação inválida.
 
 ---
 

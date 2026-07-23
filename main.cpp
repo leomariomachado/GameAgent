@@ -64,6 +64,21 @@ bool parse_boolean(std::string value, std::string_view name) {
     throw std::invalid_argument(std::string(name) + " must be 0/1, true/false, yes/no or on/off");
 }
 
+bool parse_facing_right(std::string value) {
+    for (char& character : value) {
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    }
+    if (value == "right" || value == "direita") {
+        return true;
+    }
+    if (value == "left" || value == "esquerda") {
+        return false;
+    }
+    throw std::invalid_argument(
+        "Sub-Zero facing must be right/direita or left/esquerda"
+    );
+}
+
 void print_help(const char* executable) {
     std::cout
         << "Usage: " << executable << " [options]\n\n"
@@ -79,6 +94,7 @@ void print_help(const char* executable) {
         << "  --metrics-path PATH     JSONL metrics path\n"
         << "  --capture-dir PATH      Optional frame capture directory\n"
         << "  --save-frames           Save one JPEG per connection for debugging\n"
+        << "  --subzero-facing SIDE   Direction Sub-Zero faces: right or left (default: right)\n"
         << "  --seed NUMBER           Deterministic random command seed\n"
         << "  --help                  Show this help\n";
 }
@@ -116,6 +132,9 @@ int main(int argc, char** argv) {
         );
         server_options.save_frames = parse_boolean(
             environment_or("GAMEAGENT_SAVE_FRAMES", "0"), "frame saving flag"
+        );
+        server_options.mock_facing_right = parse_facing_right(
+            environment_or("GAMEAGENT_SUBZERO_FACING", "right")
         );
         if (const char* token = std::getenv("GAMEAGENT_API_TOKEN");
             token != nullptr && token[0] != '\0') {
@@ -168,6 +187,10 @@ int main(int argc, char** argv) {
                 server_options.capture_directory = require_value(argument);
             } else if (argument == "--save-frames") {
                 server_options.save_frames = true;
+            } else if (argument == "--subzero-facing") {
+                server_options.mock_facing_right = parse_facing_right(
+                    require_value(argument)
+                );
             } else if (argument == "--seed") {
                 server_options.random_seed = static_cast<std::uint32_t>(
                     std::stoul(require_value(argument))
@@ -206,6 +229,9 @@ int main(int argc, char** argv) {
             << "buffer circular: " << server_options.frame_buffer_capacity << " frames\n"
             << "historico confirmado: " << server_options.applied_action_history_size
             << " acoes\n"
+            << "mock: Sub-Zero, olhando para "
+            << (server_options.mock_facing_right ? "direita" : "esquerda")
+            << '\n'
             << "salvamento de frames: "
             << (server_options.save_frames ? "habilitado (debug)" : "desabilitado")
             << '\n'

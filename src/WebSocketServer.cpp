@@ -655,6 +655,7 @@ void handle_websocket_connection(
     const std::atomic_bool& stop_requested
 ) {
     CircularFrameBuffer buffer(options.frame_buffer_capacity);
+    agent.reset_sequence();
     ActionHistory action_history(
         std::max<std::size_t>(64U, options.applied_action_history_size * 8U)
     );
@@ -682,9 +683,10 @@ void handle_websocket_connection(
                 const auto applied_actions = action_history.latest_applied(
                     options.applied_action_history_size
                 );
-                const std::vector<int> commands = agent.infer(
+                const MockAgentDecision mock_decision = agent.infer(
                     observation, applied_actions
                 );
+                const std::vector<int>& commands = mock_decision.commands;
                 const auto inference_end = Clock::now();
                 const double inference_ms = std::chrono::duration<double, std::milli>(
                     inference_end - inference_start
@@ -708,6 +710,10 @@ void handle_websocket_connection(
                     {"type", "action"},
                     {"action_mode", kActionMode},
                     {"commands", commands},
+                    {"mock_move", mock_decision.move_name},
+                    {"mock_step", mock_decision.step_index},
+                    {"mock_steps", mock_decision.step_count},
+                    {"mock_step_duration_ms", options.decision_interval.count()},
                     {"decision_id", current_decision_id},
                     {"frame_id", latest->frame_id},
                     {"frame_ids", frame_ids},
@@ -755,6 +761,9 @@ void handle_websocket_connection(
                               << " inference_ms=" << inference_ms
                               << " buffer=" << buffer.size()
                               << " dropped=" << buffer.dropped_total()
+                              << " move=\"" << mock_decision.move_name << '"'
+                              << " step=" << mock_decision.step_index << '/'
+                              << mock_decision.step_count
                               << " commands=" << nlohmann::json(commands).dump() << '\n';
                 }
             }
@@ -1004,7 +1013,10 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
 int WebSocketServer::run(const std::atomic_bool& stop_requested) {
     SocketHandle listening = create_listening_socket(options_);
     MetricsLogger metrics(options_.metrics_path);
-    MockAgent agent(options_.random_seed);
+    MockAgent agent(
+        options_.random_seed,
+        options_.mock_facing_right ? FighterFacing::right : FighterFacing::left
+    );
     std::uint64_t connection_id = 0;
 
     while (wait_for_client(listening.value, stop_requested)) {
@@ -1042,6 +1054,9 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                     {"observation_frames", options_.observation_frames},
                     {"applied_action_history_size",
                      options_.applied_action_history_size},
+                    {"mock_character", "Sub-Zero"},
+                    {"mock_facing",
+                     options_.mock_facing_right ? "right" : "left"},
                     {"save_frames", options_.save_frames},
                 });
                 continue;

@@ -2,8 +2,8 @@
 
 The current stage runs a persistent, low-latency WebSocket server. It receives
 JPEG frames continuously, decodes them into RGB images, retains only a bounded
-window of the newest frames, runs a mock agent at 20 decisions per second, and
-returns command vectors through the same connection.
+window of the newest frames, runs a temporal Sub-Zero mock agent at 20 decisions
+per second, and returns command-state vectors through the same connection.
 
 The mock is intentionally isolated behind `MockAgent`. A future BaseAI model can
 replace that class without changing the transport, buffering, metrics, or client
@@ -64,7 +64,11 @@ so the existing GameAgent JSON parser can continue reading it:
   "protocol_version": 2,
   "type": "action",
   "action_mode": "state",
-  "commands": [9, 3],
+  "commands": [7],
+  "mock_move": "Congelar",
+  "mock_step": 1,
+  "mock_steps": 5,
+  "mock_step_duration_ms": 50,
   "decision_id": 120,
   "frame_id": 417,
   "frame_ids": [410, 411, 412, 413, 414, 415, 416, 417],
@@ -112,7 +116,27 @@ whether the applied set matches the requested set, and keeps the newest confirme
 states in an in-memory action history. The agent receives this confirmed history
 alongside the decoded frame observation. No disk access is involved.
 
-The mock returns 3 to 10 distinct simultaneous commands:
+The mock chooses one of six Sub-Zero moves at random and completes its entire
+state sequence before choosing another move. At the default 50 ms decision
+interval, every row below is one WebSocket action. `[]` releases all controls;
+it is deliberately used between repeated button presses and between moves.
+
+With Sub-Zero facing right, the exact sequences are:
+
+| Move | WebSocket `commands` states |
+|---|---|
+| Congelar (`D, F, B`) | `[7] → [9] → [2] → [] → []` |
+| Clone de Gelo (`D, B, B`) | `[7] → [8] → [2] → [] → []` |
+| Chuva de Gelo — Frente (`D, F, B, Y`) | `[7] → [9] → [2] → [0] → [] → []` |
+| Chuva de Gelo — Perto (`D, B, F, Y`) | `[7] → [8] → [9] → [0] → [] → []` |
+| 3 Golpes (`Y, Y, D+B`) | `[0] → [] → [0] → [] → [7,2] → [] → []` |
+| 4 Golpes (`X, X, B+X, F+A`) | `[1] → [] → [1] → [] → [8,1] → [] → [9,3] → [] → []` |
+
+Here `B` in the final position of a special move means the B/low-punch button
+(`2`); `B` used as a direction means Back. A plus sign means simultaneous
+controls in one vector. Commas mean consecutive 50 ms states.
+
+The command mapping remains:
 
 | Value | Command |
 |---:|---|
@@ -174,6 +198,7 @@ sample filename to its frame ID and timestamps.
 | `GAMEAGENT_METRICS_PATH` | `metrics.jsonl` | JSONL metrics output |
 | `GAMEAGENT_CAPTURE_DIR` | `captures` | optional JPEG inspection output |
 | `GAMEAGENT_SAVE_FRAMES` | `0` | save only the first valid JPEG from each connection; zero keeps everything in memory |
+| `GAMEAGENT_SUBZERO_FACING` | `right` | maps Forward/Back for a character facing `right` or `left` |
 | `GAMEAGENT_API_TOKEN` | unset | Bearer or X-API-Key credential |
 | `GAMEAGENT_RANDOM_SEED` | random | deterministic mock seed |
 

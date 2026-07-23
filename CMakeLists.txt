@@ -123,4 +123,17 @@ if (BUILD_TESTING)
             NAME gameagent_action_history
             COMMAND test_gameagent_action_history
     )
+
+    add_executable(
+            test_gameagent_mock_agent
+            tests/test_mock_agent.cpp
+    )
+    target_link_libraries(
+            test_gameagent_mock_agent
+            PRIVATE GameAgentMockCore
+    )
+    add_test(
+            NAME gameagent_mock_agent
+            COMMAND test_gameagent_mock_agent
+    )
 endif()

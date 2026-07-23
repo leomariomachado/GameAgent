@@ -14,7 +14,11 @@ must remain pressed until the next valid action arrives.
   "decision_id": 123,
   "frame_id": 456,
   "frame_ids": [449, 450, 451, 452, 453, 454, 455, 456],
-  "commands": [9, 3],
+  "commands": [7],
+  "mock_move": "Congelar",
+  "mock_step": 1,
+  "mock_steps": 5,
+  "mock_step_duration_ms": 50,
   "timestamp_ms": 1784740000170,
   "control_interval_ms": 50,
   "failsafe_timeout_ms": 200,
@@ -34,6 +38,10 @@ must remain pressed until the next valid action arrives.
   }
 }
 ```
+
+The `mock_*` fields identify the current Sub-Zero test sequence and are
+diagnostic metadata. Clients may display or log them, but controller execution
+depends only on `commands`, `decision_id`, and the protocol-v2 state rules.
 
 `commands: [9, 3]` means that Right and A are held together. A later
 `commands: [9]` releases A while retaining Right. `commands: []` releases every

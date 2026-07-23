@@ -21,6 +21,7 @@ struct WebSocketServerOptions {
     std::chrono::milliseconds failsafe_timeout{200};
     std::optional<std::string> api_token;
     std::optional<std::uint32_t> random_seed;
+    bool mock_facing_right = true;
     std::filesystem::path metrics_path = "metrics.jsonl";
     std::filesystem::path capture_directory = "captures";
     bool save_frames = false;

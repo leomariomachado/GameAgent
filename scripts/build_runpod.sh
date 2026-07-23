@@ -31,6 +31,7 @@ cmake --build "${BUILD_DIR}" --target \
   test_gameagent_frame_buffer \
   test_gameagent_websocket_server \
   test_gameagent_action_history \
+  test_gameagent_mock_agent \
   -j"${BUILD_JOBS}"
 
 ctest --test-dir "${BUILD_DIR}" --output-on-failure
