@@ -32,6 +32,7 @@ add_library(
         src/HttpServer.cpp
         src/MockAgent.cpp
         src/MockProtocol.cpp
+        src/ResNet50FeatureExtractor.cu
         src/StreamProtocol.cpp
         src/WebSocketServer.cpp
 )
@@ -135,5 +136,25 @@ if (BUILD_TESTING)
     add_test(
             NAME gameagent_mock_agent
             COMMAND test_gameagent_mock_agent
+    )
+
+    add_executable(
+            test_gameagent_resnet50_feature_extractor
+            tests/test_resnet50_feature_extractor.cpp
+    )
+    target_link_libraries(
+            test_gameagent_resnet50_feature_extractor
+            PRIVATE GameAgentMockCore
+    )
+    add_test(
+            NAME gameagent_resnet50_feature_extractor
+            COMMAND test_gameagent_resnet50_feature_extractor
+    )
+    set_tests_properties(
+            gameagent_resnet50_feature_extractor
+            PROPERTIES
+            SKIP_RETURN_CODE 77
+            ENVIRONMENT
+            "GAMEAGENT_FEATURE_LIMIT=2;GAMEAGENT_FEATURE_OUTPUT_DIR=/tmp/gameagent_resnet50_ctest_features"
     )
 endif()

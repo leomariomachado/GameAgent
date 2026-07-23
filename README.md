@@ -9,6 +9,60 @@ The mock is intentionally isolated behind `MockAgent`. A future BaseAI model can
 replace that class without changing the transport, buffering, metrics, or client
 protocol.
 
+## Frozen ResNet50 visual features
+
+`ResNet50FeatureExtractor` reconstructs the validated ImageNet-1000 ResNet50 in
+evaluation mode, loads all 320 model tensors from `resnet50_best.ckpt`, and
+verifies the FP32 device copies exactly. The wrapper does not construct an
+optimizer or GradScaler and never executes backward; the current underlying
+BaseAI ResNet50 allocation is reused unchanged.
+
+Each RGB frame is bilinearly resized to 224x224, converted to CHW `[0,1]`, and
+normalized with the same ImageNet mean and standard deviation used during
+training. The extractor returns the 2048 values after global average pooling
+and before the ImageNet classifier:
+
+```text
+RGB frame
+→ resize 224x224
+→ ImageNet normalization
+→ frozen ResNet50 backbone
+→ global average pooling
+→ 2048-dimensional FP16 device vector
+```
+
+`extract_device()` is the zero-copy interface intended for the future GPU
+temporal model. `extract()` downloads the same vector as FP32 for validation
+and the current GameAgent prototype.
+
+To validate the checkpoint against every JPEG recorded by debug mode and
+materialize LSTM-ready feature files:
+
+```bash
+cd /tmp/GameAgent
+
+GAMEAGENT_RESNET50_CHECKPOINT=/workspace/resnet50_best.ckpt \
+GAMEAGENT_CAPTURE_ROOT=/workspace/gameagent/captures \
+GAMEAGENT_FEATURE_OUTPUT_DIR=/workspace/gameagent/resnet50_features \
+bash scripts/run_resnet50_feature_test.sh
+```
+
+The command creates a timestamped output directory containing:
+
+```text
+features.jsonl
+summary.json
+feature_000000.f32
+feature_000001.f32
+...
+```
+
+Every `.f32` file contains exactly 2048 native float32 values. The JSONL
+manifest preserves `sequence_id`, `frame_id`, client/server timestamps, source
+image path, feature path, shape, inference time and numerical statistics.
+Records are ordered by the original client timestamp so later temporal windows
+can be formed without relying on lexicographic JPEG filenames.
+
 ## Endpoints
 
 - `GET /health`: JSON health check.
