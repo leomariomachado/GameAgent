@@ -89,6 +89,52 @@ int main() {
             "left-facing simultaneous directions were not mirrored"
         );
 
+        const auto curriculum = gameagent::make_sub_zero_curriculum(
+            gameagent::FighterFacing::right
+        );
+        require(curriculum.size() == 13,
+                "Sub-Zero curriculum must contain 6 moves, 2 plans and 5 explorations");
+        const auto& freeze_combo = find_move(
+            curriculum, "Congelar + Corrida + 3 Golpes"
+        );
+        require(
+            freeze_combo.conditional_freeze_follow_up &&
+                freeze_combo.curriculum_weight == 25.0f &&
+                freeze_combo.states[7] == std::vector<int>({5, 9}) &&
+                freeze_combo.states[15] == std::vector<int>({7, 2}),
+            "conditional freeze/approach/combo plan is incorrect"
+        );
+        const auto& exploration = find_move(
+            curriculum, "Explorar: bloquear e recuar"
+        );
+        require(
+            exploration.action_source == "random_exploration" &&
+                exploration.curriculum_weight == 4.0f,
+            "controlled exploration curriculum is incorrect"
+        );
+
+        base::data::image::Image neutral_image(32, 24, 3);
+        std::fill(
+            neutral_image.bytes().begin(), neutral_image.bytes().end(), 0U
+        );
+        base::data::image::Image frozen_image = neutral_image;
+        for (int y = 4; y < 20; ++y) {
+            for (int x = 18; x < 30; ++x) {
+                frozen_image.at(y, x, 0) = 40;
+                frozen_image.at(y, x, 1) = 170;
+                frozen_image.at(y, x, 2) = 230;
+            }
+        }
+        require(
+            gameagent::sub_zero_freeze_visual_score(
+                frozen_image, gameagent::FighterFacing::right
+            ) >
+                gameagent::sub_zero_freeze_visual_score(
+                    neutral_image, gameagent::FighterFacing::right
+                ),
+            "freeze visual detector did not react to opponent-side ice colors"
+        );
+
         auto frame = std::make_shared<gameagent::BufferedFrame>();
         frame->frame_id = 1;
         const std::vector<std::shared_ptr<const gameagent::BufferedFrame>> observation{
@@ -98,7 +144,7 @@ int main() {
         gameagent::MockAgent agent(12345U, gameagent::FighterFacing::right);
 
         gameagent::MockAgentDecision decision = agent.infer(observation, history);
-        const auto& selected = find_move(right_facing, decision.move_name);
+        const auto& selected = find_move(curriculum, decision.move_name);
         for (std::size_t step = 0; step < selected.states.size(); ++step) {
             if (step != 0) {
                 decision = agent.infer(observation, history);

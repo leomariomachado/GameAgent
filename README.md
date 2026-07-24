@@ -63,6 +63,98 @@ image path, feature path, shape, inference time and numerical statistics.
 Records are ordered by the original client timestamp so later temporal windows
 can be formed without relying on lexicographic JPEG filenames.
 
+## Temporal LSTM prototype
+
+GameAgent now contains an inference-only GPU temporal path that can be enabled
+without changing the WebSocket protocol:
+
+```text
+new decoded frame
+→ frozen ResNet50 once
+→ cache FP16[2048] on the GPU
+→ project 2048 → 256
+→ concatenate:
+   - 10-value client-confirmed controller state
+   - acknowledgement-known flag
+   - normalized age of that state
+→ LSTM hidden size 256 over the newest 8 cached steps
+→ temporal hidden state for the future action head
+```
+
+The ResNet50 is not repeated for the complete window on every decision. Each
+new frame is embedded once and the bounded GPU ring retains only the newest
+features. The controller input comes from `action_ack`, so the temporal model
+sees what the client actually applied rather than assuming every requested
+state succeeded.
+
+Without a temporal checkpoint, the LSTM uses deterministic initialization only.
+With a trained checkpoint, the student predicts in shadow mode while controller
+actions still come from the Sub-Zero teacher. The optional temporal metrics
+report the sequence, aligned frame/ACK, hidden-state norm, inference time,
+student prediction and errors. Student control can therefore be enabled later
+without changing transport or acknowledgement semantics. `infer_device()`
+already exposes the final FP32 hidden vector on the same CUDA stream; the
+current host copy exists only for tests and diagnostic metrics.
+
+## Sub-Zero curriculum and behavior cloning
+
+The teacher now samples a weighted curriculum:
+
+- 50% conditional plans: Freeze, observe, approach and complete a three- or
+  four-hit combo;
+- 30% known isolated Sub-Zero moves;
+- 20% bounded exploration containing no contradictory directions and explicit
+  release states.
+
+After Freeze, the teacher compares a conservative opponent-side ice-color score
+with the pre-move baseline. A clear miss branches to block/retreat; a confirmed
+or visually ambiguous result continues through approach and combo. Every
+decision records `curriculum_source`, `curriculum_phase`,
+`curriculum_branch`, `freeze_visual_score` and `freeze_visual_delta`, so
+ambiguous heuristic labels remain auditable.
+
+The first learner is behavior cloning, not reinforcement learning. It joins
+timestamped ResNet50 features with the latest client-confirmed controller state
+and learns the teacher's next complete 10-button state with
+`BCEWithLogitsLoss`. The trainable model is:
+
+```text
+8 x FP32[2048] visual features
+→ tanh visual projection (256)
++ 10 confirmed buttons + ACK-known + command age
+→ one-layer LSTM (hidden 256)
+→ 10-logit multi-label action head
+```
+
+The trainer uses AdamW, gradient clipping, session-level train/validation
+splits, positive-class balancing and checkpoint resume. It writes:
+
+```text
+/workspace/gameagent/checkpoints/
+├── subzero_temporal_latest.pt   # model + AdamW + epoch/step; resumable
+├── subzero_temporal_best.pt
+├── subzero_temporal_latest.gat  # compact C++/CUDA inference weights
+├── subzero_temporal_best.gat
+└── subzero_dataset_summary.json
+```
+
+The server loads `.gat` weights in student-shadow mode. The teacher still
+controls the client, while `student_shadow_commands`, probabilities and exact
+match are logged for safe evaluation.
+
+Run the standalone production-shape test:
+
+```bash
+cd /tmp/GameAgent
+
+GAMEAGENT_RESNET50_CHECKPOINT=/workspace/resnet50_best.ckpt \
+bash scripts/run_temporal_lstm_test.sh
+```
+
+It verifies the complete checkpoint, `512x448 → ResNet50 → LSTM`, use of the
+latest confirmed command, command sensitivity, an 8-step circular feature
+buffer and deterministic reset.
+
 ## Endpoints
 
 - `GET /health`: JSON health check.
@@ -141,7 +233,16 @@ so the existing GameAgent JSON parser can continue reading it:
     "acknowledgements_received": 119,
     "acknowledgements_rejected": 0,
     "applied_action_history_size": 8,
-    "last_applied_decision_id": 119
+    "last_applied_decision_id": 119,
+    "temporal_model_enabled": true,
+    "temporal_model_ready": true,
+    "temporal_model_errors": 0,
+    "temporal_lstm_ms": 1.32,
+    "temporal_hidden_l2": 3.04,
+    "temporal_sequence_size": 8,
+    "temporal_frame_id": 417,
+    "temporal_applied_decision_id": 119,
+    "temporal_applied_command_known": true
   }
 }
 ```
@@ -170,8 +271,9 @@ whether the applied set matches the requested set, and keeps the newest confirme
 states in an in-memory action history. The agent receives this confirmed history
 alongside the decoded frame observation. No disk access is involved.
 
-The mock chooses one of six Sub-Zero moves at random and completes its entire
-state sequence before choosing another move. At the default 50 ms decision
+The teacher samples the weighted Sub-Zero curriculum and completes the selected
+state sequence or conditional recovery branch before choosing another plan. At
+the default 50 ms decision
 interval, every row below is one WebSocket action. `[]` releases all controls;
 it is deliberately used between repeated button presses and between moves.
 
@@ -252,9 +354,17 @@ sample filename to its frame ID and timestamps.
 | `GAMEAGENT_METRICS_PATH` | `metrics.jsonl` | JSONL metrics output |
 | `GAMEAGENT_CAPTURE_DIR` | `captures` | optional JPEG inspection output |
 | `GAMEAGENT_SAVE_FRAMES` | `0` | save only the first valid JPEG from each connection; zero keeps everything in memory |
+| `GAMEAGENT_COLLECT_TRAINING_DATA` | `0` | explicitly save every accepted JPEG and aligned ACK metadata for offline training |
+| `GAMEAGENT_TRAINING_CAPTURE_DIR` | `/workspace/gameagent/training_captures` | full-session training capture root |
 | `GAMEAGENT_SUBZERO_FACING` | `right` | maps Forward/Back for a character facing `right` or `left` |
 | `GAMEAGENT_API_TOKEN` | unset | Bearer or X-API-Key credential |
 | `GAMEAGENT_RANDOM_SEED` | random | deterministic mock seed |
+| `GAMEAGENT_TEMPORAL_MODEL` | `0` | enable frozen ResNet50 plus GPU LSTM feature path |
+| `GAMEAGENT_RESNET50_CHECKPOINT` | `/workspace/resnet50_best.ckpt` | frozen ImageNet ResNet50 checkpoint |
+| `GAMEAGENT_TEMPORAL_CHECKPOINT` | unset | trained `.gat` policy loaded in student-shadow mode |
+| `GAMEAGENT_DEVICE_ID` | `0` | CUDA device used by ResNet50 and LSTM |
+| `GAMEAGENT_LSTM_PROJECTION_SIZE` | `256` | ResNet50 feature projection width |
+| `GAMEAGENT_LSTM_HIDDEN_SIZE` | `256` | temporal hidden-state width |
 
 `GAMEAGENT_OBSERVATION_FRAMES` cannot exceed the buffer capacity.
 
@@ -315,6 +425,53 @@ Normal production launch (no disk writes for frames):
 
 ```bash
 GAMEAGENT_SAVE_FRAMES=0 bash scripts/run_runpod_server.sh
+```
+
+Enable the validated temporal feature path while retaining mock actions:
+
+```bash
+GAMEAGENT_TEMPORAL_MODEL=1 \
+GAMEAGENT_RESNET50_CHECKPOINT=/workspace/resnet50_best.ckpt \
+GAMEAGENT_SAVE_FRAMES=0 \
+bash scripts/run_runpod_server.sh
+```
+
+Collect a complete curriculum session explicitly:
+
+```bash
+GAMEAGENT_TEMPORAL_MODEL=1 \
+GAMEAGENT_COLLECT_TRAINING_DATA=1 \
+GAMEAGENT_TRAINING_CAPTURE_DIR=/workspace/gameagent/training_captures \
+GAMEAGENT_SAVE_FRAMES=0 \
+bash scripts/run_runpod_server.sh
+```
+
+Normal gameplay keeps `GAMEAGENT_COLLECT_TRAINING_DATA=0`; full JPEG persistence
+is only active under this training flag.
+
+Convert a collected session to features and train/checkpoint the student:
+
+```bash
+GAMEAGENT_PRETRAIN_EPOCHS=30 \
+GAMEAGENT_PRETRAIN_BATCH_SIZE=64 \
+bash scripts/run_subzero_training_pipeline.sh
+```
+
+Resume for another 20 epochs:
+
+```bash
+GAMEAGENT_PRETRAIN_RESUME=1 \
+GAMEAGENT_PRETRAIN_EPOCHS=20 \
+bash scripts/run_subzero_pretraining.sh
+```
+
+Load the best trained student in safe shadow mode:
+
+```bash
+GAMEAGENT_TEMPORAL_MODEL=1 \
+GAMEAGENT_TEMPORAL_CHECKPOINT=/workspace/gameagent/checkpoints/subzero_temporal_best.gat \
+GAMEAGENT_SAVE_FRAMES=0 \
+bash scripts/run_runpod_server.sh
 ```
 
 Debug capture, saving only one sample JPEG per WebSocket connection:

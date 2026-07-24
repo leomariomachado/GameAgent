@@ -42,6 +42,26 @@ must remain pressed until the next valid action arrives.
 The `mock_*` fields identify the current Sub-Zero test sequence and are
 diagnostic metadata. Clients may display or log them, but controller execution
 depends only on `commands`, `decision_id`, and the protocol-v2 state rules.
+When enabled, `temporal_*` fields under `metrics` describe the server-side
+ResNet50/LSTM feature pipeline. They are optional diagnostics and require no
+client protocol change.
+
+The Sub-Zero teacher also reports optional curriculum metadata:
+
+```json
+{
+  "curriculum_source": "scripted_conditional",
+  "curriculum_phase": "approach",
+  "curriculum_branch": "freeze_confirmed_followup",
+  "freeze_visual_score": 0.071,
+  "freeze_visual_delta": 0.028
+}
+```
+
+When a trained temporal checkpoint is loaded, `metrics` may contain
+`student_shadow_commands`, `student_shadow_probabilities` and
+`student_shadow_exact_match`. These fields never control the client in shadow
+mode; the top-level `commands` remains authoritative.
 
 `commands: [9, 3]` means that Right and A are held together. A later
 `commands: [9]` releases A while retaining Right. `commands: []` releases every

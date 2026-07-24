@@ -4,6 +4,7 @@
 #include "FrameBuffer.h"
 #include "MockAgent.h"
 #include "StreamProtocol.h"
+#include "TemporalAgent.h"
 
 #include <json.hpp>
 #include <stb_image.h>
@@ -545,12 +546,19 @@ void save_frame_if_enabled(
     std::uint64_t connection_id,
     const FrameEnvelope& envelope,
     std::int64_t received_timestamp_ms,
-    bool& debug_frame_saved
+    bool& debug_frame_saved,
+    const std::optional<AppliedActionRecord>& latest_applied_action
 ) {
-    if (!options.save_frames || debug_frame_saved) {
+    const bool save_debug_frame =
+        options.save_frames && !debug_frame_saved;
+    if (!save_debug_frame && !options.collect_training_data) {
         return;
     }
-    const std::filesystem::path directory = options.capture_directory /
+    const std::filesystem::path& capture_root =
+        options.collect_training_data
+            ? options.training_capture_directory
+            : options.capture_directory;
+    const std::filesystem::path directory = capture_root /
         ("session_" + std::to_string(getpid())) /
         ("connection_" + std::to_string(connection_id));
     std::filesystem::create_directories(directory);
@@ -572,17 +580,43 @@ void save_frame_if_enabled(
     if (!metadata) {
         throw std::runtime_error("could not save frame metadata in: " + directory.string());
     }
-    metadata << nlohmann::json{
+    nlohmann::json metadata_record{
         {"frame_id", envelope.frame_id},
         {"client_timestamp_ms", envelope.timestamp_ms},
         {"received_timestamp_ms", received_timestamp_ms},
         {"jpeg_bytes", envelope.jpeg.size()},
         {"file", filename},
-    }.dump() << '\n';
+        {"capture_mode",
+         options.collect_training_data ? "training" : "debug"},
+        {"applied_command_known", latest_applied_action.has_value()},
+    };
+    if (latest_applied_action.has_value()) {
+        metadata_record["applied_decision_id"] =
+            latest_applied_action->decision_id;
+        metadata_record["applied_commands"] =
+            latest_applied_action->commands;
+        metadata_record["applied_timestamp_ms"] =
+            latest_applied_action->applied_timestamp_ms;
+        metadata_record["acknowledgement_received_timestamp_ms"] =
+            latest_applied_action
+                ->acknowledgement_received_timestamp_ms;
+    }
+    metadata << metadata_record.dump() << '\n';
     if (!metadata) {
         throw std::runtime_error("could not save frame metadata in: " + directory.string());
     }
-    debug_frame_saved = true;
+    if (save_debug_frame) {
+        debug_frame_saved = true;
+    }
+}
+
+std::optional<AppliedActionRecord> latest_applied_record(
+    const ActionHistory& action_history
+) {
+    const auto actions = action_history.latest_applied(1);
+    return actions.empty()
+        ? std::nullopt
+        : std::optional<AppliedActionRecord>(actions.back());
 }
 
 SocketHandle create_listening_socket(const WebSocketServerOptions& options) {
@@ -650,12 +684,16 @@ void handle_websocket_connection(
     SocketReader& reader,
     const WebSocketServerOptions& options,
     MockAgent& agent,
+    TemporalAgent* temporal_agent,
     MetricsLogger& metrics,
     std::uint64_t connection_id,
     const std::atomic_bool& stop_requested
 ) {
     CircularFrameBuffer buffer(options.frame_buffer_capacity);
     agent.reset_sequence();
+    if (temporal_agent != nullptr) {
+        temporal_agent->reset();
+    }
     ActionHistory action_history(
         std::max<std::size_t>(64U, options.applied_action_history_size * 8U)
     );
@@ -666,7 +704,38 @@ void handle_websocket_connection(
     std::atomic<std::uint64_t> acknowledgements_received{0};
     std::atomic<std::uint64_t> acknowledgements_rejected{0};
     std::atomic<std::uint64_t> client_message_errors{0};
+    std::atomic<std::uint64_t> temporal_model_errors{0};
     bool debug_frame_saved = false;
+
+    const auto observe_temporal = [&](const std::shared_ptr<const BufferedFrame>& frame) {
+        if (temporal_agent == nullptr) {
+            return;
+        }
+        try {
+            const auto latest = action_history.latest_applied(1);
+            const std::optional<AppliedActionRecord> latest_applied =
+                latest.empty()
+                    ? std::nullopt
+                    : std::optional<AppliedActionRecord>(latest.back());
+            const auto result = temporal_agent->observe(
+                *frame, latest_applied
+            );
+            metrics.write({
+                {"event", "temporal_observation"},
+                {"connection_id", connection_id},
+                {"frame_id", result.frame_id},
+                {"applied_decision_id", result.applied_decision_id},
+                {"applied_command_known", result.applied_command_known},
+                {"sequence_size", result.sequence_size},
+                {"enqueue_ms", result.enqueue_ms},
+            });
+        } catch (const std::exception& error) {
+            temporal_model_errors.fetch_add(1);
+            std::cerr << "[TEMPORAL] connection=" << connection_id
+                      << " frame=" << frame->frame_id
+                      << " observation failed: " << error.what() << '\n';
+        }
+    };
 
     std::jthread inference_thread([&](std::stop_token thread_stop) {
         std::uint64_t decision_id = 0;
@@ -683,6 +752,17 @@ void handle_websocket_connection(
                 const auto applied_actions = action_history.latest_applied(
                     options.applied_action_history_size
                 );
+                std::optional<TemporalAgentOutput> temporal_output;
+                if (temporal_agent != nullptr && temporal_agent->ready()) {
+                    try {
+                        temporal_output = temporal_agent->infer();
+                    } catch (const std::exception& error) {
+                        temporal_model_errors.fetch_add(1);
+                        std::cerr << "[TEMPORAL] connection=" << connection_id
+                                  << " inference failed: " << error.what()
+                                  << '\n';
+                    }
+                }
                 const MockAgentDecision mock_decision = agent.infer(
                     observation, applied_actions
                 );
@@ -713,6 +793,13 @@ void handle_websocket_connection(
                     {"mock_move", mock_decision.move_name},
                     {"mock_step", mock_decision.step_index},
                     {"mock_steps", mock_decision.step_count},
+                    {"curriculum_source", mock_decision.action_source},
+                    {"curriculum_phase", mock_decision.phase},
+                    {"curriculum_branch", mock_decision.branch},
+                    {"freeze_visual_score",
+                     mock_decision.freeze_visual_score},
+                    {"freeze_visual_delta",
+                     mock_decision.freeze_visual_delta},
                     {"mock_step_duration_ms", options.decision_interval.count()},
                     {"decision_id", current_decision_id},
                     {"frame_id", latest->frame_id},
@@ -734,8 +821,57 @@ void handle_websocket_connection(
                         {"applied_action_history_size", applied_actions.size()},
                         {"last_applied_decision_id",
                          action_history.last_applied_decision_id()},
+                        {"temporal_model_enabled", temporal_agent != nullptr},
+                        {"temporal_model_ready", temporal_output.has_value()},
+                        {"temporal_model_errors", temporal_model_errors.load()},
                     }},
                 };
+                if (temporal_output.has_value()) {
+                    auto& response_metrics = response["metrics"];
+                    response_metrics["temporal_lstm_ms"] =
+                        temporal_output->lstm.inference_ms;
+                    response_metrics["temporal_hidden_l2"] =
+                        temporal_output->hidden_l2;
+                    response_metrics["temporal_sequence_size"] =
+                        temporal_output->lstm.steps.size();
+                    response_metrics["temporal_frame_id"] =
+                        temporal_output->lstm.steps.back().frame_id;
+                    response_metrics["temporal_applied_decision_id"] =
+                        temporal_output->lstm.steps.back()
+                            .applied_decision_id;
+                    response_metrics["temporal_applied_command_known"] =
+                        temporal_output->lstm.steps.back()
+                            .applied_command_known;
+                    if (temporal_output->action_prediction.has_value()) {
+                        const auto& prediction =
+                            *temporal_output->action_prediction;
+                        std::array<bool, 10> expected_state{};
+                        std::array<bool, 10> predicted_state{};
+                        for (int command : commands) {
+                            if (command >= 0 && command < 10) {
+                                expected_state[
+                                    static_cast<std::size_t>(command)
+                                ] = true;
+                            }
+                        }
+                        for (int command : prediction.commands) {
+                            if (command >= 0 && command < 10) {
+                                predicted_state[
+                                    static_cast<std::size_t>(command)
+                                ] = true;
+                            }
+                        }
+                        response_metrics["student_shadow_enabled"] = true;
+                        response_metrics["student_shadow_commands"] =
+                            prediction.commands;
+                        response_metrics["student_shadow_probabilities"] =
+                            prediction.probabilities;
+                        response_metrics["student_shadow_exact_match"] =
+                            expected_state == predicted_state;
+                    } else {
+                        response_metrics["student_shadow_enabled"] = false;
+                    }
+                }
                 action_history.record_sent(
                     current_decision_id,
                     latest->frame_id,
@@ -761,9 +897,23 @@ void handle_websocket_connection(
                               << " inference_ms=" << inference_ms
                               << " buffer=" << buffer.size()
                               << " dropped=" << buffer.dropped_total()
+                              << " temporal_sequence="
+                              << (
+                                  temporal_output.has_value()
+                                      ? temporal_output->lstm.steps.size()
+                                      : 0U
+                              )
+                              << " temporal_lstm_ms="
+                              << (
+                                  temporal_output.has_value()
+                                      ? temporal_output->lstm.inference_ms
+                                      : 0.0
+                              )
                               << " move=\"" << mock_decision.move_name << '"'
                               << " step=" << mock_decision.step_index << '/'
                               << mock_decision.step_count
+                              << " phase=" << mock_decision.phase
+                              << " branch=" << mock_decision.branch
                               << " commands=" << nlohmann::json(commands).dump() << '\n';
                 }
             }
@@ -898,7 +1048,7 @@ void handle_websocket_connection(
                         envelope, options.max_jpeg_bytes, received_ms
                     );
                     const FramePushResult push_result =
-                        buffer.push(std::move(decoded));
+                        buffer.push(decoded);
                     if (push_result == FramePushResult::rejected_stale) {
                         writer.send_json({
                             {"protocol_version", kActionProtocolVersion},
@@ -906,12 +1056,14 @@ void handle_websocket_connection(
                             {"message", "stale or duplicate frame discarded"},
                         });
                     } else {
+                        observe_temporal(decoded);
                         save_frame_if_enabled(
                             options,
                             connection_id,
                             envelope,
                             received_ms,
-                            debug_frame_saved
+                            debug_frame_saved,
+                            latest_applied_record(action_history)
                         );
                     }
                     continue;
@@ -925,7 +1077,7 @@ void handle_websocket_connection(
                 auto decoded = decode_frame(
                     envelope, options.max_jpeg_bytes, received_ms
                 );
-                const FramePushResult push_result = buffer.push(std::move(decoded));
+                const FramePushResult push_result = buffer.push(decoded);
                 if (push_result == FramePushResult::rejected_stale) {
                     writer.send_json({
                         {"protocol_version", kActionProtocolVersion},
@@ -933,12 +1085,14 @@ void handle_websocket_connection(
                         {"message", "stale or duplicate frame discarded"},
                     });
                 } else {
+                    observe_temporal(decoded);
                     save_frame_if_enabled(
                         options,
                         connection_id,
                         envelope,
                         received_ms,
-                        debug_frame_saved
+                        debug_frame_saved,
+                        latest_applied_record(action_history)
                     );
                 }
             } catch (const std::exception& error) {
@@ -976,6 +1130,7 @@ void handle_websocket_connection(
         {"acknowledgements_received", acknowledgements_received.load()},
         {"acknowledgements_rejected", acknowledgements_rejected.load()},
         {"client_message_errors", client_message_errors.load()},
+        {"temporal_model_errors", temporal_model_errors.load()},
         {"last_applied_decision_id", action_history.last_applied_decision_id()},
     });
     std::cout << "[DISCONNECT] connection=" << connection_id
@@ -1000,12 +1155,27 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
         options_.capture_directory.empty()) {
         throw std::invalid_argument("invalid WebSocket server configuration");
     }
+    if (options_.collect_training_data &&
+        options_.training_capture_directory.empty()) {
+        throw std::invalid_argument(
+            "training capture directory cannot be empty"
+        );
+    }
     if (options_.observation_frames > options_.frame_buffer_capacity) {
         throw std::invalid_argument("observation frame count cannot exceed buffer capacity");
     }
     if (options_.failsafe_timeout < options_.decision_interval * 2) {
         throw std::invalid_argument(
             "failsafe timeout must be at least two decision intervals"
+        );
+    }
+    if (options_.temporal_model_enabled &&
+        (options_.resnet50_checkpoint.empty() ||
+         options_.temporal_visual_projection_size == 0 ||
+         options_.temporal_hidden_size == 0 ||
+         options_.temporal_device_id < 0)) {
+        throw std::invalid_argument(
+            "invalid temporal model configuration"
         );
     }
 }
@@ -1017,6 +1187,49 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
         options_.random_seed,
         options_.mock_facing_right ? FighterFacing::right : FighterFacing::left
     );
+    std::unique_ptr<TemporalAgent> temporal_agent;
+    if (options_.temporal_model_enabled) {
+        std::cout << "[TEMPORAL] loading frozen ResNet50 checkpoint "
+                  << options_.resnet50_checkpoint << '\n';
+        temporal_agent = std::make_unique<TemporalAgent>(
+            TemporalAgentConfig{
+                .resnet50_checkpoint = options_.resnet50_checkpoint,
+                .temporal_policy_checkpoint =
+                    options_.temporal_policy_checkpoint,
+                .sequence_capacity = options_.observation_frames,
+                .visual_projection_size =
+                    options_.temporal_visual_projection_size,
+                .hidden_size = options_.temporal_hidden_size,
+                .device_id = options_.temporal_device_id,
+                .initialization_seed =
+                    options_.random_seed.value_or(0x4c53544dU),
+                .verify_resnet50_checkpoint = true,
+            }
+        );
+        const auto& report = temporal_agent->checkpoint_report();
+        std::cout << "[TEMPORAL] ready checkpoint_epoch=" << report.epoch
+                  << " best_accuracy=" << report.best_accuracy
+                  << " tensors=" << report.tensor_count
+                  << " sequence=" << options_.observation_frames
+                  << " hidden=" << options_.temporal_hidden_size
+                  << " device=" << options_.temporal_device_id << '\n';
+        if (const auto& temporal_report =
+                temporal_agent->temporal_checkpoint_report();
+            temporal_report.has_value()) {
+            std::cout << "[TEMPORAL] policy checkpoint="
+                      << options_.temporal_policy_checkpoint
+                      << " epoch=" << temporal_report->epoch
+                      << " step=" << temporal_report->training_step
+                      << " best_val_loss="
+                      << temporal_report->best_validation_loss
+                      << " parameters="
+                      << temporal_report->parameter_count
+                      << " mode=student_shadow\n";
+        } else {
+            std::cout << "[TEMPORAL] no trained policy checkpoint; "
+                         "teacher-only mode\n";
+        }
+    }
     std::uint64_t connection_id = 0;
 
     while (wait_for_client(listening.value, stop_requested)) {
@@ -1058,6 +1271,19 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                     {"mock_facing",
                      options_.mock_facing_right ? "right" : "left"},
                     {"save_frames", options_.save_frames},
+                    {"collect_training_data",
+                     options_.collect_training_data},
+                    {"temporal_model_enabled",
+                     options_.temporal_model_enabled},
+                    {"temporal_model_ready",
+                     temporal_agent != nullptr},
+                    {"temporal_hidden_size",
+                     options_.temporal_hidden_size},
+                    {"student_shadow_enabled",
+                     temporal_agent != nullptr &&
+                         temporal_agent
+                             ->temporal_checkpoint_report()
+                             .has_value()},
                 });
                 continue;
             }
@@ -1079,6 +1305,7 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                 reader,
                 options_,
                 agent,
+                temporal_agent.get(),
                 metrics,
                 connection_id,
                 stop_requested

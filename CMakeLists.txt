@@ -34,6 +34,8 @@ add_library(
         src/MockProtocol.cpp
         src/ResNet50FeatureExtractor.cu
         src/StreamProtocol.cpp
+        src/TemporalAgent.cpp
+        src/TemporalLstm.cu
         src/WebSocketServer.cpp
 )
 target_include_directories(
@@ -156,5 +158,23 @@ if (BUILD_TESTING)
             SKIP_RETURN_CODE 77
             ENVIRONMENT
             "GAMEAGENT_FEATURE_LIMIT=2;GAMEAGENT_FEATURE_OUTPUT_DIR=/tmp/gameagent_resnet50_ctest_features"
+    )
+
+    add_executable(
+            test_gameagent_temporal_agent
+            tests/test_temporal_agent.cpp
+    )
+    target_link_libraries(
+            test_gameagent_temporal_agent
+            PRIVATE GameAgentMockCore
+    )
+    add_test(
+            NAME gameagent_temporal_agent
+            COMMAND test_gameagent_temporal_agent
+    )
+    set_tests_properties(
+            gameagent_temporal_agent
+            PROPERTIES
+            SKIP_RETURN_CODE 77
     )
 endif()

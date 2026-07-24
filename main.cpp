@@ -51,6 +51,16 @@ std::size_t parse_positive_size(std::string_view text, std::string_view name) {
     return static_cast<std::size_t>(value);
 }
 
+int parse_non_negative_int(std::string_view text, std::string_view name) {
+    const long value = std::stol(std::string(text));
+    if (value < 0 || value > 1024) {
+        throw std::invalid_argument(
+            std::string(name) + " must be between 0 and 1024"
+        );
+    }
+    return static_cast<int>(value);
+}
+
 bool parse_boolean(std::string value, std::string_view name) {
     for (char& character : value) {
         character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
@@ -94,6 +104,14 @@ void print_help(const char* executable) {
         << "  --metrics-path PATH     JSONL metrics path\n"
         << "  --capture-dir PATH      Optional frame capture directory\n"
         << "  --save-frames           Save one JPEG per connection for debugging\n"
+        << "  --collect-training-data Save every accepted frame for offline training\n"
+        << "  --training-capture-dir P Training JPEG/metadata directory\n"
+        << "  --temporal-model        Enable frozen ResNet50 + GPU LSTM features\n"
+        << "  --resnet50-checkpoint P ImageNet ResNet50 checkpoint path\n"
+        << "  --temporal-checkpoint P Trained LSTM/action-head checkpoint\n"
+        << "  --device ID             CUDA device used by ResNet50/LSTM (default: 0)\n"
+        << "  --lstm-projection N     Visual projection width (default: 256)\n"
+        << "  --lstm-hidden N         LSTM hidden width (default: 256)\n"
         << "  --subzero-facing SIDE   Direction Sub-Zero faces: right or left (default: right)\n"
         << "  --seed NUMBER           Deterministic random command seed\n"
         << "  --help                  Show this help\n";
@@ -132,6 +150,36 @@ int main(int argc, char** argv) {
         );
         server_options.save_frames = parse_boolean(
             environment_or("GAMEAGENT_SAVE_FRAMES", "0"), "frame saving flag"
+        );
+        server_options.collect_training_data = parse_boolean(
+            environment_or("GAMEAGENT_COLLECT_TRAINING_DATA", "0"),
+            "training data collection flag"
+        );
+        server_options.training_capture_directory = environment_or(
+            "GAMEAGENT_TRAINING_CAPTURE_DIR",
+            "/workspace/gameagent/training_captures"
+        );
+        server_options.temporal_model_enabled = parse_boolean(
+            environment_or("GAMEAGENT_TEMPORAL_MODEL", "0"),
+            "temporal model flag"
+        );
+        server_options.resnet50_checkpoint = environment_or(
+            "GAMEAGENT_RESNET50_CHECKPOINT",
+            "/workspace/resnet50_best.ckpt"
+        );
+        server_options.temporal_policy_checkpoint = environment_or(
+            "GAMEAGENT_TEMPORAL_CHECKPOINT", ""
+        );
+        server_options.temporal_device_id = parse_non_negative_int(
+            environment_or("GAMEAGENT_DEVICE_ID", "0"), "CUDA device"
+        );
+        server_options.temporal_visual_projection_size = parse_positive_size(
+            environment_or("GAMEAGENT_LSTM_PROJECTION_SIZE", "256"),
+            "LSTM projection size"
+        );
+        server_options.temporal_hidden_size = parse_positive_size(
+            environment_or("GAMEAGENT_LSTM_HIDDEN_SIZE", "256"),
+            "LSTM hidden size"
         );
         server_options.mock_facing_right = parse_facing_right(
             environment_or("GAMEAGENT_SUBZERO_FACING", "right")
@@ -187,6 +235,34 @@ int main(int argc, char** argv) {
                 server_options.capture_directory = require_value(argument);
             } else if (argument == "--save-frames") {
                 server_options.save_frames = true;
+            } else if (argument == "--collect-training-data") {
+                server_options.collect_training_data = true;
+            } else if (argument == "--training-capture-dir") {
+                server_options.training_capture_directory =
+                    require_value(argument);
+            } else if (argument == "--temporal-model") {
+                server_options.temporal_model_enabled = true;
+            } else if (argument == "--resnet50-checkpoint") {
+                server_options.resnet50_checkpoint =
+                    require_value(argument);
+            } else if (argument == "--temporal-checkpoint") {
+                server_options.temporal_policy_checkpoint =
+                    require_value(argument);
+            } else if (argument == "--device") {
+                server_options.temporal_device_id =
+                    parse_non_negative_int(
+                        require_value(argument), "CUDA device"
+                    );
+            } else if (argument == "--lstm-projection") {
+                server_options.temporal_visual_projection_size =
+                    parse_positive_size(
+                        require_value(argument), "LSTM projection size"
+                    );
+            } else if (argument == "--lstm-hidden") {
+                server_options.temporal_hidden_size =
+                    parse_positive_size(
+                        require_value(argument), "LSTM hidden size"
+                    );
             } else if (argument == "--subzero-facing") {
                 server_options.mock_facing_right = parse_facing_right(
                     require_value(argument)
@@ -232,8 +308,32 @@ int main(int argc, char** argv) {
             << "mock: Sub-Zero, olhando para "
             << (server_options.mock_facing_right ? "direita" : "esquerda")
             << '\n'
+            << "modelo temporal: "
+            << (
+                server_options.temporal_model_enabled
+                    ? "ResNet50 congelada + LSTM GPU (acoes ainda pelo mock)"
+                    : "desabilitado"
+            )
+            << '\n'
+            << "checkpoint ResNet50: "
+            << server_options.resnet50_checkpoint
+            << '\n'
+            << "checkpoint temporal: "
+            << (
+                server_options.temporal_policy_checkpoint.empty()
+                    ? "nao carregado (teacher-only)"
+                    : server_options.temporal_policy_checkpoint.string()
+            )
+            << '\n'
             << "salvamento de frames: "
             << (server_options.save_frames ? "habilitado (debug)" : "desabilitado")
+            << '\n'
+            << "coleta de treinamento: "
+            << (
+                server_options.collect_training_data
+                    ? server_options.training_capture_directory.string()
+                    : "desabilitada"
+            )
             << '\n'
             << "autenticacao: "
             << (server_options.api_token.has_value() ? "token habilitado" : "desabilitada")
