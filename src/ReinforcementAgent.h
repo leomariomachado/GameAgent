@@ -1,0 +1,114 @@
+#pragma once
+
+#include "MockAgent.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <span>
+#include <string>
+#include <vector>
+
+namespace gameagent {
+
+struct ReinforcementAgentConfig {
+    std::size_t input_size = 271;
+    std::size_t network_hidden_size = 128;
+    std::size_t replay_capacity = 20000;
+    std::size_t minimum_replay_size = 256;
+    std::size_t batch_size = 64;
+    std::size_t training_updates_per_transition = 1;
+    std::uint64_t target_update_interval = 500;
+    float gamma = 0.99f;
+    float learning_rate = 1.0e-4f;
+    float adam_beta1 = 0.9f;
+    float adam_beta2 = 0.999f;
+    float adam_epsilon = 1.0e-8f;
+    float gradient_clip = 5.0f;
+    float epsilon_start = 1.0f;
+    float epsilon_final = 0.05f;
+    std::uint64_t epsilon_decay_selections = 100000;
+    float scripted_exploration_probability = 0.50f;
+    std::uint32_t random_seed = 0x524c444eU;
+    FighterFacing facing = FighterFacing::right;
+    bool training_enabled = true;
+    bool resume = true;
+    bool save_replay = true;
+    std::filesystem::path checkpoint_path =
+        "/workspace/gameagent/rl_checkpoints/subzero_dqn_latest.garl";
+    std::filesystem::path best_checkpoint_path =
+        "/workspace/gameagent/rl_checkpoints/subzero_dqn_best.garl";
+};
+
+struct ReinforcementStepInput {
+    std::span<const float> state;
+    float reward = 0.0f;
+    bool action_allowed = false;
+    bool episode_started = false;
+    bool episode_ended = false;
+    bool terminal = false;
+    std::uint64_t episode_id = 0;
+    std::uint64_t frame_id = 0;
+    std::uint64_t decision_id = 0;
+};
+
+struct ReinforcementDecision {
+    std::vector<int> commands;
+    std::string option_name = "release";
+    std::string selection_source = "fight_gate";
+    std::size_t option_index = 0;
+    std::size_t option_step = 0;
+    std::size_t option_steps = 0;
+    float epsilon = 0.0f;
+    float selected_q = 0.0f;
+    float reward_consumed = 0.0f;
+    float episode_return = 0.0f;
+    float training_loss = 0.0f;
+    std::size_t replay_size = 0;
+    std::uint64_t training_updates = 0;
+    bool training_performed = false;
+    bool checkpoint_saved = false;
+};
+
+struct ReinforcementAgentStats {
+    std::uint64_t action_selections = 0;
+    std::uint64_t training_updates = 0;
+    std::uint64_t episodes_completed = 0;
+    std::size_t replay_size = 0;
+    float epsilon = 0.0f;
+    float last_training_loss = 0.0f;
+    float current_episode_return = 0.0f;
+    float best_episode_return = 0.0f;
+    bool checkpoint_loaded = false;
+};
+
+// Online semi-Markov Double DQN. Actions are controller "options": short
+// primitive holds and complete Sub-Zero sequences. A transition is closed at
+// the end of an option, so delayed damage is credited to the whole move rather
+// than to an arbitrary 50 ms controller state.
+class ReinforcementAgent {
+public:
+    explicit ReinforcementAgent(ReinforcementAgentConfig config);
+    ~ReinforcementAgent();
+
+    ReinforcementAgent(const ReinforcementAgent&) = delete;
+    ReinforcementAgent& operator=(const ReinforcementAgent&) = delete;
+    ReinforcementAgent(ReinforcementAgent&&) noexcept;
+    ReinforcementAgent& operator=(ReinforcementAgent&&) noexcept;
+
+    ReinforcementDecision step(const ReinforcementStepInput& input);
+    void reset_episode(bool save_checkpoint);
+    void save_checkpoint(const std::filesystem::path& path = {});
+    void load_checkpoint(const std::filesystem::path& path);
+
+    [[nodiscard]] ReinforcementAgentStats stats() const;
+    [[nodiscard]] std::vector<std::string> option_names() const;
+    [[nodiscard]] const ReinforcementAgentConfig& config() const;
+
+private:
+    struct Implementation;
+    std::unique_ptr<Implementation> implementation_;
+};
+
+}  // namespace gameagent

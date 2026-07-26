@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdlib>
 #include <filesystem>
@@ -89,6 +90,37 @@ bool parse_facing_right(std::string value) {
     );
 }
 
+bool parse_player_is_left(std::string value) {
+    for (char& character : value) {
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    }
+    if (value == "left" || value == "esquerda" || value == "p1") {
+        return true;
+    }
+    if (value == "right" || value == "direita" || value == "p2") {
+        return false;
+    }
+    throw std::invalid_argument(
+        "player side must be left/esquerda/P1 or right/direita/P2"
+    );
+}
+
+float parse_float_range(
+    std::string_view text,
+    std::string_view name,
+    float minimum,
+    float maximum
+) {
+    const float value = std::stof(std::string(text));
+    if (!std::isfinite(value) || value < minimum || value > maximum) {
+        throw std::invalid_argument(
+            std::string(name) + " must be between " +
+            std::to_string(minimum) + " and " + std::to_string(maximum)
+        );
+    }
+    return value;
+}
+
 void print_help(const char* executable) {
     std::cout
         << "Usage: " << executable << " [options]\n\n"
@@ -108,6 +140,11 @@ void print_help(const char* executable) {
         << "  --collect-training-data Save every accepted frame for offline training\n"
         << "  --training-capture-dir P Training JPEG/metadata directory\n"
         << "  --temporal-model        Enable frozen ResNet50 + GPU LSTM features\n"
+        << "  --reinforcement-learning Enable online semi-Markov Double DQN control\n"
+        << "  --rl-evaluation         Run RL without updating weights\n"
+        << "  --rl-checkpoint PATH    Latest/resumable RL checkpoint\n"
+        << "  --rl-no-resume          Start RL weights/replay from scratch\n"
+        << "  --player-side SIDE      Controlled HUD side: left/P1 or right/P2\n"
         << "  --resnet50-checkpoint P ImageNet ResNet50 checkpoint path\n"
         << "  --temporal-checkpoint P Trained LSTM/action-head checkpoint\n"
         << "  --device ID             CUDA device used by ResNet50/LSTM (default: 0)\n"
@@ -168,6 +205,21 @@ int main(int argc, char** argv) {
             environment_or("GAMEAGENT_TEMPORAL_MODEL", "0"),
             "temporal model flag"
         );
+        server_options.reinforcement_learning_enabled = parse_boolean(
+            environment_or("GAMEAGENT_REINFORCEMENT_LEARNING", "0"),
+            "reinforcement-learning flag"
+        );
+        server_options.reinforcement_training_enabled = parse_boolean(
+            environment_or("GAMEAGENT_RL_TRAINING", "1"),
+            "reinforcement-training flag"
+        );
+        server_options.reinforcement_resume = parse_boolean(
+            environment_or("GAMEAGENT_RL_RESUME", "1"),
+            "reinforcement-resume flag"
+        );
+        server_options.player_is_left = parse_player_is_left(
+            environment_or("GAMEAGENT_PLAYER_SIDE", "left")
+        );
         server_options.resnet50_checkpoint = environment_or(
             "GAMEAGENT_RESNET50_CHECKPOINT",
             "/workspace/resnet50_best.ckpt"
@@ -186,6 +238,59 @@ int main(int argc, char** argv) {
             environment_or("GAMEAGENT_LSTM_HIDDEN_SIZE", "256"),
             "LSTM hidden size"
         );
+        server_options.reinforcement_checkpoint = environment_or(
+            "GAMEAGENT_RL_CHECKPOINT",
+            "/workspace/gameagent/rl_checkpoints/subzero_dqn_latest.garl"
+        );
+        server_options.reinforcement_best_checkpoint = environment_or(
+            "GAMEAGENT_RL_BEST_CHECKPOINT",
+            "/workspace/gameagent/rl_checkpoints/subzero_dqn_best.garl"
+        );
+        server_options.reinforcement_network_hidden_size = parse_positive_size(
+            environment_or("GAMEAGENT_RL_HIDDEN_SIZE", "128"),
+            "RL hidden size"
+        );
+        server_options.reinforcement_replay_capacity = parse_positive_size(
+            environment_or("GAMEAGENT_RL_REPLAY_CAPACITY", "20000"),
+            "RL replay capacity"
+        );
+        server_options.reinforcement_minimum_replay_size = parse_positive_size(
+            environment_or("GAMEAGENT_RL_MIN_REPLAY_SIZE", "256"),
+            "RL minimum replay size"
+        );
+        server_options.reinforcement_batch_size = parse_positive_size(
+            environment_or("GAMEAGENT_RL_BATCH_SIZE", "64"),
+            "RL batch size"
+        );
+        server_options.reinforcement_target_update_interval = parse_positive_size(
+            environment_or("GAMEAGENT_RL_TARGET_UPDATE", "500"),
+            "RL target update interval"
+        );
+        server_options.reinforcement_epsilon_decay_selections = parse_positive_size(
+            environment_or("GAMEAGENT_RL_EPSILON_DECAY", "100000"),
+            "RL epsilon decay"
+        );
+        server_options.reinforcement_gamma = parse_float_range(
+            environment_or("GAMEAGENT_RL_GAMMA", "0.99"),
+            "RL gamma", 0.01f, 1.0f
+        );
+        server_options.reinforcement_learning_rate = parse_float_range(
+            environment_or("GAMEAGENT_RL_LEARNING_RATE", "0.0001"),
+            "RL learning rate", 1.0e-7f, 1.0f
+        );
+        server_options.reinforcement_epsilon_start = parse_float_range(
+            environment_or("GAMEAGENT_RL_EPSILON_START", "1.0"),
+            "RL epsilon start", 0.0f, 1.0f
+        );
+        server_options.reinforcement_epsilon_final = parse_float_range(
+            environment_or("GAMEAGENT_RL_EPSILON_FINAL", "0.05"),
+            "RL epsilon final", 0.0f, 1.0f
+        );
+        server_options.reinforcement_scripted_exploration_probability =
+            parse_float_range(
+                environment_or("GAMEAGENT_RL_SCRIPTED_EXPLORATION", "0.50"),
+                "RL scripted exploration probability", 0.0f, 1.0f
+            );
         server_options.mock_facing_right = parse_facing_right(
             environment_or("GAMEAGENT_SUBZERO_FACING", "right")
         );
@@ -253,6 +358,18 @@ int main(int argc, char** argv) {
                     require_value(argument);
             } else if (argument == "--temporal-model") {
                 server_options.temporal_model_enabled = true;
+            } else if (argument == "--reinforcement-learning") {
+                server_options.reinforcement_learning_enabled = true;
+            } else if (argument == "--rl-evaluation") {
+                server_options.reinforcement_training_enabled = false;
+            } else if (argument == "--rl-checkpoint") {
+                server_options.reinforcement_checkpoint = require_value(argument);
+            } else if (argument == "--rl-no-resume") {
+                server_options.reinforcement_resume = false;
+            } else if (argument == "--player-side") {
+                server_options.player_is_left = parse_player_is_left(
+                    require_value(argument)
+                );
             } else if (argument == "--resnet50-checkpoint") {
                 server_options.resnet50_checkpoint =
                     require_value(argument);
@@ -322,9 +439,21 @@ int main(int argc, char** argv) {
             << "modelo temporal: "
             << (
                 server_options.temporal_model_enabled
-                    ? "ResNet50 congelada + LSTM GPU (acoes ainda pelo mock)"
+                    ? "ResNet50 congelada + LSTM GPU"
                     : "desabilitado"
             )
+            << '\n'
+            << "agente de reforco: "
+            << (
+                server_options.reinforcement_learning_enabled
+                    ? (server_options.reinforcement_training_enabled
+                        ? "Double DQN online (treinamento)"
+                        : "Double DQN (avaliacao)")
+                    : "desabilitado"
+            )
+            << '\n'
+            << "lado controlado no HUD: "
+            << (server_options.player_is_left ? "esquerda/P1" : "direita/P2")
             << '\n'
             << "checkpoint ResNet50: "
             << server_options.resnet50_checkpoint

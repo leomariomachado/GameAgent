@@ -37,6 +37,8 @@ fi
   test_gameagent_mock_agent \
   test_gameagent_resnet50_feature_extractor \
   test_gameagent_temporal_agent \
+  test_gameagent_health_bar_detector \
+  test_gameagent_reinforcement_agent \
   -j"${BUILD_JOBS}"
 
 "${GAMEAGENT_CTEST_BIN}" --test-dir "${BUILD_DIR}" --output-on-failure

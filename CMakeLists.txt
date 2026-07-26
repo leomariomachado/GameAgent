@@ -29,9 +29,11 @@ add_library(
         GameAgentMockCore
         src/ActionHistory.cpp
         src/FrameBuffer.cpp
+        src/HealthBarDetector.cpp
         src/HttpServer.cpp
         src/MockAgent.cpp
         src/MockProtocol.cpp
+        src/ReinforcementAgent.cpp
         src/ResNet50FeatureExtractor.cu
         src/StreamProtocol.cpp
         src/TemporalAgent.cpp
@@ -176,5 +178,31 @@ if (BUILD_TESTING)
             gameagent_temporal_agent
             PROPERTIES
             SKIP_RETURN_CODE 77
+    )
+
+    add_executable(
+            test_gameagent_health_bar_detector
+            tests/test_health_bar_detector.cpp
+    )
+    target_link_libraries(
+            test_gameagent_health_bar_detector
+            PRIVATE GameAgentMockCore
+    )
+    add_test(
+            NAME gameagent_health_bar_detector
+            COMMAND test_gameagent_health_bar_detector
+    )
+
+    add_executable(
+            test_gameagent_reinforcement_agent
+            tests/test_reinforcement_agent.cpp
+    )
+    target_link_libraries(
+            test_gameagent_reinforcement_agent
+            PRIVATE GameAgentMockCore
+    )
+    add_test(
+            NAME gameagent_reinforcement_agent
+            COMMAND test_gameagent_reinforcement_agent
     )
 endif()

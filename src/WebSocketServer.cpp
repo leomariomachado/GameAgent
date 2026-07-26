@@ -2,7 +2,9 @@
 
 #include "ActionHistory.h"
 #include "FrameBuffer.h"
+#include "HealthBarDetector.h"
 #include "MockAgent.h"
+#include "ReinforcementAgent.h"
 #include "StreamProtocol.h"
 #include "TemporalAgent.h"
 
@@ -618,6 +620,31 @@ std::optional<AppliedActionRecord> latest_applied_record(
         : std::optional<AppliedActionRecord>(actions.back());
 }
 
+std::vector<float> make_reinforcement_state(
+    const TemporalAgentOutput& temporal,
+    const FightControlSnapshot& fight,
+    const std::optional<AppliedActionRecord>& latest_applied
+) {
+    std::vector<float> state;
+    state.reserve(temporal.lstm.hidden.size() + 15U);
+    state.insert(
+        state.end(), temporal.lstm.hidden.begin(), temporal.lstm.hidden.end()
+    );
+    state.push_back(std::clamp(fight.player_health, 0.0f, 1.0f));
+    state.push_back(std::clamp(fight.opponent_health, 0.0f, 1.0f));
+    state.push_back(std::clamp(
+        fight.player_health - fight.opponent_health, -1.0f, 1.0f
+    ));
+    state.push_back(std::clamp(fight.hud_confidence, 0.0f, 1.0f));
+    std::array<float, 10> commands{};
+    if (latest_applied.has_value()) {
+        commands = latest_applied->command_state;
+    }
+    state.insert(state.end(), commands.begin(), commands.end());
+    state.push_back(latest_applied.has_value() ? 1.0f : 0.0f);
+    return state;
+}
+
 SocketHandle create_listening_socket(const WebSocketServerOptions& options) {
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
@@ -684,12 +711,27 @@ void handle_websocket_connection(
     const WebSocketServerOptions& options,
     MockAgent& agent,
     TemporalAgent* temporal_agent,
+    ReinforcementAgent* reinforcement_agent,
     MetricsLogger& metrics,
     std::uint64_t connection_id,
     const std::atomic_bool& stop_requested
 ) {
     CircularFrameBuffer buffer(options.frame_buffer_capacity);
     agent.reset_sequence();
+    std::unique_ptr<FightStateTracker> fight_tracker;
+    if (reinforcement_agent != nullptr) {
+        fight_tracker = std::make_unique<FightStateTracker>(FightStateConfig{
+            .player_side = options.player_is_left
+                ? PlayerSide::left
+                : PlayerSide::right,
+            .maximum_action_frame_age_ms =
+                std::max<std::int64_t>(
+                    250,
+                    options.failsafe_timeout.count()
+                ),
+        });
+        reinforcement_agent->reset_episode(false);
+    }
     if (temporal_agent != nullptr) {
         temporal_agent->reset();
     }
@@ -704,6 +746,7 @@ void handle_websocket_connection(
     std::atomic<std::uint64_t> acknowledgements_rejected{0};
     std::atomic<std::uint64_t> client_message_errors{0};
     std::atomic<std::uint64_t> temporal_model_errors{0};
+    std::atomic<std::uint64_t> reinforcement_errors{0};
     std::atomic<std::uint64_t> temporal_frames_overwritten{0};
     std::atomic<std::uint64_t> temporal_frames_processed{0};
     std::atomic<std::uint64_t> persistence_frames_dropped{0};
@@ -847,12 +890,24 @@ void handle_websocket_connection(
                 const auto applied_actions = action_history.latest_applied(
                     options.applied_action_history_size
                 );
+                const auto latest_applied =
+                    latest_applied_record(action_history);
+                FightControlSnapshot fight;
+                if (fight_tracker != nullptr) {
+                    fight = fight_tracker->consume(decision_tick_ms);
+                    if (fight.episode_ended && temporal_agent != nullptr) {
+                        temporal_agent->reset();
+                    }
+                }
                 std::optional<TemporalAgentOutput> temporal_output;
-                if (temporal_agent != nullptr && temporal_agent->ready()) {
+                const bool temporal_control_allowed =
+                    reinforcement_agent == nullptr || fight.action_allowed;
+                if (temporal_agent != nullptr && temporal_control_allowed &&
+                    temporal_agent->ready()) {
                     try {
                         temporal_output =
                             temporal_agent->advance_and_infer(
-                                latest_applied_record(action_history),
+                                latest_applied,
                                 current_decision_id,
                                 decision_tick_ms
                             );
@@ -863,10 +918,46 @@ void handle_websocket_connection(
                                   << '\n';
                     }
                 }
-                const MockAgentDecision mock_decision = agent.infer(
-                    observation, applied_actions
-                );
-                const std::vector<int>& commands = mock_decision.commands;
+                MockAgentDecision mock_decision;
+                ReinforcementDecision reinforcement_decision;
+                std::vector<float> reinforcement_state;
+                std::vector<int> commands;
+                bool reinforcement_step_ok = true;
+                if (reinforcement_agent != nullptr) {
+                    if (temporal_output.has_value()) {
+                        reinforcement_state = make_reinforcement_state(
+                            *temporal_output, fight, latest_applied
+                        );
+                    }
+                    try {
+                        reinforcement_decision = reinforcement_agent->step({
+                            .state = reinforcement_state,
+                            .reward = fight.reward,
+                            .action_allowed =
+                                fight.action_allowed &&
+                                temporal_output.has_value(),
+                            .episode_started = fight.episode_started,
+                            .episode_ended = fight.episode_ended,
+                            .terminal = fight.terminal,
+                            .episode_id = fight.episode_id,
+                            .frame_id = fight.frame_id,
+                            .decision_id = current_decision_id,
+                        });
+                        commands = reinforcement_decision.commands;
+                    } catch (const std::exception& error) {
+                        reinforcement_step_ok = false;
+                        reinforcement_errors.fetch_add(1);
+                        commands.clear();
+                        std::cerr
+                            << "[RL] connection=" << connection_id
+                            << " decision=" << current_decision_id
+                            << " failed; controls released: "
+                            << error.what() << '\n';
+                    }
+                } else {
+                    mock_decision = agent.infer(observation, applied_actions);
+                    commands = mock_decision.commands;
+                }
                 const auto inference_end = Clock::now();
                 const std::int64_t now_ms = epoch_milliseconds();
                 const double inference_ms = std::chrono::duration<double, std::milli>(
@@ -935,6 +1026,61 @@ void handle_websocket_connection(
                         {"persistence_errors", persistence_errors.load()},
                     }},
                 };
+                if (reinforcement_agent != nullptr) {
+                    response["agent_mode"] = "reinforcement_learning";
+                    response["control_enabled"] =
+                        fight.action_allowed && temporal_output.has_value() &&
+                        reinforcement_step_ok;
+                    response["cancel_pending_sequence"] =
+                        !fight.action_allowed || !reinforcement_step_ok;
+                    response["fight_phase"] = fight_phase_name(fight.phase);
+                    response["episode_id"] = fight.episode_id;
+                    response["player_health"] = fight.player_health;
+                    response["opponent_health"] = fight.opponent_health;
+                    response["reward"] = fight.reward;
+                    response["rl_option"] =
+                        reinforcement_decision.option_name;
+                    response["rl_option_index"] =
+                        reinforcement_decision.option_index;
+                    response["rl_option_step"] =
+                        reinforcement_decision.option_step;
+                    response["rl_option_steps"] =
+                        reinforcement_decision.option_steps;
+                    response["rl_selection_source"] =
+                        reinforcement_decision.selection_source;
+                    auto& response_metrics = response["metrics"];
+                    response_metrics["hud_valid"] = fight.hud_valid;
+                    response_metrics["hud_confidence"] =
+                        fight.hud_confidence;
+                    response_metrics["damage_dealt"] =
+                        fight.damage_dealt;
+                    response_metrics["damage_taken"] =
+                        fight.damage_taken;
+                    response_metrics["fight_transition_reason"] =
+                        fight.transition_reason;
+                    response_metrics["rl_epsilon"] =
+                        reinforcement_decision.epsilon;
+                    response_metrics["rl_selected_q"] =
+                        reinforcement_decision.selected_q;
+                    response_metrics["rl_episode_return"] =
+                        reinforcement_decision.episode_return;
+                    response_metrics["rl_replay_size"] =
+                        reinforcement_decision.replay_size;
+                    response_metrics["rl_training_updates"] =
+                        reinforcement_decision.training_updates;
+                    response_metrics["rl_training_loss"] =
+                        reinforcement_decision.training_loss;
+                    response_metrics["rl_training_performed"] =
+                        reinforcement_decision.training_performed;
+                    response_metrics["rl_checkpoint_saved"] =
+                        reinforcement_decision.checkpoint_saved;
+                    response_metrics["rl_errors"] =
+                        reinforcement_errors.load();
+                } else {
+                    response["agent_mode"] = "subzero_mock_teacher";
+                    response["control_enabled"] = true;
+                    response["cancel_pending_sequence"] = false;
+                }
                 if (temporal_output.has_value()) {
                     auto& response_metrics = response["metrics"];
                     response_metrics["temporal_lstm_ms"] =
@@ -1023,13 +1169,35 @@ void handle_websocket_connection(
                                   temporal_output.has_value()
                                       ? temporal_output->lstm.inference_ms
                                       : 0.0
-                              )
-                              << " move=\"" << mock_decision.move_name << '"'
-                              << " step=" << mock_decision.step_index << '/'
-                              << mock_decision.step_count
-                              << " phase=" << mock_decision.phase
-                              << " branch=" << mock_decision.branch
-                              << " commands=" << nlohmann::json(commands).dump() << '\n';
+                              );
+                    if (reinforcement_agent != nullptr) {
+                        std::cout
+                            << " fight=" << fight_phase_name(fight.phase)
+                            << " hp=" << fight.player_health << '/'
+                            << fight.opponent_health
+                            << " reward=" << fight.reward
+                            << " return="
+                            << reinforcement_decision.episode_return
+                            << " epsilon=" << reinforcement_decision.epsilon
+                            << " replay=" << reinforcement_decision.replay_size
+                            << " updates="
+                            << reinforcement_decision.training_updates
+                            << " option=\""
+                            << reinforcement_decision.option_name << '"'
+                            << " step="
+                            << reinforcement_decision.option_step << '/'
+                            << reinforcement_decision.option_steps;
+                    } else {
+                        std::cout
+                            << " move=\"" << mock_decision.move_name << '"'
+                            << " step=" << mock_decision.step_index << '/'
+                            << mock_decision.step_count
+                            << " phase=" << mock_decision.phase
+                            << " branch=" << mock_decision.branch;
+                    }
+                    std::cout
+                        << " commands=" << nlohmann::json(commands).dump()
+                        << '\n';
                 }
             }
 
@@ -1043,6 +1211,7 @@ void handle_websocket_connection(
 
     std::vector<std::uint8_t> fragmented_payload;
     std::uint8_t fragmented_opcode = 0;
+    FightPhase last_logged_fight_phase = FightPhase::no_hud;
     const std::size_t maximum_payload = options.max_jpeg_bytes + kMaximumFragmentOverhead;
     const auto process_frame_envelope =
         [&](FrameEnvelope envelope, std::int64_t received_ms) {
@@ -1068,7 +1237,36 @@ void handle_websocket_connection(
                 });
                 return;
             }
-            enqueue_temporal(std::move(decoded));
+            bool temporal_frame_allowed = true;
+            if (fight_tracker != nullptr) {
+                const FightControlSnapshot fight =
+                    fight_tracker->observe(*decoded);
+                temporal_frame_allowed = fight.action_allowed;
+                if (fight.phase != last_logged_fight_phase ||
+                    fight.reward != 0.0f ||
+                    !fight.transition_reason.empty()) {
+                    metrics.write({
+                        {"event", "fight_state"},
+                        {"connection_id", connection_id},
+                        {"frame_id", fight.frame_id},
+                        {"episode_id", fight.episode_id},
+                        {"phase", fight_phase_name(fight.phase)},
+                        {"hud_valid", fight.hud_valid},
+                        {"action_allowed", fight.action_allowed},
+                        {"player_health", fight.player_health},
+                        {"opponent_health", fight.opponent_health},
+                        {"damage_dealt", fight.damage_dealt},
+                        {"damage_taken", fight.damage_taken},
+                        {"reward", fight.reward},
+                        {"hud_confidence", fight.hud_confidence},
+                        {"transition_reason", fight.transition_reason},
+                    });
+                    last_logged_fight_phase = fight.phase;
+                }
+            }
+            if (temporal_frame_allowed) {
+                enqueue_temporal(std::move(decoded));
+            }
             enqueue_persistence(
                 std::move(shared_envelope), received_ms
             );
@@ -1223,6 +1421,16 @@ void handle_websocket_connection(
     inference_thread.join();
     temporal_worker.join();
     persistence_worker.join();
+    std::optional<ReinforcementAgentStats> reinforcement_stats;
+    if (reinforcement_agent != nullptr) {
+        try {
+            reinforcement_agent->reset_episode(true);
+            reinforcement_stats = reinforcement_agent->stats();
+        } catch (const std::exception& error) {
+            std::cerr << "[RL] final checkpoint failed: "
+                      << error.what() << '\n';
+        }
+    }
     metrics.write({
         {"event", "disconnect"},
         {"connection_id", connection_id},
@@ -1240,6 +1448,14 @@ void handle_websocket_connection(
         {"persistence_frames_dropped", persistence_frames_dropped.load()},
         {"persistence_errors", persistence_errors.load()},
         {"last_applied_decision_id", action_history.last_applied_decision_id()},
+        {"rl_enabled", reinforcement_agent != nullptr},
+        {"rl_replay_size", reinforcement_stats.has_value()
+            ? reinforcement_stats->replay_size : 0U},
+        {"rl_training_updates", reinforcement_stats.has_value()
+            ? reinforcement_stats->training_updates : 0U},
+        {"rl_episodes_completed", reinforcement_stats.has_value()
+            ? reinforcement_stats->episodes_completed : 0U},
+        {"rl_errors", reinforcement_errors.load()},
     });
     std::cout << "[DISCONNECT] connection=" << connection_id
               << " received=" << received_frames.load()
@@ -1289,6 +1505,35 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
          options_.temporal_device_id < 0)) {
         throw std::invalid_argument(
             "invalid temporal model configuration"
+        );
+    }
+    if (options_.reinforcement_learning_enabled &&
+        (!options_.temporal_model_enabled ||
+         options_.temporal_policy_checkpoint.empty() ||
+         options_.reinforcement_checkpoint.empty() ||
+         options_.reinforcement_best_checkpoint.empty() ||
+         options_.reinforcement_network_hidden_size == 0 ||
+         options_.reinforcement_replay_capacity == 0 ||
+         options_.reinforcement_minimum_replay_size == 0 ||
+         options_.reinforcement_batch_size == 0 ||
+         options_.reinforcement_minimum_replay_size >
+            options_.reinforcement_replay_capacity ||
+         options_.reinforcement_batch_size >
+            options_.reinforcement_replay_capacity ||
+         options_.reinforcement_target_update_interval == 0 ||
+         options_.reinforcement_epsilon_decay_selections == 0 ||
+         options_.reinforcement_gamma <= 0.0f ||
+         options_.reinforcement_gamma > 1.0f ||
+         options_.reinforcement_learning_rate <= 0.0f ||
+         options_.reinforcement_epsilon_start < 0.0f ||
+         options_.reinforcement_epsilon_start > 1.0f ||
+         options_.reinforcement_epsilon_final < 0.0f ||
+         options_.reinforcement_epsilon_final >
+            options_.reinforcement_epsilon_start ||
+         options_.reinforcement_scripted_exploration_probability < 0.0f ||
+         options_.reinforcement_scripted_exploration_probability > 1.0f)) {
+        throw std::invalid_argument(
+            "RL requires a trained temporal checkpoint and valid DQN settings"
         );
     }
 }
@@ -1349,6 +1594,65 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                          "teacher-only mode\n";
         }
     }
+    std::unique_ptr<ReinforcementAgent> reinforcement_agent;
+    if (options_.reinforcement_learning_enabled) {
+        const std::size_t reinforcement_input_size =
+            options_.temporal_hidden_size + 15U;
+        reinforcement_agent = std::make_unique<ReinforcementAgent>(
+            ReinforcementAgentConfig{
+                .input_size = reinforcement_input_size,
+                .network_hidden_size =
+                    options_.reinforcement_network_hidden_size,
+                .replay_capacity =
+                    options_.reinforcement_replay_capacity,
+                .minimum_replay_size =
+                    options_.reinforcement_minimum_replay_size,
+                .batch_size = options_.reinforcement_batch_size,
+                .training_updates_per_transition = 1,
+                .target_update_interval =
+                    options_.reinforcement_target_update_interval,
+                .gamma = options_.reinforcement_gamma,
+                .learning_rate = options_.reinforcement_learning_rate,
+                .epsilon_start = options_.reinforcement_epsilon_start,
+                .epsilon_final = options_.reinforcement_epsilon_final,
+                .epsilon_decay_selections =
+                    options_.reinforcement_epsilon_decay_selections,
+                .scripted_exploration_probability =
+                    options_
+                        .reinforcement_scripted_exploration_probability,
+                .random_seed = options_.random_seed.value_or(0x524c444eU),
+                .facing = options_.mock_facing_right
+                    ? FighterFacing::right
+                    : FighterFacing::left,
+                .training_enabled =
+                    options_.reinforcement_training_enabled,
+                .resume = options_.reinforcement_resume,
+                .save_replay = true,
+                .checkpoint_path = options_.reinforcement_checkpoint,
+                .best_checkpoint_path =
+                    options_.reinforcement_best_checkpoint,
+            }
+        );
+        const auto stats = reinforcement_agent->stats();
+        std::cout
+            << "[RL] semi-Markov Double DQN ready input="
+            << reinforcement_input_size
+            << " hidden=" << options_.reinforcement_network_hidden_size
+            << " options=" << reinforcement_agent->option_names().size()
+            << " training="
+            << options_.reinforcement_training_enabled
+            << " resumed=" << stats.checkpoint_loaded
+            << " replay=" << stats.replay_size
+            << " updates=" << stats.training_updates
+            << " epsilon=" << stats.epsilon
+            << " player_side="
+            << (options_.player_is_left ? "left/P1" : "right/P2")
+            << '\n'
+            << "[RL] latest checkpoint: "
+            << options_.reinforcement_checkpoint << '\n'
+            << "[RL] best checkpoint: "
+            << options_.reinforcement_best_checkpoint << '\n';
+    }
     std::uint64_t connection_id = 0;
 
     while (wait_for_client(listening.value, stop_requested)) {
@@ -1405,6 +1709,25 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                          temporal_agent
                              ->temporal_checkpoint_report()
                              .has_value()},
+                    {"reinforcement_learning_enabled",
+                     reinforcement_agent != nullptr},
+                    {"reinforcement_training_enabled",
+                     options_.reinforcement_training_enabled},
+                    {"fight_gating_enabled",
+                     reinforcement_agent != nullptr},
+                    {"player_side",
+                     options_.player_is_left ? "left/P1" : "right/P2"},
+                    {"rl_checkpoint_loaded",
+                     reinforcement_agent != nullptr &&
+                        reinforcement_agent->stats().checkpoint_loaded},
+                    {"rl_replay_size",
+                     reinforcement_agent != nullptr
+                        ? reinforcement_agent->stats().replay_size
+                        : 0U},
+                    {"rl_training_updates",
+                     reinforcement_agent != nullptr
+                        ? reinforcement_agent->stats().training_updates
+                        : 0U},
                 });
                 continue;
             }
@@ -1427,6 +1750,7 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                 options_,
                 agent,
                 temporal_agent.get(),
+                reinforcement_agent.get(),
                 metrics,
                 connection_id,
                 stop_requested

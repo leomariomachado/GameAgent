@@ -68,6 +68,38 @@ mode; the top-level `commands` remains authoritative.
 control. Repeating the same array is idempotent and must not generate extra key
 events.
 
+## Reinforcement-learning diagnostics and fight gate
+
+When reinforcement mode is enabled, an action may also contain:
+
+```json
+{
+  "agent_mode": "reinforcement_learning",
+  "control_enabled": true,
+  "cancel_pending_sequence": false,
+  "fight_phase": "active_fight",
+  "episode_id": 12,
+  "player_health": 0.82,
+  "opponent_health": 0.61,
+  "reward": 0.31,
+  "rl_option": "Congelar + Corrida + 3 Golpes",
+  "rl_option_index": 17,
+  "rl_option_step": 4,
+  "rl_option_steps": 18,
+  "rl_selection_source": "epsilon_scripted"
+}
+```
+
+These fields are optional metadata; `commands` remains authoritative. When
+`control_enabled` is false, the server sends `commands: []` and
+`cancel_pending_sequence: true`. A compliant state-mode client already releases
+all controls when applying that empty state and must still send its normal
+`action_ack`. No new client-side macro queue is introduced.
+
+Possible `fight_phase` values are `no_hud`, `acquiring`, `round_intro`,
+`active_fight` and `round_end`. Only `active_fight` can carry non-empty RL
+commands. The client must not try to override this gate locally.
+
 ## Client state transition
 
 For every action with a `decision_id` greater than the last applied ID:

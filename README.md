@@ -2,12 +2,13 @@
 
 The current stage runs a persistent, low-latency WebSocket server. It receives
 JPEG frames continuously, decodes them into RGB images, retains only a bounded
-window of the newest frames, runs a temporal Sub-Zero mock agent at 20 decisions
-per second, and returns command-state vectors through the same connection.
+window of the newest frames, and returns command-state vectors through the same
+connection. The original Sub-Zero teacher remains available, while an optional
+online reinforcement learner can now control active fight frames.
 
-The mock is intentionally isolated behind `MockAgent`. A future BaseAI model can
-replace that class without changing the transport, buffering, metrics, or client
-protocol.
+The mock remains isolated behind `MockAgent`; enabling reinforcement learning
+does not change transport, buffering, acknowledgement, or client controller
+semantics.
 
 ## Frozen ResNet50 visual features
 
@@ -155,6 +156,106 @@ loadable, while training resume requires a version-2 `.pt`. It writes:
 The server loads `.gat` weights in student-shadow mode. The teacher still
 controls the client, while the student's active probability, commands,
 probabilities and exact match are logged for safe evaluation.
+
+## Online reinforcement learning
+
+Reinforcement mode promotes the frozen ResNet50/LSTM encoder from shadow
+diagnostics to the state encoder for a semi-Markov Double DQN. It adds the
+controlled and opponent health fractions, health advantage, HUD confidence,
+the latest client-confirmed 10-button state and ACK-known flag to the 256-value
+LSTM hidden state.
+
+The DQN chooses among 28 high-level options:
+
+- bounded primitive holds such as move, block, jump, punch and kick;
+- known Sub-Zero specials and combos;
+- Freeze/approach/combo plans;
+- running, jumping and crouching variations.
+
+An option emits one complete protocol-v2 controller state every 50 ms. Its
+discounted reward is accumulated until the option ends, and replay stores its
+actual duration. Double-DQN targets therefore use `gamma^duration`, assigning
+delayed game damage to the complete move instead of an arbitrary controller
+tick.
+
+Exploration is hierarchical. Epsilon first decides exploration versus DQN
+exploitation. During exploration, `GAMEAGENT_RL_SCRIPTED_EXPLORATION` chooses
+between a valid character-specific sequence and a bounded primitive action.
+The default is a 50/50 split. Epsilon decays from 1.0 to 0.05 over 100,000 option
+selections.
+
+### Fight gate and reward
+
+A deterministic detector measures the two health bars in their normalized HUD
+regions. It distinguishes these phases:
+
+```text
+no_hud -> acquiring -> round_intro -> active_fight -> round_end
+```
+
+Only `active_fight` frames are sent through ResNet50/LSTM and allowed to produce
+non-empty commands. Menus, stale frames, save-state loads, health refills,
+round intros and round ends emit the empty controller state. Health increases
+close the old episode and never count as healing reward.
+
+During active play:
+
+```text
+reward = 10 * (damage_dealt - 1.10 * damage_taken)
+round win  = +5
+round loss = -5
+```
+
+Damage and episode flags accumulate until the 20 Hz decision loop consumes
+them, so one camera frame cannot be counted twice. Terminal bonuses are emitted
+once. `action_ack` remains the source of truth for commands actually applied.
+
+### Checkpoints and resume
+
+RL checkpoints include online and target networks, Adam moments, counters,
+epsilon progress and replay memory. They are written atomically at round end
+and connection shutdown:
+
+```text
+/workspace/gameagent/rl_checkpoints/
+├── subzero_dqn_latest.garl
+└── subzero_dqn_best.garl
+```
+
+The full agent requires both pretrained encoders:
+
+```text
+/workspace/resnet50_best.ckpt
+/workspace/gameagent/checkpoints_v2/subzero_temporal_latest.gat
+```
+
+Start or resume online training:
+
+```bash
+cd /tmp/GameAgent
+
+export GAMEAGENT_API_TOKEN="$(< /workspace/gameagent/api_token)"
+GAMEAGENT_RL_RESUME=1 bash scripts/run_subzero_rl.sh
+```
+
+Start from fresh DQN/replay weights while preserving the previous run by using
+new output paths:
+
+```bash
+GAMEAGENT_RL_RESUME=0 \
+GAMEAGENT_RL_CHECKPOINT=/workspace/gameagent/rl_checkpoints/fresh_latest.garl \
+GAMEAGENT_RL_BEST_CHECKPOINT=/workspace/gameagent/rl_checkpoints/fresh_best.garl \
+bash scripts/run_subzero_rl.sh
+```
+
+Evaluation uses the same checkpoint and disables updates:
+
+```bash
+GAMEAGENT_RL_TRAINING=0 bash scripts/run_subzero_rl.sh
+```
+
+Frame persistence remains off by default in RL mode. Health detection, visual
+features and decisions operate directly on the decoded in-memory frame.
 
 Run the standalone production-shape test:
 

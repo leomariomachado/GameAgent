@@ -39,6 +39,28 @@ export GAMEAGENT_TEMPORAL_CHECKPOINT="${GAMEAGENT_TEMPORAL_CHECKPOINT:-}"
 export GAMEAGENT_DEVICE_ID="${GAMEAGENT_DEVICE_ID:-0}"
 export GAMEAGENT_LSTM_PROJECTION_SIZE="${GAMEAGENT_LSTM_PROJECTION_SIZE:-256}"
 export GAMEAGENT_LSTM_HIDDEN_SIZE="${GAMEAGENT_LSTM_HIDDEN_SIZE:-256}"
+export GAMEAGENT_REINFORCEMENT_LEARNING="${GAMEAGENT_REINFORCEMENT_LEARNING:-0}"
+export GAMEAGENT_RL_TRAINING="${GAMEAGENT_RL_TRAINING:-1}"
+export GAMEAGENT_RL_RESUME="${GAMEAGENT_RL_RESUME:-1}"
+export GAMEAGENT_PLAYER_SIDE="${GAMEAGENT_PLAYER_SIDE:-left}"
+export GAMEAGENT_RL_CHECKPOINT="${GAMEAGENT_RL_CHECKPOINT:-/workspace/gameagent/rl_checkpoints/subzero_dqn_latest.garl}"
+export GAMEAGENT_RL_BEST_CHECKPOINT="${GAMEAGENT_RL_BEST_CHECKPOINT:-/workspace/gameagent/rl_checkpoints/subzero_dqn_best.garl}"
+export GAMEAGENT_RL_HIDDEN_SIZE="${GAMEAGENT_RL_HIDDEN_SIZE:-128}"
+export GAMEAGENT_RL_REPLAY_CAPACITY="${GAMEAGENT_RL_REPLAY_CAPACITY:-20000}"
+export GAMEAGENT_RL_MIN_REPLAY_SIZE="${GAMEAGENT_RL_MIN_REPLAY_SIZE:-256}"
+export GAMEAGENT_RL_BATCH_SIZE="${GAMEAGENT_RL_BATCH_SIZE:-64}"
+export GAMEAGENT_RL_TARGET_UPDATE="${GAMEAGENT_RL_TARGET_UPDATE:-500}"
+export GAMEAGENT_RL_GAMMA="${GAMEAGENT_RL_GAMMA:-0.99}"
+export GAMEAGENT_RL_LEARNING_RATE="${GAMEAGENT_RL_LEARNING_RATE:-0.0001}"
+export GAMEAGENT_RL_EPSILON_START="${GAMEAGENT_RL_EPSILON_START:-1.0}"
+export GAMEAGENT_RL_EPSILON_FINAL="${GAMEAGENT_RL_EPSILON_FINAL:-0.05}"
+export GAMEAGENT_RL_EPSILON_DECAY="${GAMEAGENT_RL_EPSILON_DECAY:-100000}"
+export GAMEAGENT_RL_SCRIPTED_EXPLORATION="${GAMEAGENT_RL_SCRIPTED_EXPLORATION:-0.50}"
+
+if [[ "${GAMEAGENT_REINFORCEMENT_LEARNING}" == "1" &&
+      -z "${GAMEAGENT_TEMPORAL_CHECKPOINT}" ]]; then
+  export GAMEAGENT_TEMPORAL_CHECKPOINT="/workspace/gameagent/checkpoints_v2/subzero_temporal_latest.gat"
+fi
 
 PUBLIC_POD_ID="${GAMEAGENT_PUBLIC_POD_ID:-${RUNPOD_POD_ID:-}}"
 if [[ -z "${PUBLIC_POD_ID}" ]]; then
@@ -120,6 +142,28 @@ if [[ "${GAMEAGENT_TEMPORAL_MODEL}" == "1" ]]; then
   fi
 else
   echo "Temporal features: disabled (set GAMEAGENT_TEMPORAL_MODEL=1 to enable)"
+fi
+if [[ "${GAMEAGENT_REINFORCEMENT_LEARNING}" == "1" ]]; then
+  if [[ "${GAMEAGENT_TEMPORAL_MODEL}" != "1" ]]; then
+    echo "RL requires GAMEAGENT_TEMPORAL_MODEL=1." >&2
+    exit 1
+  fi
+  if [[ -z "${GAMEAGENT_TEMPORAL_CHECKPOINT}" ||
+        ! -f "${GAMEAGENT_TEMPORAL_CHECKPOINT}" ]]; then
+    echo "RL temporal checkpoint not found: ${GAMEAGENT_TEMPORAL_CHECKPOINT}" >&2
+    exit 1
+  fi
+  mkdir -p "$(dirname "${GAMEAGENT_RL_CHECKPOINT}")"
+  echo "Reinforcement control: semi-Markov Double DQN"
+  echo "RL mode: $([[ "${GAMEAGENT_RL_TRAINING}" == "1" ]] && echo training || echo evaluation)"
+  echo "Fight gate: health HUD, player ${GAMEAGENT_PLAYER_SIDE}"
+  echo "RL checkpoint: ${GAMEAGENT_RL_CHECKPOINT} (resume=${GAMEAGENT_RL_RESUME})"
+  echo "RL best checkpoint: ${GAMEAGENT_RL_BEST_CHECKPOINT}"
+  echo "RL replay=${GAMEAGENT_RL_REPLAY_CAPACITY}, warmup=${GAMEAGENT_RL_MIN_REPLAY_SIZE}, batch=${GAMEAGENT_RL_BATCH_SIZE}"
+  echo "RL epsilon=${GAMEAGENT_RL_EPSILON_START}->${GAMEAGENT_RL_EPSILON_FINAL} over ${GAMEAGENT_RL_EPSILON_DECAY} options"
+  echo "Exploration split: ${GAMEAGENT_RL_SCRIPTED_EXPLORATION} scripted, remainder primitive"
+else
+  echo "Reinforcement control: disabled (teacher/mock controls the client)"
 fi
 if [[ "${GAMEAGENT_SAVE_FRAMES}" == "1" ]]; then
   echo "Frame capture: one debug JPEG per connection"

@@ -331,6 +331,35 @@ executar os controles. Campos JSON adicionais não tornam uma ação inválida.
 
 ## 10. Mapeamento
 
+### Campos opcionais do agente de reforço
+
+O servidor pode acrescentar ao mesmo JSON:
+
+```json
+{
+  "agent_mode": "reinforcement_learning",
+  "control_enabled": false,
+  "cancel_pending_sequence": true,
+  "fight_phase": "round_intro",
+  "episode_id": 7,
+  "player_health": 1.0,
+  "opponent_health": 1.0,
+  "reward": 0.0,
+  "rl_option": "release"
+}
+```
+
+Esses campos não mudam o protocolo de controle. O vetor `commands` continua
+sendo a única fonte autoritativa para as teclas. Quando
+`control_enabled=false`, o servidor enviará `commands: []`; o cliente deve
+liberar imediatamente todas as teclas, cancelar qualquer estado local pendente
+e enviar o `action_ack` vazio normalmente.
+
+O cliente não deve tentar tomar decisões durante load, menu, introdução ou fim
+de round. Essa filtragem é feita pelo servidor, e `fight_phase` serve para log e
+interface. Valores possíveis: `no_hud`, `acquiring`, `round_intro`,
+`active_fight` e `round_end`.
+
 | Valor | Controle |
 |---:|---|
 | 0 | Y |
