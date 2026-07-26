@@ -5,6 +5,19 @@ GAMEAGENT_ROOT="${GAMEAGENT_ROOT:-/tmp/GameAgent}"
 GAMEAGENT_BUILD_DIR="${GAMEAGENT_BUILD_DIR:-${GAMEAGENT_ROOT}/buildrelease}"
 GAMEAGENT_BINARY="${GAMEAGENT_BINARY:-${GAMEAGENT_BUILD_DIR}/GameAgent}"
 
+read_pid1_environment_variable() {
+  local variable_name="$1"
+  local entry
+  [[ -r /proc/1/environ ]] || return 1
+  while IFS= read -r -d '' entry; do
+    if [[ "${entry}" == "${variable_name}="* ]]; then
+      printf '%s\n' "${entry#*=}"
+      return 0
+    fi
+  done < /proc/1/environ
+  return 1
+}
+
 export GAMEAGENT_HOST="${GAMEAGENT_HOST:-0.0.0.0}"
 export GAMEAGENT_PORT="${GAMEAGENT_PORT:-8080}"
 export GAMEAGENT_CAPTURE_DIR="${GAMEAGENT_CAPTURE_DIR:-/workspace/gameagent/captures}"
@@ -25,6 +38,25 @@ export GAMEAGENT_TEMPORAL_CHECKPOINT="${GAMEAGENT_TEMPORAL_CHECKPOINT:-}"
 export GAMEAGENT_DEVICE_ID="${GAMEAGENT_DEVICE_ID:-0}"
 export GAMEAGENT_LSTM_PROJECTION_SIZE="${GAMEAGENT_LSTM_PROJECTION_SIZE:-256}"
 export GAMEAGENT_LSTM_HIDDEN_SIZE="${GAMEAGENT_LSTM_HIDDEN_SIZE:-256}"
+
+PUBLIC_POD_ID="${GAMEAGENT_PUBLIC_POD_ID:-${RUNPOD_POD_ID:-}}"
+if [[ -z "${PUBLIC_POD_ID}" ]]; then
+  PUBLIC_POD_ID="$(
+    read_pid1_environment_variable RUNPOD_POD_ID || true
+  )"
+fi
+if [[ -n "${PUBLIC_POD_ID}" &&
+      ! "${PUBLIC_POD_ID}" =~ ^[[:alnum:]-]+$ ]]; then
+  echo "Invalid public RunPod pod ID: ${PUBLIC_POD_ID}" >&2
+  exit 1
+fi
+
+PUBLIC_WEBSOCKET_URL="${GAMEAGENT_PUBLIC_WEBSOCKET_URL:-}"
+PUBLIC_HEALTH_URL="${GAMEAGENT_PUBLIC_HEALTH_URL:-}"
+if [[ -n "${PUBLIC_POD_ID}" ]]; then
+  PUBLIC_WEBSOCKET_URL="${PUBLIC_WEBSOCKET_URL:-wss://${PUBLIC_POD_ID}-${GAMEAGENT_PORT}.proxy.runpod.net/ws}"
+  PUBLIC_HEALTH_URL="${PUBLIC_HEALTH_URL:-https://${PUBLIC_POD_ID}-${GAMEAGENT_PORT}.proxy.runpod.net/health}"
+fi
 
 if [[ ! -x "${GAMEAGENT_BINARY}" ]]; then
   echo "GameAgent executable not found: ${GAMEAGENT_BINARY}" >&2
@@ -51,7 +83,14 @@ fi
 mkdir -p "$(dirname "${GAMEAGENT_METRICS_PATH}")"
 
 echo "Starting GameAgent on ${GAMEAGENT_HOST}:${GAMEAGENT_PORT}"
-echo "WebSocket: ws://${GAMEAGENT_HOST}:${GAMEAGENT_PORT}/ws"
+echo "Bind WebSocket (internal): ws://${GAMEAGENT_HOST}:${GAMEAGENT_PORT}/ws"
+if [[ -n "${PUBLIC_WEBSOCKET_URL}" ]]; then
+  echo "Public WebSocket URL (copy into client): ${PUBLIC_WEBSOCKET_URL}"
+  echo "Public health URL: ${PUBLIC_HEALTH_URL}"
+else
+  echo "Public WebSocket URL: unavailable" >&2
+  echo "Set GAMEAGENT_PUBLIC_POD_ID to the ID shown by RunPod." >&2
+fi
 echo "Metrics: ${GAMEAGENT_METRICS_PATH}"
 echo "Circular buffer: ${GAMEAGENT_FRAME_BUFFER_CAPACITY} frames"
 echo "Observation: ${GAMEAGENT_OBSERVATION_FRAMES} frames"
@@ -89,10 +128,6 @@ if [[ "${GAMEAGENT_COLLECT_TRAINING_DATA}" == "1" ]]; then
   echo "Training capture: every accepted JPEG -> ${GAMEAGENT_TRAINING_CAPTURE_DIR}"
 else
   echo "Training capture: disabled"
-fi
-if [[ -n "${RUNPOD_POD_ID:-}" ]]; then
-  echo "Public health URL: https://${RUNPOD_POD_ID}-${GAMEAGENT_PORT}.proxy.runpod.net/health"
-  echo "Public WebSocket URL: wss://${RUNPOD_POD_ID}-${GAMEAGENT_PORT}.proxy.runpod.net/ws"
 fi
 
 cd "${GAMEAGENT_ROOT}"

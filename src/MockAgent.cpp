@@ -13,6 +13,7 @@ constexpr int kBLowPunch = 2;
 constexpr int kALowKick = 3;
 constexpr int kBlock = 4;
 constexpr int kRun = 5;
+constexpr int kUp = 6;
 constexpr int kDown = 7;
 constexpr int kLeft = 8;
 constexpr int kRight = 9;
@@ -192,20 +193,111 @@ std::vector<MockMoveDefinition> make_sub_zero_curriculum(
         },
     });
 
+    const std::vector<MockMoveDefinition> combat_variations{
+        {
+            .name = "Pulo para Frente + Chute Alto",
+            .states = {
+                {kUp, forward},
+                {kUp, forward},
+                {forward},
+                {forward, kXHighKick},
+                {forward, kXHighKick},
+                {},
+                {},
+            },
+            .phases = {
+                "jump", "jump", "airborne", "air_attack",
+                "air_attack", "release", "observe",
+            },
+            .action_source = "scripted_variation",
+            .curriculum_weight = 4.0f,
+        },
+        {
+            .name = "Uppercut Agachado",
+            .states = {
+                {kDown},
+                {kDown},
+                {kDown, kYHighPunch},
+                {kDown, kYHighPunch},
+                {},
+                {},
+            },
+            .phases = {
+                "crouch", "crouch", "uppercut",
+                "uppercut", "release", "observe",
+            },
+            .action_source = "scripted_variation",
+            .curriculum_weight = 3.0f,
+        },
+        {
+            .name = "Corrida + 3 Golpes",
+            .states = {
+                {kRun, forward},
+                {kRun, forward},
+                {kRun, forward},
+                {forward},
+                {},
+                {kYHighPunch},
+                {},
+                {kYHighPunch},
+                {},
+                {kDown, kBLowPunch},
+                {},
+                {},
+            },
+            .phases = {
+                "run", "run", "run", "approach", "release",
+                "combo", "release", "combo", "release",
+                "combo", "release", "observe",
+            },
+            .action_source = "scripted_variation",
+            .curriculum_weight = 4.0f,
+        },
+        {
+            .name = "Corrida + 4 Golpes",
+            .states = {
+                {kRun, forward},
+                {kRun, forward},
+                {kRun, forward},
+                {forward},
+                {},
+                {kXHighKick},
+                {},
+                {kXHighKick},
+                {},
+                {back, kXHighKick},
+                {},
+                {forward, kALowKick},
+                {},
+                {},
+            },
+            .phases = {
+                "run", "run", "run", "approach", "release",
+                "combo", "release", "combo", "release",
+                "combo", "release", "combo", "release", "observe",
+            },
+            .action_source = "scripted_variation",
+            .curriculum_weight = 4.0f,
+        },
+    };
+    moves.insert(
+        moves.end(), combat_variations.begin(), combat_variations.end()
+    );
+
     const std::vector<MockMoveDefinition> exploration{
         {
             .name = "Explorar: avançar e A",
             .states = {{forward}, {forward, kALowKick}, {}, {}},
             .phases = {"explore", "explore", "release", "observe"},
             .action_source = "random_exploration",
-            .curriculum_weight = 4.0f,
+            .curriculum_weight = 1.0f,
         },
         {
             .name = "Explorar: agachar e B",
             .states = {{kDown}, {kDown, kBLowPunch}, {}, {}},
             .phases = {"explore", "explore", "release", "observe"},
             .action_source = "random_exploration",
-            .curriculum_weight = 4.0f,
+            .curriculum_weight = 1.0f,
         },
         {
             .name = "Explorar: bloquear e recuar",
@@ -214,7 +306,7 @@ std::vector<MockMoveDefinition> make_sub_zero_curriculum(
                 "explore", "explore", "explore", "release", "observe"
             },
             .action_source = "random_exploration",
-            .curriculum_weight = 4.0f,
+            .curriculum_weight = 1.0f,
         },
         {
             .name = "Explorar: corrida curta",
@@ -223,14 +315,14 @@ std::vector<MockMoveDefinition> make_sub_zero_curriculum(
                 "explore", "explore", "explore", "release", "observe"
             },
             .action_source = "random_exploration",
-            .curriculum_weight = 4.0f,
+            .curriculum_weight = 1.0f,
         },
         {
             .name = "Explorar: X e liberar",
             .states = {{kXHighKick}, {}, {}, {}},
             .phases = {"explore", "release", "release", "observe"},
             .action_source = "random_exploration",
-            .curriculum_weight = 4.0f,
+            .curriculum_weight = 1.0f,
         },
     };
     moves.insert(moves.end(), exploration.begin(), exploration.end());

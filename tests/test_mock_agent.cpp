@@ -92,8 +92,11 @@ int main() {
         const auto curriculum = gameagent::make_sub_zero_curriculum(
             gameagent::FighterFacing::right
         );
-        require(curriculum.size() == 13,
-                "Sub-Zero curriculum must contain 6 moves, 2 plans and 5 explorations");
+        require(
+            curriculum.size() == 17,
+            "Sub-Zero curriculum must contain 6 moves, 2 conditional plans, "
+            "4 combat variations and 5 explorations"
+        );
         const auto& freeze_combo = find_move(
             curriculum, "Congelar + Corrida + 3 Golpes"
         );
@@ -104,13 +107,105 @@ int main() {
                 freeze_combo.states[15] == std::vector<int>({7, 2}),
             "conditional freeze/approach/combo plan is incorrect"
         );
+        const auto& jump_kick = find_move(
+            curriculum, "Pulo para Frente + Chute Alto"
+        );
+        require(
+            jump_kick.states ==
+                std::vector<std::vector<int>>{
+                    {6, 9}, {6, 9}, {9}, {9, 1}, {9, 1}, {}, {}
+                } &&
+                jump_kick.action_source == "scripted_variation" &&
+                jump_kick.curriculum_weight == 4.0f,
+            "forward jump/high kick variation is incorrect"
+        );
+        const auto& uppercut = find_move(curriculum, "Uppercut Agachado");
+        require(
+            uppercut.states ==
+                std::vector<std::vector<int>>{
+                    {7}, {7}, {7, 0}, {7, 0}, {}, {}
+                } &&
+                uppercut.curriculum_weight == 3.0f,
+            "crouching uppercut variation is incorrect"
+        );
+        const auto& running_combo = find_move(
+            curriculum, "Corrida + 4 Golpes"
+        );
+        require(
+            running_combo.states[0] == std::vector<int>({5, 9}) &&
+                running_combo.states[9] == std::vector<int>({8, 1}) &&
+                running_combo.states[11] == std::vector<int>({9, 3}),
+            "running four-hit combo variation is incorrect"
+        );
         const auto& exploration = find_move(
             curriculum, "Explorar: bloquear e recuar"
         );
         require(
             exploration.action_source == "random_exploration" &&
-                exploration.curriculum_weight == 4.0f,
+                exploration.curriculum_weight == 1.0f,
             "controlled exploration curriculum is incorrect"
+        );
+        float total_curriculum_weight = 0.0f;
+        for (const auto& move : curriculum) {
+            total_curriculum_weight += move.curriculum_weight;
+            require(!move.states.empty(), "curriculum move has no states");
+            require(
+                move.phases.size() == move.states.size(),
+                "curriculum move phase/state counts differ: " + move.name
+            );
+            for (const auto& state : move.states) {
+                require(
+                    std::find(state.begin(), state.end(), 6) == state.end() ||
+                        std::find(state.begin(), state.end(), 7) == state.end(),
+                    "curriculum state presses Up and Down together: " +
+                        move.name
+                );
+                require(
+                    std::find(state.begin(), state.end(), 8) == state.end() ||
+                        std::find(state.begin(), state.end(), 9) == state.end(),
+                    "curriculum state presses Left and Right together: " +
+                        move.name
+                );
+                for (std::size_t index = 0; index < state.size(); ++index) {
+                    require(
+                        state[index] >= 0 && state[index] <= 9,
+                        "curriculum state contains an invalid command: " +
+                            move.name
+                    );
+                    require(
+                        std::find(
+                            state.begin(),
+                            state.begin() +
+                                static_cast<std::ptrdiff_t>(index),
+                            state[index]
+                        ) ==
+                            state.begin() +
+                                static_cast<std::ptrdiff_t>(index),
+                        "curriculum state contains duplicate commands: " +
+                            move.name
+                    );
+                }
+            }
+        }
+        require(
+            total_curriculum_weight == 100.0f,
+            "Sub-Zero curriculum weights must add up to 100"
+        );
+
+        const auto left_curriculum = gameagent::make_sub_zero_curriculum(
+            gameagent::FighterFacing::left
+        );
+        require(
+            find_move(
+                left_curriculum, "Pulo para Frente + Chute Alto"
+            ).states[0] == std::vector<int>({6, 8}) &&
+                find_move(left_curriculum, "Corrida + 4 Golpes").states[0] ==
+                    std::vector<int>({5, 8}) &&
+                find_move(left_curriculum, "Corrida + 4 Golpes").states[9] ==
+                    std::vector<int>({9, 1}) &&
+                find_move(left_curriculum, "Corrida + 4 Golpes").states[11] ==
+                    std::vector<int>({8, 3}),
+            "new combat variations were not mirrored when facing left"
         );
 
         base::data::image::Image neutral_image(32, 24, 3);

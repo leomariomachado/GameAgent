@@ -103,8 +103,15 @@ The teacher now samples a weighted curriculum:
 - 50% conditional plans: Freeze, observe, approach and complete a three- or
   four-hit combo;
 - 30% known isolated Sub-Zero moves;
-- 20% bounded exploration containing no contradictory directions and explicit
+- 15% structured combat variations: forward jump/high kick, crouching
+  uppercut, and running approaches followed by three- or four-hit combos;
+- 5% bounded exploration containing no contradictory directions and explicit
   release states.
+
+The jump and running variations mirror Forward/Back automatically when the
+fighter changes side. Every movement and attack is represented by complete
+controller states at the 50 ms decision cadence, including explicit releases,
+so the existing protocol-v2 client requires no change.
 
 After Freeze, the teacher compares a conservative opponent-side ice-color score
 with the pre-move baseline. A clear miss branches to block/retreat; a confirmed
@@ -345,6 +352,9 @@ sample filename to its frame ID and timestamps.
 |---|---:|---|
 | `GAMEAGENT_HOST` | `0.0.0.0` | bind address |
 | `GAMEAGENT_PORT` | `8080` | server port |
+| `GAMEAGENT_PUBLIC_POD_ID` | detected from RunPod | optional pod ID override used to print the public proxy URL |
+| `GAMEAGENT_PUBLIC_WEBSOCKET_URL` | derived from pod ID | optional complete public WebSocket URL override |
+| `GAMEAGENT_PUBLIC_HEALTH_URL` | derived from pod ID | optional complete public health URL override |
 | `GAMEAGENT_FRAME_BUFFER_CAPACITY` | `32` | decoded frames retained |
 | `GAMEAGENT_OBSERVATION_FRAMES` | `8` | newest frames used by the agent |
 | `GAMEAGENT_ACTION_HISTORY_SIZE` | `8` | newest client-confirmed states given to the agent |
@@ -377,6 +387,11 @@ BaseAI is expected at `../BaseAI` locally. In the Pod, the helper expects
 cd /tmp/GameAgent
 bash scripts/build_runpod.sh
 ```
+
+On a fresh RunPod image, the build helper checks for CMake 3.28 or newer. If
+the system CMake is older, it installs a compatible CMake in
+`$HOME/.local/bin` through Python pip and consistently uses the matching
+`ctest`. Set `GAMEAGENT_CMAKE_BIN` to override that executable explicitly.
 
 The build runs the old batch-protocol compatibility tests plus the new binary
 envelope, RFC 6455 handshake, WebSocket framing, and circular-buffer tests.
