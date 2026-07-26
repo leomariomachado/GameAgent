@@ -201,7 +201,7 @@ close the old episode and never count as healing reward.
 During active play:
 
 ```text
-reward = 10 * (damage_dealt - 1.10 * damage_taken)
+reward = 15 * damage_dealt - 11 * damage_taken
 round win  = +5
 round loss = -5
 ```
@@ -256,6 +256,19 @@ GAMEAGENT_RL_TRAINING=0 bash scripts/run_subzero_rl.sh
 
 Frame persistence remains off by default in RL mode. Health detection, visual
 features and decisions operate directly on the decoded in-memory frame.
+
+The server prints one accumulated learning summary every five seconds without
+running an extra inference or synchronizing the GPU again:
+
+```text
+[RL_REWARD] episode=4 phase=active_fight reward=0.42 episode_return=1.87 damage_dealt=0.08 damage_taken=0.03 hp=0.71/0.54 epsilon=0.93 replay=418 updates=162 loss=0.021
+```
+
+Change only the reporting cadence, in milliseconds, with:
+
+```bash
+GAMEAGENT_RL_REWARD_LOG_INTERVAL_MS=3000 bash scripts/run_subzero_rl.sh
+```
 
 Run the standalone production-shape test:
 

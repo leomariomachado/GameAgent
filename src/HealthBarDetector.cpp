@@ -188,8 +188,8 @@ FightStateTracker::FightStateTracker(
         config_.health_increase_tolerance < 0.0f ||
         config_.damage_noise_tolerance < 0.0f ||
         config_.terminal_health_threshold < 0.0f ||
-        config_.damage_reward_scale <= 0.0f ||
-        config_.damage_taken_multiplier < 0.0f) {
+        config_.damage_dealt_reward_scale <= 0.0f ||
+        config_.damage_taken_penalty_scale < 0.0f) {
         throw std::invalid_argument("invalid fight-state tracker configuration");
     }
 }
@@ -316,9 +316,9 @@ FightControlSnapshot FightStateTracker::observe(const BufferedFrame& frame) {
         latest_.opponent_health = filtered_opponent_health_;
         latest_.damage_dealt = damage_dealt;
         latest_.damage_taken = damage_taken;
-        latest_.reward = config_.damage_reward_scale * (
-            damage_dealt - config_.damage_taken_multiplier * damage_taken
-        );
+        latest_.reward =
+            config_.damage_dealt_reward_scale * damage_dealt -
+            config_.damage_taken_penalty_scale * damage_taken;
         pending_reward_ += latest_.reward;
         pending_damage_dealt_ += damage_dealt;
         pending_damage_taken_ += damage_taken;

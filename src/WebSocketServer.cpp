@@ -875,6 +875,13 @@ void handle_websocket_connection(
     std::jthread inference_thread([&](std::stop_token thread_stop) {
         std::uint64_t decision_id = 0;
         auto next_decision = Clock::now() + options.decision_interval;
+        auto next_reward_log =
+            Clock::now() + options.reinforcement_reward_log_interval;
+        float reward_log_accumulator = 0.0f;
+        float damage_dealt_log_accumulator = 0.0f;
+        float damage_taken_log_accumulator = 0.0f;
+        std::uint64_t reward_log_decisions = 0;
+        std::uint64_t reward_log_active_decisions = 0;
         while (!thread_stop.stop_requested() && connected.load() && !stop_requested.load()) {
             std::this_thread::sleep_until(next_decision);
             if (thread_stop.stop_requested() || !connected.load() || stop_requested.load()) {
@@ -957,6 +964,51 @@ void handle_websocket_connection(
                 } else {
                     mock_decision = agent.infer(observation, applied_actions);
                     commands = mock_decision.commands;
+                }
+                if (reinforcement_agent != nullptr) {
+                    reward_log_accumulator += fight.reward;
+                    damage_dealt_log_accumulator += fight.damage_dealt;
+                    damage_taken_log_accumulator += fight.damage_taken;
+                    ++reward_log_decisions;
+                    reward_log_active_decisions +=
+                        fight.action_allowed ? 1U : 0U;
+                    const auto reward_log_now = Clock::now();
+                    if (reward_log_now >= next_reward_log) {
+                        const ReinforcementAgentStats stats =
+                            reinforcement_agent->stats();
+                        std::cout
+                            << "[RL_REWARD] connection=" << connection_id
+                            << " episode=" << fight.episode_id
+                            << " phase=" << fight_phase_name(fight.phase)
+                            << " interval_ms="
+                            << options.reinforcement_reward_log_interval.count()
+                            << " reward=" << reward_log_accumulator
+                            << " episode_return="
+                            << stats.current_episode_return
+                            << " damage_dealt="
+                            << damage_dealt_log_accumulator
+                            << " damage_taken="
+                            << damage_taken_log_accumulator
+                            << " hp=" << fight.player_health << '/'
+                            << fight.opponent_health
+                            << " active_ticks="
+                            << reward_log_active_decisions << '/'
+                            << reward_log_decisions
+                            << " epsilon=" << stats.epsilon
+                            << " replay=" << stats.replay_size
+                            << " updates=" << stats.training_updates
+                            << " loss=" << stats.last_training_loss
+                            << " option=\""
+                            << reinforcement_decision.option_name << '"'
+                            << std::endl;
+                        reward_log_accumulator = 0.0f;
+                        damage_dealt_log_accumulator = 0.0f;
+                        damage_taken_log_accumulator = 0.0f;
+                        reward_log_decisions = 0;
+                        reward_log_active_decisions = 0;
+                        next_reward_log = reward_log_now +
+                            options.reinforcement_reward_log_interval;
+                    }
                 }
                 const auto inference_end = Clock::now();
                 const std::int64_t now_ms = epoch_milliseconds();
@@ -1481,6 +1533,7 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
         options_.persistence_queue_capacity == 0 ||
         options_.max_jpeg_bytes == 0 ||
         options_.decision_interval.count() <= 0 || options_.failsafe_timeout.count() <= 0 ||
+        options_.reinforcement_reward_log_interval.count() <= 0 ||
         options_.capture_directory.empty()) {
         throw std::invalid_argument("invalid WebSocket server configuration");
     }
@@ -1713,6 +1766,8 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                      reinforcement_agent != nullptr},
                     {"reinforcement_training_enabled",
                      options_.reinforcement_training_enabled},
+                    {"reinforcement_reward_log_interval_ms",
+                     options_.reinforcement_reward_log_interval.count()},
                     {"fight_gating_enabled",
                      reinforcement_agent != nullptr},
                     {"player_side",

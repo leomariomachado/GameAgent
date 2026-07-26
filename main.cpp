@@ -143,6 +143,7 @@ void print_help(const char* executable) {
         << "  --reinforcement-learning Enable online semi-Markov Double DQN control\n"
         << "  --rl-evaluation         Run RL without updating weights\n"
         << "  --rl-checkpoint PATH    Latest/resumable RL checkpoint\n"
+        << "  --rl-reward-log-ms MS   Accumulated RL reward log interval (default: 5000)\n"
         << "  --rl-no-resume          Start RL weights/replay from scratch\n"
         << "  --player-side SIDE      Controlled HUD side: left/P1 or right/P2\n"
         << "  --resnet50-checkpoint P ImageNet ResNet50 checkpoint path\n"
@@ -217,6 +218,11 @@ int main(int argc, char** argv) {
             environment_or("GAMEAGENT_RL_RESUME", "1"),
             "reinforcement-resume flag"
         );
+        server_options.reinforcement_reward_log_interval =
+            std::chrono::milliseconds(parse_positive_size(
+                environment_or("GAMEAGENT_RL_REWARD_LOG_INTERVAL_MS", "5000"),
+                "RL reward log interval"
+            ));
         server_options.player_is_left = parse_player_is_left(
             environment_or("GAMEAGENT_PLAYER_SIDE", "left")
         );
@@ -364,6 +370,11 @@ int main(int argc, char** argv) {
                 server_options.reinforcement_training_enabled = false;
             } else if (argument == "--rl-checkpoint") {
                 server_options.reinforcement_checkpoint = require_value(argument);
+            } else if (argument == "--rl-reward-log-ms") {
+                server_options.reinforcement_reward_log_interval =
+                    std::chrono::milliseconds(parse_positive_size(
+                        require_value(argument), "RL reward log interval"
+                    ));
             } else if (argument == "--rl-no-resume") {
                 server_options.reinforcement_resume = false;
             } else if (argument == "--player-side") {

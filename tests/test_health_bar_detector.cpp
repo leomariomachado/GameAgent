@@ -154,12 +154,12 @@ int main() {
         tracker.observe(make_frame(13, 1150, 0.80f, 0.60f));
         auto reward = tracker.consume(1160);
         require_near(reward.damage_dealt, 0.10f, 0.02f, "opponent damage is inaccurate");
-        require_near(reward.reward, 1.0f, 0.2f, "damage reward is inaccurate");
+        require_near(reward.reward, 1.5f, 0.2f, "damage reward is inaccurate");
 
         tracker.observe(make_frame(14, 1200, 0.70f, 0.60f));
         reward = tracker.consume(1210);
         require_near(reward.damage_taken, 0.10f, 0.02f, "player damage is inaccurate");
-        require(reward.reward < -0.8f, "received damage was not penalized");
+        require_near(reward.reward, -1.1f, 0.2f, "received damage penalty is inaccurate");
 
         auto refill = tracker.observe(make_frame(15, 1300, 1.0f, 1.0f));
         require(
