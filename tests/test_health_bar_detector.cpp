@@ -185,7 +185,8 @@ int main() {
         );
         terminal = tracker.consume(1560);
         require(terminal.terminal && terminal.episode_ended, "terminal flags were lost");
-        require(terminal.reward > 10.0f, "round win did not include damage and terminal bonus");
+        require_near(terminal.terminal_reward, 5.0f, 0.001f, "round win bonus is inaccurate");
+        require_near(terminal.reward, 20.0f, 0.2f, "round win did not include damage and terminal bonus");
 
         tracker.observe(make_frame(21, 1600, 0.0f, 0.0f, false));
         const auto invalid = tracker.snapshot(1610);

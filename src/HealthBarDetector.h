@@ -89,13 +89,14 @@ struct FightControlSnapshot {
     float damage_dealt = 0.0f;
     float damage_taken = 0.0f;
     float reward = 0.0f;
+    float terminal_reward = 0.0f;
     float hud_confidence = 0.0f;
     std::string transition_reason;
 };
 
 // Converts individual bar measurements into an episode/control state. Reward
-// and boundary flags are accumulated until consume() so the 15 Hz camera and
-// 20 Hz controller loops cannot double-count the same damage.
+// and boundary flags are accumulated until consume() so asynchronous camera
+// and controller loops cannot double-count the same damage.
 class FightStateTracker {
 public:
     explicit FightStateTracker(
@@ -133,6 +134,7 @@ private:
     std::int64_t last_intro_increase_ms_ = 0;
     bool episode_active_ = false;
     float pending_reward_ = 0.0f;
+    float pending_terminal_reward_ = 0.0f;
     float pending_damage_dealt_ = 0.0f;
     float pending_damage_taken_ = 0.0f;
     bool pending_episode_started_ = false;

@@ -257,12 +257,32 @@ GAMEAGENT_RL_TRAINING=0 bash scripts/run_subzero_rl.sh
 Frame persistence remains off by default in RL mode. Health detection, visual
 features and decisions operate directly on the decoded in-memory frame.
 
+The Sub-Zero RL launcher uses a 100 ms decision interval (10 controller states
+per second) and advertises a 750 ms client failsafe. This matches a 10 FPS
+client without changing the generic server defaults. The fight gate still
+releases controls when the newest frame is older than three decision intervals,
+so the longer client failsafe does not authorize decisions from stale images.
+Both values remain configurable:
+
+```bash
+GAMEAGENT_DECISION_INTERVAL_MS=100 \
+GAMEAGENT_FAILSAFE_TIMEOUT_MS=750 \
+bash scripts/run_subzero_rl.sh
+```
+
 The server prints one accumulated learning summary every five seconds without
 running an extra inference or synchronizing the GPU again:
 
 ```text
-[RL_REWARD] episode=4 phase=active_fight reward=0.42 episode_return=1.87 damage_dealt=0.08 damage_taken=0.03 hp=0.71/0.54 epsilon=0.93 replay=418 updates=162 loss=0.021
+[RL_REWARD] reward_gained=0.42 reward_accumulated=1.87 reward_terminal=0 result=ongoing connection=1 episode=4 phase=active_fight damage_dealt=0.08 damage_taken=0.03 hp=0.71/0.54 epsilon=0.93 replay=418 updates=162 loss=0.021
 ```
+
+An episode ending forces an immediate summary instead of waiting for the next
+reporting interval. `reward_terminal` is `+5` for a win, `-5` for a loss and
+zero otherwise. `reward_gained` is the reward since the previous summary, while
+`reward_accumulated` is the complete episode return, including damage rewards,
+damage penalties and the terminal reward. A blank line follows each summary to
+make reward events easier to scan.
 
 Change only the reporting cadence, in milliseconds, with:
 

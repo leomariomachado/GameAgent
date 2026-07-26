@@ -727,7 +727,7 @@ void handle_websocket_connection(
             .maximum_action_frame_age_ms =
                 std::max<std::int64_t>(
                     250,
-                    options.failsafe_timeout.count()
+                    options.decision_interval.count() * 3
                 ),
         });
         reinforcement_agent->reset_episode(false);
@@ -878,6 +878,7 @@ void handle_websocket_connection(
         auto next_reward_log =
             Clock::now() + options.reinforcement_reward_log_interval;
         float reward_log_accumulator = 0.0f;
+        float terminal_reward_log_accumulator = 0.0f;
         float damage_dealt_log_accumulator = 0.0f;
         float damage_taken_log_accumulator = 0.0f;
         std::uint64_t reward_log_decisions = 0;
@@ -967,24 +968,36 @@ void handle_websocket_connection(
                 }
                 if (reinforcement_agent != nullptr) {
                     reward_log_accumulator += fight.reward;
+                    terminal_reward_log_accumulator +=
+                        fight.terminal_reward;
                     damage_dealt_log_accumulator += fight.damage_dealt;
                     damage_taken_log_accumulator += fight.damage_taken;
                     ++reward_log_decisions;
                     reward_log_active_decisions +=
                         fight.action_allowed ? 1U : 0U;
                     const auto reward_log_now = Clock::now();
-                    if (reward_log_now >= next_reward_log) {
+                    if (reward_log_now >= next_reward_log ||
+                        fight.episode_ended) {
                         const ReinforcementAgentStats stats =
                             reinforcement_agent->stats();
                         std::cout
-                            << "[RL_REWARD] connection=" << connection_id
+                            << "[RL_REWARD] reward_gained="
+                            << reward_log_accumulator
+                            << " reward_accumulated="
+                            << stats.current_episode_return
+                            << " reward_terminal="
+                            << terminal_reward_log_accumulator
+                            << " result="
+                            << (
+                                fight.episode_ended
+                                    ? fight.transition_reason
+                                    : "ongoing"
+                            )
+                            << " connection=" << connection_id
                             << " episode=" << fight.episode_id
                             << " phase=" << fight_phase_name(fight.phase)
                             << " interval_ms="
                             << options.reinforcement_reward_log_interval.count()
-                            << " reward=" << reward_log_accumulator
-                            << " episode_return="
-                            << stats.current_episode_return
                             << " damage_dealt="
                             << damage_dealt_log_accumulator
                             << " damage_taken="
@@ -1000,8 +1013,9 @@ void handle_websocket_connection(
                             << " loss=" << stats.last_training_loss
                             << " option=\""
                             << reinforcement_decision.option_name << '"'
-                            << std::endl;
+                            << "\n\n" << std::flush;
                         reward_log_accumulator = 0.0f;
+                        terminal_reward_log_accumulator = 0.0f;
                         damage_dealt_log_accumulator = 0.0f;
                         damage_taken_log_accumulator = 0.0f;
                         reward_log_decisions = 0;
@@ -1090,6 +1104,8 @@ void handle_websocket_connection(
                     response["player_health"] = fight.player_health;
                     response["opponent_health"] = fight.opponent_health;
                     response["reward"] = fight.reward;
+                    response["terminal_reward"] =
+                        fight.terminal_reward;
                     response["rl_option"] =
                         reinforcement_decision.option_name;
                     response["rl_option_index"] =
@@ -1310,6 +1326,7 @@ void handle_websocket_connection(
                         {"damage_dealt", fight.damage_dealt},
                         {"damage_taken", fight.damage_taken},
                         {"reward", fight.reward},
+                        {"terminal_reward", fight.terminal_reward},
                         {"hud_confidence", fight.hud_confidence},
                         {"transition_reason", fight.transition_reason},
                     });

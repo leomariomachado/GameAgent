@@ -248,6 +248,7 @@ FightControlSnapshot FightStateTracker::observe(const BufferedFrame& frame) {
     latest_.damage_dealt = 0.0f;
     latest_.damage_taken = 0.0f;
     latest_.reward = 0.0f;
+    latest_.terminal_reward = 0.0f;
     latest_.transition_reason.clear();
 
     if (!reading.hud_valid) {
@@ -340,8 +341,10 @@ FightControlSnapshot FightStateTracker::observe(const BufferedFrame& frame) {
             const float terminal_reward =
                 won ? config_.round_win_bonus :
                 lost ? -config_.round_loss_penalty : 0.0f;
+            latest_.terminal_reward = terminal_reward;
             latest_.reward += terminal_reward;
             pending_reward_ += terminal_reward;
+            pending_terminal_reward_ += terminal_reward;
             end_episode_locked(true, won ? "round_won" : lost ? "round_lost" : "double_ko");
             latest_.phase = FightPhase::round_end;
         }
@@ -432,6 +435,7 @@ FightControlSnapshot FightStateTracker::consume(std::int64_t now_ms) {
     std::lock_guard lock(mutex_);
     FightControlSnapshot result = make_snapshot_locked(now_ms);
     result.reward = pending_reward_;
+    result.terminal_reward = pending_terminal_reward_;
     result.damage_dealt = pending_damage_dealt_;
     result.damage_taken = pending_damage_taken_;
     result.episode_started = pending_episode_started_;
@@ -441,6 +445,7 @@ FightControlSnapshot FightStateTracker::consume(std::int64_t now_ms) {
         result.transition_reason = pending_transition_reason_;
     }
     pending_reward_ = 0.0f;
+    pending_terminal_reward_ = 0.0f;
     pending_damage_dealt_ = 0.0f;
     pending_damage_taken_ = 0.0f;
     pending_episode_started_ = false;
@@ -456,6 +461,7 @@ FightControlSnapshot FightStateTracker::snapshot(
     std::lock_guard lock(mutex_);
     FightControlSnapshot result = make_snapshot_locked(now_ms);
     result.reward = 0.0f;
+    result.terminal_reward = 0.0f;
     result.damage_dealt = 0.0f;
     result.damage_taken = 0.0f;
     result.episode_started = false;
@@ -478,6 +484,7 @@ void FightStateTracker::reset() {
     last_intro_increase_ms_ = 0;
     episode_active_ = false;
     pending_reward_ = 0.0f;
+    pending_terminal_reward_ = 0.0f;
     pending_damage_dealt_ = 0.0f;
     pending_damage_taken_ = 0.0f;
     pending_episode_started_ = false;
