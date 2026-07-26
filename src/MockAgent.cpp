@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <stdexcept>
 
 namespace gameagent {
@@ -17,6 +18,93 @@ constexpr int kUp = 6;
 constexpr int kDown = 7;
 constexpr int kLeft = 8;
 constexpr int kRight = 9;
+
+bool program_uses_direction(
+    const std::vector<std::vector<int>>& states,
+    int forward,
+    int back
+) {
+    return std::any_of(states.begin(), states.end(), [&](const auto& state) {
+        return std::find(state.begin(), state.end(), forward) != state.end() ||
+            std::find(state.begin(), state.end(), back) != state.end();
+    });
+}
+
+void mirror_program(
+    std::vector<std::vector<int>>& states,
+    int forward,
+    int back
+) {
+    for (auto& state : states) {
+        for (int& command : state) {
+            if (command == forward) {
+                command = back;
+            } else if (command == back) {
+                command = forward;
+            }
+        }
+    }
+}
+
+bool same_controller_program(
+    const MockMoveDefinition& first,
+    const MockMoveDefinition& second
+) {
+    return first.states == second.states &&
+        first.conditional_freeze_follow_up ==
+            second.conditional_freeze_follow_up &&
+        first.freeze_confirmation_step == second.freeze_confirmation_step &&
+        first.freeze_miss_states == second.freeze_miss_states;
+}
+
+void append_spatial_mirrors(
+    std::vector<MockMoveDefinition>& moves,
+    int forward,
+    int back
+) {
+    const std::size_t original_count = moves.size();
+    std::vector<MockMoveDefinition> mirrors;
+    for (std::size_t index = 0; index < original_count; ++index) {
+        const bool directional =
+            program_uses_direction(moves[index].states, forward, back) ||
+            program_uses_direction(
+                moves[index].freeze_miss_states, forward, back
+            );
+        if (!directional) {
+            continue;
+        }
+
+        MockMoveDefinition mirror = moves[index];
+        mirror_program(mirror.states, forward, back);
+        mirror_program(mirror.freeze_miss_states, forward, back);
+        const bool already_known =
+            std::any_of(
+                moves.begin(), moves.end(), [&](const auto& known) {
+                    return same_controller_program(known, mirror);
+                }
+            ) ||
+            std::any_of(
+                mirrors.begin(), mirrors.end(), [&](const auto& known) {
+                    return same_controller_program(known, mirror);
+                }
+            );
+        if (already_known) {
+            continue;
+        }
+
+        mirror.name += " [Espelho F/B]";
+        const float family_weight = moves[index].curriculum_weight;
+        mirror.curriculum_weight = family_weight * 0.5f;
+        moves[index].curriculum_weight =
+            family_weight - mirror.curriculum_weight;
+        mirrors.push_back(std::move(mirror));
+    }
+    moves.insert(
+        moves.end(),
+        std::make_move_iterator(mirrors.begin()),
+        std::make_move_iterator(mirrors.end())
+    );
+}
 
 }  // namespace
 
@@ -326,6 +414,7 @@ std::vector<MockMoveDefinition> make_sub_zero_curriculum(
         },
     };
     moves.insert(moves.end(), exploration.begin(), exploration.end());
+    append_spatial_mirrors(moves, forward, back);
     return moves;
 }
 

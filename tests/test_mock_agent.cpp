@@ -30,6 +30,52 @@ const gameagent::MockMoveDefinition& find_move(
     return *found;
 }
 
+std::vector<std::vector<int>> mirrored_program(
+    std::vector<std::vector<int>> states,
+    int forward,
+    int back
+) {
+    for (auto& state : states) {
+        for (int& command : state) {
+            if (command == forward) {
+                command = back;
+            } else if (command == back) {
+                command = forward;
+            }
+        }
+    }
+    return states;
+}
+
+void require_mirrored_pair(
+    const std::vector<gameagent::MockMoveDefinition>& moves,
+    const std::string& original_name,
+    int forward,
+    int back
+) {
+    const auto& original = find_move(moves, original_name);
+    const auto& mirror = find_move(
+        moves, original_name + " [Espelho F/B]"
+    );
+    require(
+        mirror.states ==
+            mirrored_program(original.states, forward, back),
+        "controller states were not spatially mirrored: " + original_name
+    );
+    require(
+        mirror.freeze_miss_states ==
+            mirrored_program(original.freeze_miss_states, forward, back),
+        "conditional recovery was not spatially mirrored: " + original_name
+    );
+    require(
+        mirror.phases == original.phases &&
+            mirror.freeze_miss_phases == original.freeze_miss_phases &&
+            mirror.action_source == original.action_source &&
+            mirror.curriculum_weight == original.curriculum_weight,
+        "mirror metadata/weight differs from original: " + original_name
+    );
+}
+
 }  // namespace
 
 int main() {
@@ -93,16 +139,39 @@ int main() {
             gameagent::FighterFacing::right
         );
         require(
-            curriculum.size() == 17,
-            "Sub-Zero curriculum must contain 6 moves, 2 conditional plans, "
-            "4 combat variations and 5 explorations"
+            curriculum.size() == 28,
+            "Sub-Zero curriculum must contain the original 17 programs and "
+            "11 unique spatial mirrors"
         );
+        require(
+            find_move(curriculum, "Congelar").states ==
+                mirrored_program(
+                    find_move(curriculum, "Clone de Gelo").states, 9, 8
+                ),
+            "Freeze and Ice Clone must remain the existing mirrored pair"
+        );
+        const std::vector<std::string> spatial_programs{
+            "Chuva de Gelo (Frente)",
+            "Chuva de Gelo (Perto)",
+            "4 Golpes",
+            "Congelar + Corrida + 3 Golpes",
+            "Congelar + Corrida + 4 Golpes",
+            "Pulo para Frente + Chute Alto",
+            "Corrida + 3 Golpes",
+            "Corrida + 4 Golpes",
+            "Explorar: avançar e A",
+            "Explorar: bloquear e recuar",
+            "Explorar: corrida curta",
+        };
+        for (const auto& name : spatial_programs) {
+            require_mirrored_pair(curriculum, name, 9, 8);
+        }
         const auto& freeze_combo = find_move(
             curriculum, "Congelar + Corrida + 3 Golpes"
         );
         require(
             freeze_combo.conditional_freeze_follow_up &&
-                freeze_combo.curriculum_weight == 25.0f &&
+                freeze_combo.curriculum_weight == 12.5f &&
                 freeze_combo.states[7] == std::vector<int>({5, 9}) &&
                 freeze_combo.states[15] == std::vector<int>({7, 2}),
             "conditional freeze/approach/combo plan is incorrect"
@@ -116,7 +185,7 @@ int main() {
                     {6, 9}, {6, 9}, {9}, {9, 1}, {9, 1}, {}, {}
                 } &&
                 jump_kick.action_source == "scripted_variation" &&
-                jump_kick.curriculum_weight == 4.0f,
+                jump_kick.curriculum_weight == 2.0f,
             "forward jump/high kick variation is incorrect"
         );
         const auto& uppercut = find_move(curriculum, "Uppercut Agachado");
@@ -142,7 +211,7 @@ int main() {
         );
         require(
             exploration.action_source == "random_exploration" &&
-                exploration.curriculum_weight == 1.0f,
+                exploration.curriculum_weight == 0.5f,
             "controlled exploration curriculum is incorrect"
         );
         float total_curriculum_weight = 0.0f;
@@ -195,6 +264,9 @@ int main() {
         const auto left_curriculum = gameagent::make_sub_zero_curriculum(
             gameagent::FighterFacing::left
         );
+        for (const auto& name : spatial_programs) {
+            require_mirrored_pair(left_curriculum, name, 8, 9);
+        }
         require(
             find_move(
                 left_curriculum, "Pulo para Frente + Chute Alto"

@@ -111,10 +111,21 @@ The teacher now samples a weighted curriculum:
 - 5% bounded exploration containing no contradictory directions and explicit
   release states.
 
-The jump and running variations mirror Forward/Back automatically when the
-fighter changes side. Every movement and attack is represented by complete
-controller states at the 50 ms decision cadence, including explicit releases,
-so the existing protocol-v2 client requires no change.
+Every unique curriculum program that uses Forward or Back now has an
+equal-weight ` [Espelho F/B]` variant with every directional state exchanged,
+including simultaneous buttons and conditional recovery branches. Freeze and
+Ice Clone already form the same directional pair, so they are not duplicated.
+The total probability of each original family is preserved. All variants also
+mirror Forward/Back automatically when the fighter changes side. Every movement
+and attack is represented by complete controller states at the configured
+decision cadence, including explicit releases, so the existing protocol-v2
+client requires no change.
+
+The mirrored curriculum expands the DQN action set from 28 to 39 options.
+`run_subzero_rl.sh` therefore uses separate
+`subzero_dqn_fb_mirrors_{latest,best}.garl` checkpoints. Existing checkpoints
+remain untouched, but cannot be resumed into this different output
+architecture.
 
 After Freeze, the teacher compares a conservative opponent-side ice-color score
 with the pre-move baseline. A clear miss branches to block/retreat; a confirmed
@@ -218,8 +229,8 @@ and connection shutdown:
 
 ```text
 /workspace/gameagent/rl_checkpoints/
-├── subzero_dqn_latest.garl
-└── subzero_dqn_best.garl
+├── subzero_dqn_fb_mirrors_latest.garl
+└── subzero_dqn_fb_mirrors_best.garl
 ```
 
 The full agent requires both pretrained encoders:
