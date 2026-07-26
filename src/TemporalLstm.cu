@@ -210,6 +210,20 @@ __global__ void action_head_kernel(
     logits[command] = value;
 }
 
+__global__ void active_head_kernel(
+    const float* hidden,
+    const float* weights,
+    const float* bias,
+    float* logit,
+    int hidden_size
+) {
+    float value = bias[0];
+    for (int input = 0; input < hidden_size; ++input) {
+        value += weights[input] * hidden[input];
+    }
+    logit[0] = value;
+}
+
 }  // namespace
 
 TemporalLstm::TemporalLstm(TemporalLstmConfig config)
@@ -299,6 +313,21 @@ TemporalLstm::TemporalLstm(TemporalLstmConfig config)
             "allocate temporal LSTM cell state"
         );
         allocate_device(
+            device_active_head_weights_,
+            config_.hidden_size,
+            "allocate temporal active-head weights"
+        );
+        allocate_device(
+            device_active_head_bias_,
+            1,
+            "allocate temporal active-head bias"
+        );
+        allocate_device(
+            device_active_logit_,
+            1,
+            "allocate temporal active logit"
+        );
+        allocate_device(
             device_action_head_weights_,
             TemporalLstmConfig::kControllerCommandCount *
                 config_.hidden_size,
@@ -359,6 +388,12 @@ TemporalLstm::TemporalLstm(TemporalLstmConfig config)
         );
         std::array<float, TemporalLstmConfig::kControllerCommandCount>
             action_head_bias{};
+        const auto active_head_weights = random_uniform_values(
+            config_.hidden_size,
+            std::sqrt(6.0f / static_cast<float>(config_.hidden_size + 1U)),
+            engine
+        );
+        std::array<float, 1> active_head_bias{};
         std::vector<float> projection_bias(
             config_.visual_projection_size, 0.0f
         );
@@ -371,6 +406,24 @@ TemporalLstm::TemporalLstm(TemporalLstmConfig config)
             1.0f
         );
 
+        check_cuda(
+            cudaMemcpy(
+                device_active_head_weights_,
+                active_head_weights.data(),
+                active_head_weights.size() * sizeof(float),
+                cudaMemcpyHostToDevice
+            ),
+            "upload temporal active-head weights"
+        );
+        check_cuda(
+            cudaMemcpy(
+                device_active_head_bias_,
+                active_head_bias.data(),
+                active_head_bias.size() * sizeof(float),
+                cudaMemcpyHostToDevice
+            ),
+            "upload temporal active-head bias"
+        );
         check_cuda(
             cudaMemcpy(
                 device_projection_weights_,
@@ -469,6 +522,9 @@ void TemporalLstm::release() noexcept {
     cudaFree(device_gates_);
     cudaFree(device_hidden_);
     cudaFree(device_cell_);
+    cudaFree(device_active_head_weights_);
+    cudaFree(device_active_head_bias_);
+    cudaFree(device_active_logit_);
     cudaFree(device_action_head_weights_);
     cudaFree(device_action_head_bias_);
     cudaFree(device_action_logits_);
@@ -483,9 +539,13 @@ void TemporalLstm::release() noexcept {
     device_gates_ = nullptr;
     device_hidden_ = nullptr;
     device_cell_ = nullptr;
+    device_active_head_weights_ = nullptr;
+    device_active_head_bias_ = nullptr;
+    device_active_logit_ = nullptr;
     device_action_head_weights_ = nullptr;
     device_action_head_bias_ = nullptr;
     device_action_logits_ = nullptr;
+    policy_has_active_head_ = false;
     policy_loaded_ = false;
 }
 
@@ -502,9 +562,11 @@ void TemporalLstm::push(
             "temporal LSTM push requires a device feature and CUDA stream"
         );
     }
-    if (metadata.frame_id == 0 || metadata.frame_timestamp_ms <= 0) {
+    if (metadata.frame_id == 0 || metadata.frame_timestamp_ms <= 0 ||
+        metadata.decision_id == 0 ||
+        metadata.decision_timestamp_ms <= 0) {
         throw std::invalid_argument(
-            "temporal LSTM step has invalid frame metadata"
+            "temporal LSTM step has invalid frame/decision metadata"
         );
     }
     if (!std::isfinite(applied_command_age_seconds)) {
@@ -748,7 +810,18 @@ TemporalPolicyCheckpointReport TemporalLstm::load_checkpoint(
         read_scalar<std::uint64_t>(input, "epoch");
     const float best_validation_loss =
         read_scalar<float>(input, "best_validation_loss");
-    if (version != 1 ||
+    float best_selection_score = 0.0f;
+    float active_threshold = 0.5f;
+    float command_threshold = 0.6f;
+    if (version == 2) {
+        best_selection_score =
+            read_scalar<float>(input, "best_selection_score");
+        active_threshold =
+            read_scalar<float>(input, "active_threshold");
+        command_threshold =
+            read_scalar<float>(input, "command_threshold");
+    }
+    if ((version != 1 && version != 2) ||
         visual_size != config_.visual_size ||
         projection_size != config_.visual_projection_size ||
         controller_size !=
@@ -756,7 +829,12 @@ TemporalPolicyCheckpointReport TemporalLstm::load_checkpoint(
         hidden_size != config_.hidden_size ||
         output_size !=
             TemporalLstmConfig::kControllerCommandCount ||
-        !std::isfinite(best_validation_loss)) {
+        !std::isfinite(best_validation_loss) ||
+        !std::isfinite(best_selection_score) ||
+        !std::isfinite(active_threshold) ||
+        !std::isfinite(command_threshold) ||
+        active_threshold <= 0.0f || active_threshold >= 1.0f ||
+        command_threshold <= 0.0f || command_threshold >= 1.0f) {
         throw std::runtime_error(
             "temporal policy checkpoint architecture mismatch"
         );
@@ -789,6 +867,16 @@ TemporalPolicyCheckpointReport TemporalLstm::load_checkpoint(
     const auto gate_bias = read_tensor(
         input, gate_rows, "lstm.bias"
     );
+    std::vector<float> active_head_weights;
+    std::vector<float> active_head_bias;
+    if (version == 2) {
+        active_head_weights = read_tensor(
+            input, config_.hidden_size, "active_head.weight"
+        );
+        active_head_bias = read_tensor(
+            input, 1, "active_head.bias"
+        );
+    }
     const auto action_head_weights = read_tensor(
         input,
         TemporalLstmConfig::kControllerCommandCount *
@@ -845,6 +933,16 @@ TemporalPolicyCheckpointReport TemporalLstm::load_checkpoint(
         device_gate_bias_, gate_bias,
         "upload trained temporal gate bias"
     );
+    if (version == 2) {
+        upload(
+            device_active_head_weights_, active_head_weights,
+            "upload trained temporal active-head weights"
+        );
+        upload(
+            device_active_head_bias_, active_head_bias,
+            "upload trained temporal active-head bias"
+        );
+    }
     upload(
         device_action_head_weights_, action_head_weights,
         "upload trained temporal action-head weights"
@@ -853,18 +951,26 @@ TemporalPolicyCheckpointReport TemporalLstm::load_checkpoint(
         device_action_head_bias_, action_head_bias,
         "upload trained temporal action-head bias"
     );
+    active_threshold_ = active_threshold;
+    command_threshold_ = command_threshold;
+    policy_has_active_head_ = version == 2;
     policy_loaded_ = true;
     return {
         .version = version,
         .training_step = training_step,
         .epoch = epoch,
         .best_validation_loss = best_validation_loss,
+        .best_selection_score = best_selection_score,
+        .active_threshold = active_threshold_,
+        .command_threshold = command_threshold_,
         .parameter_count =
             projection_weights.size() +
             projection_bias.size() +
             input_weights.size() +
             recurrent_weights.size() +
             gate_bias.size() +
+            active_head_weights.size() +
+            active_head_bias.size() +
             action_head_weights.size() +
             action_head_bias.size(),
     };
@@ -872,18 +978,28 @@ TemporalPolicyCheckpointReport TemporalLstm::load_checkpoint(
 
 TemporalActionPrediction TemporalLstm::predict_from_hidden(
     cudaStream_t stream,
-    float threshold
+    float threshold_override
 ) {
     if (!policy_loaded_) {
         throw std::runtime_error(
             "temporal action prediction requires a trained checkpoint"
         );
     }
-    if (stream == nullptr || !std::isfinite(threshold) ||
-        threshold <= 0.0f || threshold >= 1.0f) {
+    if (stream == nullptr || !std::isfinite(threshold_override) ||
+        (threshold_override > 0.0f && threshold_override >= 1.0f)) {
         throw std::invalid_argument(
             "invalid temporal action prediction configuration"
         );
+    }
+    if (policy_has_active_head_) {
+        active_head_kernel<<<1, 1, 0, stream>>>(
+            device_hidden_,
+            device_active_head_weights_,
+            device_active_head_bias_,
+            device_active_logit_,
+            static_cast<int>(config_.hidden_size)
+        );
+        check_cuda(cudaGetLastError(), "launch temporal active head");
     }
     action_head_kernel<<<1, 32, 0, stream>>>(
         device_hidden_,
@@ -895,6 +1011,19 @@ TemporalActionPrediction TemporalLstm::predict_from_hidden(
     check_cuda(cudaGetLastError(), "launch temporal action head");
     std::array<float, TemporalLstmConfig::kControllerCommandCount>
         logits{};
+    float active_logit = 0.0f;
+    if (policy_has_active_head_) {
+        check_cuda(
+            cudaMemcpyAsync(
+                &active_logit,
+                device_active_logit_,
+                sizeof(float),
+                cudaMemcpyDeviceToHost,
+                stream
+            ),
+            "download temporal active logit"
+        );
+    }
     check_cuda(
         cudaMemcpyAsync(
             logits.data(),
@@ -910,12 +1039,22 @@ TemporalActionPrediction TemporalLstm::predict_from_hidden(
         "synchronize temporal action prediction"
     );
     TemporalActionPrediction prediction;
+    prediction.active_probability = policy_has_active_head_
+        ? 1.0f / (1.0f + std::exp(-active_logit))
+        : 1.0f;
+    prediction.action_active =
+        prediction.active_probability >= active_threshold_;
+    const float command_threshold =
+        threshold_override > 0.0f
+            ? threshold_override
+            : command_threshold_;
     std::vector<std::pair<float, int>> candidates;
     for (std::size_t index = 0; index < logits.size(); ++index) {
         const float probability =
             1.0f / (1.0f + std::exp(-logits[index]));
         prediction.probabilities[index] = probability;
-        if (probability >= threshold) {
+        if (prediction.action_active &&
+            probability >= command_threshold) {
             candidates.emplace_back(
                 probability, static_cast<int>(index)
             );
@@ -927,6 +1066,20 @@ TemporalActionPrediction TemporalLstm::predict_from_hidden(
             return left.first > right.first;
         }
     );
+    if (prediction.action_active && candidates.empty()) {
+        const auto strongest = std::max_element(
+            prediction.probabilities.begin(),
+            prediction.probabilities.end()
+        );
+        candidates.emplace_back(
+            *strongest,
+            static_cast<int>(
+                std::distance(
+                    prediction.probabilities.begin(), strongest
+                )
+            )
+        );
+    }
     const auto conflicts = [](int left, int right) {
         return
             (left == 6 && right == 7) ||

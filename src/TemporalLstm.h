@@ -27,6 +27,8 @@ struct TemporalLstmConfig {
 struct TemporalStepMetadata {
     std::uint64_t frame_id = 0;
     std::int64_t frame_timestamp_ms = 0;
+    std::uint64_t decision_id = 0;
+    std::int64_t decision_timestamp_ms = 0;
     std::uint64_t applied_decision_id = 0;
     bool applied_command_known = false;
 };
@@ -42,10 +44,15 @@ struct TemporalPolicyCheckpointReport {
     std::uint64_t training_step = 0;
     std::uint64_t epoch = 0;
     float best_validation_loss = 0.0f;
+    float best_selection_score = 0.0f;
+    float active_threshold = 0.5f;
+    float command_threshold = 0.5f;
     std::size_t parameter_count = 0;
 };
 
 struct TemporalActionPrediction {
+    float active_probability = 1.0f;
+    bool action_active = true;
     std::array<float, 10> probabilities{};
     std::vector<int> commands;
 };
@@ -58,8 +65,9 @@ struct TemporalActionPrediction {
 //   + acknowledgement-known flag
 //   + normalized age of the confirmed state
 //
-// The ResNet50 feature is copied device-to-device into a bounded ring, so a
-// frame is never sent through the backbone again when later decisions reuse it.
+// One step is pushed per decision tick. The newest ResNet50 feature may be
+// copied into several steps, so later decisions reuse a frame without sending
+// it through the backbone again.
 class TemporalLstm {
 public:
     explicit TemporalLstm(TemporalLstmConfig config);
@@ -91,7 +99,7 @@ public:
     );
     TemporalActionPrediction predict_from_hidden(
         cudaStream_t stream,
-        float threshold = 0.6f
+        float threshold_override = -1.0f
     );
     void reset(cudaStream_t stream);
 
@@ -122,9 +130,15 @@ private:
     float* device_gates_ = nullptr;
     float* device_hidden_ = nullptr;
     float* device_cell_ = nullptr;
+    float* device_active_head_weights_ = nullptr;
+    float* device_active_head_bias_ = nullptr;
+    float* device_active_logit_ = nullptr;
     float* device_action_head_weights_ = nullptr;
     float* device_action_head_bias_ = nullptr;
     float* device_action_logits_ = nullptr;
+    float active_threshold_ = 0.5f;
+    float command_threshold_ = 0.6f;
+    bool policy_has_active_head_ = false;
     bool policy_loaded_ = false;
 };
 

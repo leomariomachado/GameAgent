@@ -64,6 +64,8 @@ TemporalAgent::TemporalAgent(TemporalAgentConfig config)
         {
             .frame_id = 1,
             .frame_timestamp_ms = 1,
+            .decision_id = 1,
+            .decision_timestamp_ms = 1,
             .applied_decision_id = 0,
             .applied_command_known = false,
         },
@@ -75,9 +77,8 @@ TemporalAgent::TemporalAgent(TemporalAgentConfig config)
     temporal_lstm_.reset(feature_extractor_.stream());
 }
 
-TemporalObservationResult TemporalAgent::observe(
-    const BufferedFrame& frame,
-    const std::optional<AppliedActionRecord>& latest_applied_action
+TemporalObservationResult TemporalAgent::observe_frame(
+    const BufferedFrame& frame
 ) {
     if (frame.frame_id == 0 || frame.received_timestamp_ms <= 0 ||
         frame.image.empty()) {
@@ -88,8 +89,43 @@ TemporalObservationResult TemporalAgent::observe(
 
     std::lock_guard lock(mutex_);
     const auto started = std::chrono::steady_clock::now();
-    const __half* feature =
+    latest_visual_feature_ =
         feature_extractor_.extract_device(frame.image);
+    latest_frame_metadata_ = {
+        .frame_id = frame.frame_id,
+        .frame_timestamp_ms =
+            frame.client_timestamp_ms > 0
+                ? frame.client_timestamp_ms
+                : frame.received_timestamp_ms,
+    };
+    const auto finished = std::chrono::steady_clock::now();
+    return {
+        .frame_id = frame.frame_id,
+        .sequence_size = temporal_lstm_.size(),
+        .feature_ms =
+            std::chrono::duration<double, std::milli>(
+                finished - started
+            ).count(),
+    };
+}
+
+TemporalAgentOutput TemporalAgent::advance_and_infer(
+    const std::optional<AppliedActionRecord>& latest_applied_action,
+    std::uint64_t decision_id,
+    std::int64_t decision_timestamp_ms
+) {
+    if (decision_id == 0 || decision_timestamp_ms <= 0) {
+        throw std::invalid_argument(
+            "temporal decision tick has invalid metadata"
+        );
+    }
+    std::lock_guard lock(mutex_);
+    if (latest_visual_feature_ == nullptr ||
+        latest_frame_metadata_.frame_id == 0) {
+        throw std::runtime_error(
+            "temporal decision requires a cached visual feature"
+        );
+    }
 
     std::array<float, 10> command_state{};
     bool command_known = false;
@@ -101,7 +137,7 @@ TemporalObservationResult TemporalAgent::observe(
         applied_decision_id = latest_applied_action->decision_id;
         const std::int64_t age_ms = std::max<std::int64_t>(
             0,
-            frame.received_timestamp_ms -
+            decision_timestamp_ms -
                 latest_applied_action
                     ->acknowledgement_received_timestamp_ms
         );
@@ -110,33 +146,35 @@ TemporalObservationResult TemporalAgent::observe(
         );
     }
 
+    TemporalStepMetadata metadata = latest_frame_metadata_;
+    metadata.decision_id = decision_id;
+    metadata.decision_timestamp_ms = decision_timestamp_ms;
+    metadata.applied_decision_id = applied_decision_id;
+    metadata.applied_command_known = command_known;
     temporal_lstm_.push(
-        feature,
+        latest_visual_feature_,
         command_state,
         command_known,
         command_age_seconds,
-        {
-            .frame_id = frame.frame_id,
-            .frame_timestamp_ms =
-                frame.client_timestamp_ms > 0
-                    ? frame.client_timestamp_ms
-                    : frame.received_timestamp_ms,
-            .applied_decision_id = applied_decision_id,
-            .applied_command_known = command_known,
-        },
+        metadata,
         feature_extractor_.stream()
     );
-    const auto finished = std::chrono::steady_clock::now();
-    return {
-        .frame_id = frame.frame_id,
-        .applied_decision_id = applied_decision_id,
-        .applied_command_known = command_known,
-        .sequence_size = temporal_lstm_.size(),
-        .enqueue_ms =
-            std::chrono::duration<double, std::milli>(
-                finished - started
-            ).count(),
+
+    TemporalAgentOutput output{
+        .lstm = temporal_lstm_.infer(feature_extractor_.stream()),
     };
+    if (temporal_lstm_.policy_loaded()) {
+        output.action_prediction =
+            temporal_lstm_.predict_from_hidden(
+                feature_extractor_.stream()
+            );
+    }
+    double squared_norm = 0.0;
+    for (float value : output.lstm.hidden) {
+        squared_norm += static_cast<double>(value) * value;
+    }
+    output.hidden_l2 = static_cast<float>(std::sqrt(squared_norm));
+    return output;
 }
 
 TemporalAgentOutput TemporalAgent::infer() {
@@ -161,11 +199,13 @@ TemporalAgentOutput TemporalAgent::infer() {
 void TemporalAgent::reset() {
     std::lock_guard lock(mutex_);
     temporal_lstm_.reset(feature_extractor_.stream());
+    latest_visual_feature_ = nullptr;
+    latest_frame_metadata_ = {};
 }
 
 bool TemporalAgent::ready() const {
     std::lock_guard lock(mutex_);
-    return temporal_lstm_.ready();
+    return latest_visual_feature_ != nullptr;
 }
 
 std::size_t TemporalAgent::sequence_size() const {

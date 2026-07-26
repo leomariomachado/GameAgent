@@ -14,7 +14,9 @@
 #include <cerrno>
 #include <chrono>
 #include <cctype>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -541,21 +543,21 @@ private:
     std::size_t pending_records_ = 0;
 };
 
-void save_frame_if_enabled(
+struct FramePersistenceJob {
+    std::shared_ptr<const FrameEnvelope> envelope;
+    std::int64_t received_timestamp_ms = 0;
+    std::optional<AppliedActionRecord> latest_applied_action;
+    bool training_capture = false;
+};
+
+void save_frame(
     const WebSocketServerOptions& options,
     std::uint64_t connection_id,
-    const FrameEnvelope& envelope,
-    std::int64_t received_timestamp_ms,
-    bool& debug_frame_saved,
-    const std::optional<AppliedActionRecord>& latest_applied_action
+    const FramePersistenceJob& job
 ) {
-    const bool save_debug_frame =
-        options.save_frames && !debug_frame_saved;
-    if (!save_debug_frame && !options.collect_training_data) {
-        return;
-    }
+    const FrameEnvelope& envelope = *job.envelope;
     const std::filesystem::path& capture_root =
-        options.collect_training_data
+        job.training_capture
             ? options.training_capture_directory
             : options.capture_directory;
     const std::filesystem::path directory = capture_root /
@@ -583,30 +585,27 @@ void save_frame_if_enabled(
     nlohmann::json metadata_record{
         {"frame_id", envelope.frame_id},
         {"client_timestamp_ms", envelope.timestamp_ms},
-        {"received_timestamp_ms", received_timestamp_ms},
+        {"received_timestamp_ms", job.received_timestamp_ms},
         {"jpeg_bytes", envelope.jpeg.size()},
         {"file", filename},
         {"capture_mode",
-         options.collect_training_data ? "training" : "debug"},
-        {"applied_command_known", latest_applied_action.has_value()},
+         job.training_capture ? "training" : "debug"},
+        {"applied_command_known", job.latest_applied_action.has_value()},
     };
-    if (latest_applied_action.has_value()) {
+    if (job.latest_applied_action.has_value()) {
         metadata_record["applied_decision_id"] =
-            latest_applied_action->decision_id;
+            job.latest_applied_action->decision_id;
         metadata_record["applied_commands"] =
-            latest_applied_action->commands;
+            job.latest_applied_action->commands;
         metadata_record["applied_timestamp_ms"] =
-            latest_applied_action->applied_timestamp_ms;
+            job.latest_applied_action->applied_timestamp_ms;
         metadata_record["acknowledgement_received_timestamp_ms"] =
-            latest_applied_action
+            job.latest_applied_action
                 ->acknowledgement_received_timestamp_ms;
     }
     metadata << metadata_record.dump() << '\n';
     if (!metadata) {
         throw std::runtime_error("could not save frame metadata in: " + directory.string());
-    }
-    if (save_debug_frame) {
-        debug_frame_saved = true;
     }
 }
 
@@ -705,37 +704,130 @@ void handle_websocket_connection(
     std::atomic<std::uint64_t> acknowledgements_rejected{0};
     std::atomic<std::uint64_t> client_message_errors{0};
     std::atomic<std::uint64_t> temporal_model_errors{0};
+    std::atomic<std::uint64_t> temporal_frames_overwritten{0};
+    std::atomic<std::uint64_t> temporal_frames_processed{0};
+    std::atomic<std::uint64_t> persistence_frames_dropped{0};
+    std::atomic<std::uint64_t> persistence_frames_saved{0};
+    std::atomic<std::uint64_t> persistence_errors{0};
     bool debug_frame_saved = false;
+    std::atomic_bool workers_stopping{false};
 
-    const auto observe_temporal = [&](const std::shared_ptr<const BufferedFrame>& frame) {
-        if (temporal_agent == nullptr) {
-            return;
+    std::mutex temporal_queue_mutex;
+    std::condition_variable temporal_queue_changed;
+    std::shared_ptr<const BufferedFrame> pending_temporal_frame;
+    const auto enqueue_temporal =
+        [&](std::shared_ptr<const BufferedFrame> frame) {
+            if (temporal_agent == nullptr) {
+                return;
+            }
+            {
+                std::lock_guard lock(temporal_queue_mutex);
+                if (pending_temporal_frame != nullptr) {
+                    temporal_frames_overwritten.fetch_add(1);
+                }
+                pending_temporal_frame = std::move(frame);
+            }
+            temporal_queue_changed.notify_one();
+        };
+    std::jthread temporal_worker([&](std::stop_token) {
+        while (true) {
+            std::shared_ptr<const BufferedFrame> frame;
+            {
+                std::unique_lock lock(temporal_queue_mutex);
+                temporal_queue_changed.wait(lock, [&] {
+                    return workers_stopping.load() ||
+                        pending_temporal_frame != nullptr;
+                });
+                if (pending_temporal_frame == nullptr &&
+                    workers_stopping.load()) {
+                    break;
+                }
+                frame = std::exchange(
+                    pending_temporal_frame, nullptr
+                );
+            }
+            try {
+                const auto result = temporal_agent->observe_frame(*frame);
+                temporal_frames_processed.fetch_add(1);
+                metrics.write({
+                    {"event", "temporal_observation"},
+                    {"connection_id", connection_id},
+                    {"frame_id", result.frame_id},
+                    {"sequence_size", result.sequence_size},
+                    {"feature_ms", result.feature_ms},
+                    {"frames_overwritten",
+                     temporal_frames_overwritten.load()},
+                });
+            } catch (const std::exception& error) {
+                temporal_model_errors.fetch_add(1);
+                std::cerr << "[TEMPORAL] connection=" << connection_id
+                          << " frame=" << frame->frame_id
+                          << " observation failed: " << error.what() << '\n';
+            }
         }
-        try {
-            const auto latest = action_history.latest_applied(1);
-            const std::optional<AppliedActionRecord> latest_applied =
-                latest.empty()
-                    ? std::nullopt
-                    : std::optional<AppliedActionRecord>(latest.back());
-            const auto result = temporal_agent->observe(
-                *frame, latest_applied
-            );
-            metrics.write({
-                {"event", "temporal_observation"},
-                {"connection_id", connection_id},
-                {"frame_id", result.frame_id},
-                {"applied_decision_id", result.applied_decision_id},
-                {"applied_command_known", result.applied_command_known},
-                {"sequence_size", result.sequence_size},
-                {"enqueue_ms", result.enqueue_ms},
-            });
-        } catch (const std::exception& error) {
-            temporal_model_errors.fetch_add(1);
-            std::cerr << "[TEMPORAL] connection=" << connection_id
-                      << " frame=" << frame->frame_id
-                      << " observation failed: " << error.what() << '\n';
+    });
+
+    std::mutex persistence_queue_mutex;
+    std::condition_variable persistence_queue_changed;
+    std::deque<FramePersistenceJob> persistence_queue;
+    const auto enqueue_persistence =
+        [&](std::shared_ptr<const FrameEnvelope> envelope,
+            std::int64_t received_timestamp_ms) {
+            const bool training_capture =
+                options.collect_training_data;
+            const bool debug_capture =
+                options.save_frames && !debug_frame_saved;
+            if (!training_capture && !debug_capture) {
+                return;
+            }
+            if (debug_capture) {
+                debug_frame_saved = true;
+            }
+            FramePersistenceJob job{
+                .envelope = std::move(envelope),
+                .received_timestamp_ms = received_timestamp_ms,
+                .latest_applied_action =
+                    latest_applied_record(action_history),
+                .training_capture = training_capture,
+            };
+            {
+                std::lock_guard lock(persistence_queue_mutex);
+                if (persistence_queue.size() ==
+                    options.persistence_queue_capacity) {
+                    persistence_queue.pop_front();
+                    persistence_frames_dropped.fetch_add(1);
+                }
+                persistence_queue.push_back(std::move(job));
+            }
+            persistence_queue_changed.notify_one();
+        };
+    std::jthread persistence_worker([&](std::stop_token) {
+        while (true) {
+            FramePersistenceJob job;
+            {
+                std::unique_lock lock(persistence_queue_mutex);
+                persistence_queue_changed.wait(lock, [&] {
+                    return workers_stopping.load() ||
+                        !persistence_queue.empty();
+                });
+                if (persistence_queue.empty() &&
+                    workers_stopping.load()) {
+                    break;
+                }
+                job = std::move(persistence_queue.front());
+                persistence_queue.pop_front();
+            }
+            try {
+                save_frame(options, connection_id, job);
+                persistence_frames_saved.fetch_add(1);
+            } catch (const std::exception& error) {
+                persistence_errors.fetch_add(1);
+                std::cerr << "[CAPTURE] connection=" << connection_id
+                          << " frame=" << job.envelope->frame_id
+                          << " save failed: " << error.what() << '\n';
+            }
         }
-    };
+    });
 
     std::jthread inference_thread([&](std::stop_token thread_stop) {
         std::uint64_t decision_id = 0;
@@ -749,13 +841,21 @@ void handle_websocket_connection(
             const auto inference_start = Clock::now();
             const auto observation = buffer.latest(options.observation_frames);
             if (!observation.empty()) {
+                const std::int64_t decision_tick_ms =
+                    epoch_milliseconds();
+                const std::uint64_t current_decision_id = ++decision_id;
                 const auto applied_actions = action_history.latest_applied(
                     options.applied_action_history_size
                 );
                 std::optional<TemporalAgentOutput> temporal_output;
                 if (temporal_agent != nullptr && temporal_agent->ready()) {
                     try {
-                        temporal_output = temporal_agent->infer();
+                        temporal_output =
+                            temporal_agent->advance_and_infer(
+                                latest_applied_record(action_history),
+                                current_decision_id,
+                                decision_tick_ms
+                            );
                     } catch (const std::exception& error) {
                         temporal_model_errors.fetch_add(1);
                         std::cerr << "[TEMPORAL] connection=" << connection_id
@@ -768,10 +868,10 @@ void handle_websocket_connection(
                 );
                 const std::vector<int>& commands = mock_decision.commands;
                 const auto inference_end = Clock::now();
+                const std::int64_t now_ms = epoch_milliseconds();
                 const double inference_ms = std::chrono::duration<double, std::milli>(
                     inference_end - inference_start
                 ).count();
-                const std::int64_t now_ms = epoch_milliseconds();
                 const auto& latest = observation.back();
                 const std::int64_t latency_ms = latest->client_timestamp_ms > 0
                     ? now_ms - latest->client_timestamp_ms
@@ -784,7 +884,6 @@ void handle_websocket_connection(
                     frame_ids.push_back(frame->frame_id);
                 }
 
-                const std::uint64_t current_decision_id = ++decision_id;
                 nlohmann::json response{
                     {"protocol_version", kActionProtocolVersion},
                     {"type", "action"},
@@ -805,6 +904,7 @@ void handle_websocket_connection(
                     {"frame_id", latest->frame_id},
                     {"frame_ids", frame_ids},
                     {"timestamp_ms", now_ms},
+                    {"decision_tick_timestamp_ms", decision_tick_ms},
                     {"control_interval_ms", options.decision_interval.count()},
                     {"failsafe_timeout_ms", options.failsafe_timeout.count()},
                     {"metrics", {
@@ -824,6 +924,15 @@ void handle_websocket_connection(
                         {"temporal_model_enabled", temporal_agent != nullptr},
                         {"temporal_model_ready", temporal_output.has_value()},
                         {"temporal_model_errors", temporal_model_errors.load()},
+                        {"temporal_frames_processed",
+                         temporal_frames_processed.load()},
+                        {"temporal_frames_overwritten",
+                         temporal_frames_overwritten.load()},
+                        {"persistence_frames_saved",
+                         persistence_frames_saved.load()},
+                        {"persistence_frames_dropped",
+                         persistence_frames_dropped.load()},
+                        {"persistence_errors", persistence_errors.load()},
                     }},
                 };
                 if (temporal_output.has_value()) {
@@ -836,6 +945,8 @@ void handle_websocket_connection(
                         temporal_output->lstm.steps.size();
                     response_metrics["temporal_frame_id"] =
                         temporal_output->lstm.steps.back().frame_id;
+                    response_metrics["temporal_decision_id"] =
+                        temporal_output->lstm.steps.back().decision_id;
                     response_metrics["temporal_applied_decision_id"] =
                         temporal_output->lstm.steps.back()
                             .applied_decision_id;
@@ -866,6 +977,10 @@ void handle_websocket_connection(
                             prediction.commands;
                         response_metrics["student_shadow_probabilities"] =
                             prediction.probabilities;
+                        response_metrics["student_shadow_active_probability"] =
+                            prediction.active_probability;
+                        response_metrics["student_shadow_action_active"] =
+                            prediction.action_active;
                         response_metrics["student_shadow_exact_match"] =
                             expected_state == predicted_state;
                     } else {
@@ -929,6 +1044,35 @@ void handle_websocket_connection(
     std::vector<std::uint8_t> fragmented_payload;
     std::uint8_t fragmented_opcode = 0;
     const std::size_t maximum_payload = options.max_jpeg_bytes + kMaximumFragmentOverhead;
+    const auto process_frame_envelope =
+        [&](FrameEnvelope envelope, std::int64_t received_ms) {
+            if (envelope.jpeg.size() > options.max_jpeg_bytes) {
+                throw std::invalid_argument(
+                    "JPEG exceeds configured size limit"
+                );
+            }
+            received_frames.fetch_add(1);
+            auto shared_envelope =
+                std::make_shared<FrameEnvelope>(std::move(envelope));
+            auto decoded = decode_frame(
+                *shared_envelope,
+                options.max_jpeg_bytes,
+                received_ms
+            );
+            const FramePushResult push_result = buffer.push(decoded);
+            if (push_result == FramePushResult::rejected_stale) {
+                writer.send_json({
+                    {"protocol_version", kActionProtocolVersion},
+                    {"type", "warning"},
+                    {"message", "stale or duplicate frame discarded"},
+                });
+                return;
+            }
+            enqueue_temporal(std::move(decoded));
+            enqueue_persistence(
+                std::move(shared_envelope), received_ms
+            );
+        };
 
     try {
         while (connected.load() && !stop_requested.load()) {
@@ -1038,63 +1182,16 @@ void handle_websocket_connection(
                     FrameEnvelope envelope = std::move(
                         std::get<FrameEnvelope>(client_message)
                     );
-                    if (envelope.jpeg.size() > options.max_jpeg_bytes) {
-                        throw std::invalid_argument(
-                            "JPEG exceeds configured size limit"
-                        );
-                    }
-                    received_frames.fetch_add(1);
-                    auto decoded = decode_frame(
-                        envelope, options.max_jpeg_bytes, received_ms
+                    process_frame_envelope(
+                        std::move(envelope), received_ms
                     );
-                    const FramePushResult push_result =
-                        buffer.push(decoded);
-                    if (push_result == FramePushResult::rejected_stale) {
-                        writer.send_json({
-                            {"protocol_version", kActionProtocolVersion},
-                            {"type", "warning"},
-                            {"message", "stale or duplicate frame discarded"},
-                        });
-                    } else {
-                        observe_temporal(decoded);
-                        save_frame_if_enabled(
-                            options,
-                            connection_id,
-                            envelope,
-                            received_ms,
-                            debug_frame_saved,
-                            latest_applied_record(action_history)
-                        );
-                    }
                     continue;
                 }
 
                 FrameEnvelope envelope = parse_binary_frame_envelope(message_payload);
-                if (envelope.jpeg.size() > options.max_jpeg_bytes) {
-                    throw std::invalid_argument("JPEG exceeds configured size limit");
-                }
-                received_frames.fetch_add(1);
-                auto decoded = decode_frame(
-                    envelope, options.max_jpeg_bytes, received_ms
+                process_frame_envelope(
+                    std::move(envelope), received_ms
                 );
-                const FramePushResult push_result = buffer.push(decoded);
-                if (push_result == FramePushResult::rejected_stale) {
-                    writer.send_json({
-                        {"protocol_version", kActionProtocolVersion},
-                        {"type", "warning"},
-                        {"message", "stale or duplicate frame discarded"},
-                    });
-                } else {
-                    observe_temporal(decoded);
-                    save_frame_if_enabled(
-                        options,
-                        connection_id,
-                        envelope,
-                        received_ms,
-                        debug_frame_saved,
-                        latest_applied_record(action_history)
-                    );
-                }
             } catch (const std::exception& error) {
                 if (processing_frame_message) {
                     decode_errors.fetch_add(1);
@@ -1119,7 +1216,13 @@ void handle_websocket_connection(
 
     connected.store(false);
     inference_thread.request_stop();
+    workers_stopping.store(true);
+    temporal_queue_changed.notify_all();
+    persistence_queue_changed.notify_all();
     shutdown(socket, SHUT_RDWR);
+    inference_thread.join();
+    temporal_worker.join();
+    persistence_worker.join();
     metrics.write({
         {"event", "disconnect"},
         {"connection_id", connection_id},
@@ -1131,6 +1234,11 @@ void handle_websocket_connection(
         {"acknowledgements_rejected", acknowledgements_rejected.load()},
         {"client_message_errors", client_message_errors.load()},
         {"temporal_model_errors", temporal_model_errors.load()},
+        {"temporal_frames_processed", temporal_frames_processed.load()},
+        {"temporal_frames_overwritten", temporal_frames_overwritten.load()},
+        {"persistence_frames_saved", persistence_frames_saved.load()},
+        {"persistence_frames_dropped", persistence_frames_dropped.load()},
+        {"persistence_errors", persistence_errors.load()},
         {"last_applied_decision_id", action_history.last_applied_decision_id()},
     });
     std::cout << "[DISCONNECT] connection=" << connection_id
@@ -1140,6 +1248,10 @@ void handle_websocket_connection(
               << " acknowledgements=" << acknowledgements_received.load()
               << " rejected_acknowledgements="
               << acknowledgements_rejected.load()
+              << " temporal_overwritten="
+              << temporal_frames_overwritten.load()
+              << " persistence_dropped="
+              << persistence_frames_dropped.load()
               << "; waiting for a new client\n";
 }
 
@@ -1150,6 +1262,7 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
     if (options_.host.empty() || options_.port == 0 || options_.frame_buffer_capacity == 0 ||
         options_.observation_frames == 0 ||
         options_.applied_action_history_size == 0 ||
+        options_.persistence_queue_capacity == 0 ||
         options_.max_jpeg_bytes == 0 ||
         options_.decision_interval.count() <= 0 || options_.failsafe_timeout.count() <= 0 ||
         options_.capture_directory.empty()) {
@@ -1222,6 +1335,12 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                       << " step=" << temporal_report->training_step
                       << " best_val_loss="
                       << temporal_report->best_validation_loss
+                      << " best_score="
+                      << temporal_report->best_selection_score
+                      << " active_threshold="
+                      << temporal_report->active_threshold
+                      << " command_threshold="
+                      << temporal_report->command_threshold
                       << " parameters="
                       << temporal_report->parameter_count
                       << " mode=student_shadow\n";
@@ -1267,6 +1386,8 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                     {"observation_frames", options_.observation_frames},
                     {"applied_action_history_size",
                      options_.applied_action_history_size},
+                    {"persistence_queue_capacity",
+                     options_.persistence_queue_capacity},
                     {"mock_character", "Sub-Zero"},
                     {"mock_facing",
                      options_.mock_facing_right ? "right" : "left"},

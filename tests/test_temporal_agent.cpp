@@ -139,13 +139,14 @@ int main() {
         require(latest.size() == 1, "confirmed command was not retained");
 
         const auto frame = make_frame(1, 1'020);
-        const auto observed_a = agent.observe(frame, latest.back());
+        const auto observed_a = agent.observe_frame(frame);
         require(
-            observed_a.applied_command_known &&
-                observed_a.applied_decision_id == 1,
-            "temporal observation did not use the confirmed A command"
+            observed_a.frame_id == 1 && observed_a.sequence_size == 0,
+            "visual observation advanced the decision sequence"
         );
-        const auto output_a = agent.infer();
+        const auto output_a = agent.advance_and_infer(
+            latest.back(), 1, 1'025
+        );
         require_finite_nonzero(output_a);
         if (has_temporal_checkpoint) {
             require(
@@ -158,6 +159,7 @@ int main() {
         require(
             output_a.lstm.steps.size() == 1 &&
                 output_a.lstm.steps.back().frame_id == 1 &&
+                output_a.lstm.steps.back().decision_id == 1 &&
                 output_a.lstm.steps.back().applied_decision_id == 1,
             "temporal metadata is not aligned with its ResNet50 feature"
         );
@@ -177,8 +179,10 @@ int main() {
             "test Right command ACK was rejected"
         );
         latest = action_history.latest_applied(1);
-        agent.observe(frame, latest.back());
-        const auto output_right = agent.infer();
+        agent.observe_frame(frame);
+        const auto output_right = agent.advance_and_infer(
+            latest.back(), 1, 1'050
+        );
         require_finite_nonzero(output_right);
         require(
             maximum_absolute_difference(
@@ -189,39 +193,43 @@ int main() {
 
         agent.reset();
         std::vector<float> first_sequence_output;
-        for (std::uint64_t frame_id = 1; frame_id <= 9; ++frame_id) {
-            agent.observe(
-                make_frame(
-                    frame_id,
-                    2'000 + static_cast<std::int64_t>(frame_id) * 67
-                ),
-                latest.back()
+        agent.observe_frame(make_frame(77, 2'000));
+        gameagent::TemporalAgentOutput wrapped;
+        for (std::uint64_t decision_id = 1;
+             decision_id <= 9;
+             ++decision_id) {
+            wrapped = agent.advance_and_infer(
+                latest.back(),
+                decision_id,
+                2'000 + static_cast<std::int64_t>(decision_id) * 50
             );
         }
-        const auto wrapped = agent.infer();
         require_finite_nonzero(wrapped);
         require(
             wrapped.lstm.steps.size() == 8,
             "temporal ring did not enforce its configured capacity"
         );
         require(
-            wrapped.lstm.steps.front().frame_id == 2 &&
-                wrapped.lstm.steps.back().frame_id == 9,
-            "temporal ring did not retain the eight newest ResNet50 features"
+            wrapped.lstm.steps.front().frame_id == 77 &&
+                wrapped.lstm.steps.back().frame_id == 77 &&
+                wrapped.lstm.steps.front().decision_id == 2 &&
+                wrapped.lstm.steps.back().decision_id == 9,
+            "temporal ring is not advancing on the 20 Hz decision clock"
         );
         first_sequence_output = wrapped.lstm.hidden;
 
         agent.reset();
-        for (std::uint64_t frame_id = 1; frame_id <= 9; ++frame_id) {
-            agent.observe(
-                make_frame(
-                    frame_id,
-                    2'000 + static_cast<std::int64_t>(frame_id) * 67
-                ),
-                latest.back()
+        agent.observe_frame(make_frame(77, 2'000));
+        gameagent::TemporalAgentOutput repeated;
+        for (std::uint64_t decision_id = 1;
+             decision_id <= 9;
+             ++decision_id) {
+            repeated = agent.advance_and_infer(
+                latest.back(),
+                decision_id,
+                2'000 + static_cast<std::int64_t>(decision_id) * 50
             );
         }
-        const auto repeated = agent.infer();
         require(
             maximum_absolute_difference(
                 first_sequence_output, repeated.lstm.hidden
@@ -245,6 +253,9 @@ int main() {
                 << "[POLICY] epoch=" << report.epoch
                 << " step=" << report.training_step
                 << " best_val_loss=" << report.best_validation_loss
+                << " best_score=" << report.best_selection_score
+                << " active_probability="
+                << prediction.active_probability
                 << " parameters=" << report.parameter_count
                 << " predicted_commands=";
             for (std::size_t index = 0;

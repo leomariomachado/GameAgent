@@ -77,13 +77,15 @@ new decoded frame
    - 10-value client-confirmed controller state
    - acknowledgement-known flag
    - normalized age of that state
-→ LSTM hidden size 256 over the newest 8 cached steps
-→ temporal hidden state for the future action head
+→ one recurrent step per 50 ms decision tick
+→ LSTM hidden size 256 over the newest 8 decision steps
+→ active/release head + 10-button action head
 ```
 
-The ResNet50 is not repeated for the complete window on every decision. Each
-new frame is embedded once and the bounded GPU ring retains only the newest
-features. The controller input comes from `action_ack`, so the temporal model
+The ResNet50 is not repeated for the complete window on every decision. A
+latest-wins worker embeds each selected new frame once. Every 50 ms decision
+then reuses the newest cached visual vector and advances the bounded GPU
+decision ring. The controller input comes from `action_ack`, so the temporal model
 sees what the client actually applied rather than assuming every requested
 state succeeded.
 
@@ -122,19 +124,24 @@ ambiguous heuristic labels remain auditable.
 
 The first learner is behavior cloning, not reinforcement learning. It joins
 timestamped ResNet50 features with the latest client-confirmed controller state
-and learns the teacher's next complete 10-button state with
-`BCEWithLogitsLoss`. The trainable model is:
+and learns both whether controls should be active and the teacher's next
+complete 10-button state. The trainable model is:
 
 ```text
-8 x FP32[2048] visual features
+8 decision ticks, each with the newest FP32[2048] visual feature
 → tanh visual projection (256)
 + 10 confirmed buttons + ACK-known + command age
 → one-layer LSTM (hidden 256)
+→ active/release logit
 → 10-logit multi-label action head
 ```
 
-The trainer uses AdamW, gradient clipping, session-level train/validation
-splits, positive-class balancing and checkpoint resume. It writes:
+The trainer uses AdamW, gradient clipping, focal binary loss, real per-command
+positive-class balancing, session-level train/validation splits, calibrated
+active/command thresholds and early stopping. Checkpoint selection uses
+active F1, command F1 and exact match on active actions; it does not use the
+misleading majority-zero bit accuracy. Version-1 inference checkpoints remain
+loadable, while training resume requires a version-2 `.pt`. It writes:
 
 ```text
 /workspace/gameagent/checkpoints/
@@ -146,8 +153,8 @@ splits, positive-class balancing and checkpoint resume. It writes:
 ```
 
 The server loads `.gat` weights in student-shadow mode. The teacher still
-controls the client, while `student_shadow_commands`, probabilities and exact
-match are logged for safe evaluation.
+controls the client, while the student's active probability, commands,
+probabilities and exact match are logged for safe evaluation.
 
 Run the standalone production-shape test:
 
@@ -159,8 +166,9 @@ bash scripts/run_temporal_lstm_test.sh
 ```
 
 It verifies the complete checkpoint, `512x448 → ResNet50 → LSTM`, use of the
-latest confirmed command, command sensitivity, an 8-step circular feature
-buffer and deterministic reset.
+   latest confirmed command, command sensitivity, an 8-decision circular
+   sequence reusing one cached frame, checkpoint v1/v2 loading and deterministic
+   reset.
 
 ## Endpoints
 
@@ -321,12 +329,19 @@ The command mapping remains:
 - Duplicate or out-of-order `frame_id` values are rejected as stale.
 - The inference loop is independent of frame reception and wakes every 50 ms.
 - It selects up to the newest 8 frames and returns one action immediately.
+- ResNet50 feature extraction runs on a latest-wins background worker. If a
+  newer frame arrives while another is pending, the obsolete pending frame is
+  replaced instead of creating latency.
+- Optional JPEG persistence runs on a separate bounded queue. Disk/network
+  volume latency never blocks WebSocket ACK reception or the decision loop.
 - A disconnect stops only that client's inference loop. The listening process
   remains alive and waits for the next WebSocket connection.
 
 Each action and connection lifecycle event is appended to a JSON Lines metrics
 file. Decision records contain frame latency, inference time, discarded frames,
-commands, and the exact frame IDs used. `frame_latency_ms` uses the timestamp
+commands, and the exact frame IDs used. It also records temporal frames
+processed/overwritten and persistence frames saved/dropped/errors.
+`frame_latency_ms` uses the timestamp
 sent by the client and therefore requires synchronized client/server clocks.
 `server_frame_age_ms` uses only the RunPod clock and reliably measures how long
 the selected frame waited between server reception and the decision. Records are flushed in small
@@ -358,13 +373,14 @@ sample filename to its frame ID and timestamps.
 | `GAMEAGENT_FRAME_BUFFER_CAPACITY` | `32` | decoded frames retained |
 | `GAMEAGENT_OBSERVATION_FRAMES` | `8` | newest frames used by the agent |
 | `GAMEAGENT_ACTION_HISTORY_SIZE` | `8` | newest client-confirmed states given to the agent |
+| `GAMEAGENT_PERSISTENCE_QUEUE_CAPACITY` | `256` | bounded asynchronous JPEG write queue; oldest pending write is dropped on overflow |
 | `GAMEAGENT_DECISION_INTERVAL_MS` | `50` | inference loop interval |
 | `GAMEAGENT_FAILSAFE_TIMEOUT_MS` | `200` | client safety release timeout advertised in every action |
 | `GAMEAGENT_MAX_JPEG_MB` | `8` | maximum JPEG payload |
 | `GAMEAGENT_METRICS_PATH` | `metrics.jsonl` | JSONL metrics output |
 | `GAMEAGENT_CAPTURE_DIR` | `captures` | optional JPEG inspection output |
 | `GAMEAGENT_SAVE_FRAMES` | `0` | save only the first valid JPEG from each connection; zero keeps everything in memory |
-| `GAMEAGENT_COLLECT_TRAINING_DATA` | `0` | explicitly save every accepted JPEG and aligned ACK metadata for offline training |
+| `GAMEAGENT_COLLECT_TRAINING_DATA` | `0` | enqueue accepted JPEGs and aligned ACK metadata for offline training without blocking reception |
 | `GAMEAGENT_TRAINING_CAPTURE_DIR` | `/workspace/gameagent/training_captures` | full-session training capture root |
 | `GAMEAGENT_SUBZERO_FACING` | `right` | maps Forward/Back for a character facing `right` or `left` |
 | `GAMEAGENT_API_TOKEN` | unset | Bearer or X-API-Key credential |
@@ -462,22 +478,33 @@ bash scripts/run_runpod_server.sh
 ```
 
 Normal gameplay keeps `GAMEAGENT_COLLECT_TRAINING_DATA=0`; full JPEG persistence
-is only active under this training flag.
+is only active under this training flag. If the persistent volume cannot keep
+up, the oldest pending disk write is dropped and
+`persistence_frames_dropped` is incremented; live control remains prioritized.
 
 Convert a collected session to features and train/checkpoint the student:
 
 ```bash
 GAMEAGENT_PRETRAIN_EPOCHS=30 \
 GAMEAGENT_PRETRAIN_BATCH_SIZE=64 \
+GAMEAGENT_PRETRAIN_PATIENCE=6 \
 bash scripts/run_subzero_training_pipeline.sh
 ```
 
-Resume for another 20 epochs:
+Resume a version-2 run for another 20 epochs:
 
 ```bash
 GAMEAGENT_PRETRAIN_RESUME=1 \
 GAMEAGENT_PRETRAIN_EPOCHS=20 \
 bash scripts/run_subzero_pretraining.sh
+```
+
+Validate the complete decision-clock trainer and binary checkpoint format on a
+small deterministic dataset before a long run:
+
+```bash
+cd /tmp/GameAgent
+bash scripts/run_temporal_trainer_smoke.sh
 ```
 
 Load the best trained student in safe shadow mode:

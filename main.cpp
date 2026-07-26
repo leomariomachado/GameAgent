@@ -98,6 +98,7 @@ void print_help(const char* executable) {
         << "  --buffer-frames N       Circular buffer capacity (default: 32)\n"
         << "  --observation-frames N  Frames used per decision (default: 8)\n"
         << "  --action-history N      Confirmed actions given to the agent (default: 8)\n"
+        << "  --persistence-queue N   Async JPEG write queue (default: 256)\n"
         << "  --interval-ms MS        Decision interval (default: 50)\n"
         << "  --failsafe-ms MS        Client release timeout advertised by server (default: 200)\n"
         << "  --max-jpeg-mb MB        Maximum JPEG size (default: 8)\n"
@@ -132,6 +133,10 @@ int main(int argc, char** argv) {
         );
         server_options.applied_action_history_size = parse_positive_size(
             environment_or("GAMEAGENT_ACTION_HISTORY_SIZE", "8"), "action history size"
+        );
+        server_options.persistence_queue_capacity = parse_positive_size(
+            environment_or("GAMEAGENT_PERSISTENCE_QUEUE_CAPACITY", "256"),
+            "persistence queue capacity"
         );
         server_options.decision_interval = std::chrono::milliseconds(parse_positive_size(
             environment_or("GAMEAGENT_DECISION_INTERVAL_MS", "50"), "decision interval"
@@ -219,6 +224,12 @@ int main(int argc, char** argv) {
                 server_options.applied_action_history_size = parse_positive_size(
                     require_value(argument), "action history size"
                 );
+            } else if (argument == "--persistence-queue") {
+                server_options.persistence_queue_capacity =
+                    parse_positive_size(
+                        require_value(argument),
+                        "persistence queue capacity"
+                    );
             } else if (argument == "--interval-ms") {
                 server_options.decision_interval = std::chrono::milliseconds(
                     parse_positive_size(require_value(argument), "decision interval")

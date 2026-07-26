@@ -17,6 +17,7 @@ struct WebSocketServerOptions {
     std::size_t observation_frames = 8;
     std::size_t applied_action_history_size = 8;
     std::size_t max_jpeg_bytes = 8U * 1024U * 1024U;
+    std::size_t persistence_queue_capacity = 256;
     std::chrono::milliseconds decision_interval{50};
     std::chrono::milliseconds failsafe_timeout{200};
     std::optional<std::string> api_token;

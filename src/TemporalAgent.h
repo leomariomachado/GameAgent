@@ -25,10 +25,8 @@ struct TemporalAgentConfig {
 
 struct TemporalObservationResult {
     std::uint64_t frame_id = 0;
-    std::uint64_t applied_decision_id = 0;
-    bool applied_command_known = false;
     std::size_t sequence_size = 0;
-    double enqueue_ms = 0.0;
+    double feature_ms = 0.0;
 };
 
 struct TemporalAgentOutput {
@@ -42,16 +40,21 @@ struct TemporalAgentOutput {
 // decoded RGB frame -> frozen ResNet50 -> cached FP16[2048]
 //                   + latest client-confirmed command -> GPU LSTM
 //
-// This class deliberately does not choose controller actions yet. Until a
-// trained action head/checkpoint exists, the server continues to return the
-// deterministic Sub-Zero mock while exposing this validated temporal state.
+// A loaded policy predicts active/release plus controller state in shadow mode.
+// The server keeps the deterministic Sub-Zero teacher in control until the
+// student passes offline and online safety validation.
 class TemporalAgent {
 public:
     explicit TemporalAgent(TemporalAgentConfig config);
 
-    TemporalObservationResult observe(
-        const BufferedFrame& frame,
-        const std::optional<AppliedActionRecord>& latest_applied_action
+    // Updates only the cached visual feature. The recurrent sequence advances
+    // in advance_and_infer(), once per controller decision, even when several
+    // decisions reuse the same camera frame.
+    TemporalObservationResult observe_frame(const BufferedFrame& frame);
+    TemporalAgentOutput advance_and_infer(
+        const std::optional<AppliedActionRecord>& latest_applied_action,
+        std::uint64_t decision_id,
+        std::int64_t decision_timestamp_ms
     );
     TemporalAgentOutput infer();
     void reset();
@@ -70,6 +73,8 @@ private:
     ResNet50CheckpointReport checkpoint_report_;
     std::optional<TemporalPolicyCheckpointReport>
         temporal_checkpoint_report_;
+    const __half* latest_visual_feature_ = nullptr;
+    TemporalStepMetadata latest_frame_metadata_;
     mutable std::mutex mutex_;
 };
 
