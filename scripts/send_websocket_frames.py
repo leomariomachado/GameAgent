@@ -18,6 +18,36 @@ from urllib.parse import urlparse
 
 
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+OPPONENT_CHARACTERS = (
+    "unknown",
+    "cyrax",
+    "ermac",
+    "jade",
+    "jax",
+    "kabal",
+    "kano",
+    "kitana",
+    "kung_lao",
+    "liu_kang",
+    "mileena",
+    "motaro",
+    "nightwolf",
+    "noob_saibot",
+    "rain",
+    "reptile",
+    "scorpion",
+    "sektor",
+    "shang_tsung",
+    "shao_kahn",
+    "sheeva",
+    "sindel",
+    "smoke",
+    "human_smoke",
+    "sonya",
+    "stryker",
+    "subzero",
+    "classic_subzero",
+)
 
 
 def receive_exact(connection: socket.socket, size: int) -> bytes:
@@ -119,6 +149,20 @@ def main() -> int:
     parser.add_argument("--fps", type=float, default=15.0)
     parser.add_argument("--frames", type=int, default=100)
     parser.add_argument("--token", default=os.getenv("GAMEAGENT_API_TOKEN"))
+    parser.add_argument(
+        "--character",
+        choices=("subzero", "scorpion", "noob_saibot", "sindel"),
+        default="subzero",
+    )
+    parser.add_argument(
+        "--opponent-character",
+        choices=OPPONENT_CHARACTERS,
+        default="unknown",
+    )
+    parser.add_argument("--player-side", choices=("left", "right"), default="left")
+    parser.add_argument(
+        "--initial-facing", choices=("left", "right"), default="right"
+    )
     args = parser.parse_args()
     if args.fps <= 0 or args.frames <= 0:
         parser.error("--fps and --frames must be positive")
@@ -128,6 +172,38 @@ def main() -> int:
         parser.error("--jpeg must point to a JPEG image")
     connection = connect_websocket(args.url, args.token)
     print(f"[CONNECTED] {args.url}")
+    session_configuration = {
+        "protocol_version": 2,
+        "type": "session_config",
+        "player_character": args.character,
+        "player_side": args.player_side,
+        "initial_facing": args.initial_facing,
+    }
+    session_configuration["opponent_character"] = args.opponent_character
+    send_client_frame(
+        connection,
+        0x1,
+        json.dumps(session_configuration, separators=(",", ":")).encode("utf-8"),
+    )
+    while True:
+        opcode, payload = receive_server_frame(connection)
+        if opcode == 0x9:
+            send_client_frame(connection, 0xA, payload)
+            continue
+        if opcode != 0x1:
+            raise RuntimeError("server closed before session_config_ack")
+        session_response = json.loads(payload)
+        if session_response.get("type") != "session_config_ack":
+            raise RuntimeError(f"session configuration rejected: {session_response}")
+        if session_response.get("player_character") != args.character:
+            raise RuntimeError("server selected a different character profile")
+        if (
+            session_response.get("opponent_character")
+            != args.opponent_character
+        ):
+            raise RuntimeError("server selected a different opponent identity")
+        print(f"[SESSION] {json.dumps(session_response, separators=(',', ':'))}")
+        break
 
     frame_id = 1
     next_frame = time.monotonic()

@@ -86,7 +86,7 @@ bool parse_facing_right(std::string value) {
         return false;
     }
     throw std::invalid_argument(
-        "Sub-Zero facing must be right/direita or left/esquerda"
+        "default facing must be right/direita or left/esquerda"
     );
 }
 
@@ -136,13 +136,14 @@ void print_help(const char* executable) {
         << "  --max-jpeg-mb MB        Maximum JPEG size (default: 8)\n"
         << "  --metrics-path PATH     JSONL metrics path\n"
         << "  --capture-dir PATH      Optional frame capture directory\n"
-        << "  --save-frames           Save one JPEG per connection for debugging\n"
+        << "  --save-frames           Save periodic JPEG samples for debugging\n"
+        << "  --debug-capture-ms MS   Debug JPEG interval (default: 3000)\n"
         << "  --collect-training-data Save every accepted frame for offline training\n"
         << "  --training-capture-dir P Training JPEG/metadata directory\n"
         << "  --temporal-model        Enable frozen ResNet50 + GPU LSTM features\n"
         << "  --reinforcement-learning Enable online semi-Markov Double DQN control\n"
         << "  --rl-evaluation         Run RL without updating weights\n"
-        << "  --rl-checkpoint PATH    Latest/resumable RL checkpoint\n"
+        << "  --rl-checkpoint-dir P   Shared RL policy checkpoint directory\n"
         << "  --rl-reward-log-ms MS   Accumulated RL reward log interval (default: 5000)\n"
         << "  --rl-no-resume          Start RL weights/replay from scratch\n"
         << "  --player-side SIDE      Controlled HUD side: left/P1 or right/P2\n"
@@ -151,7 +152,7 @@ void print_help(const char* executable) {
         << "  --device ID             CUDA device used by ResNet50/LSTM (default: 0)\n"
         << "  --lstm-projection N     Visual projection width (default: 256)\n"
         << "  --lstm-hidden N         LSTM hidden width (default: 256)\n"
-        << "  --subzero-facing SIDE   Direction Sub-Zero faces: right or left (default: right)\n"
+        << "  --default-facing SIDE   Legacy/default facing: right or left (default: right)\n"
         << "  --seed NUMBER           Deterministic random command seed\n"
         << "  --help                  Show this help\n";
 }
@@ -194,6 +195,13 @@ int main(int argc, char** argv) {
         server_options.save_frames = parse_boolean(
             environment_or("GAMEAGENT_SAVE_FRAMES", "0"), "frame saving flag"
         );
+        server_options.debug_capture_interval =
+            std::chrono::milliseconds(parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_DEBUG_CAPTURE_INTERVAL_MS", "3000"
+                ),
+                "debug capture interval"
+            ));
         server_options.collect_training_data = parse_boolean(
             environment_or("GAMEAGENT_COLLECT_TRAINING_DATA", "0"),
             "training data collection flag"
@@ -244,13 +252,9 @@ int main(int argc, char** argv) {
             environment_or("GAMEAGENT_LSTM_HIDDEN_SIZE", "256"),
             "LSTM hidden size"
         );
-        server_options.reinforcement_checkpoint = environment_or(
-            "GAMEAGENT_RL_CHECKPOINT",
-            "/workspace/gameagent/rl_checkpoints/subzero_dqn_latest.garl"
-        );
-        server_options.reinforcement_best_checkpoint = environment_or(
-            "GAMEAGENT_RL_BEST_CHECKPOINT",
-            "/workspace/gameagent/rl_checkpoints/subzero_dqn_best.garl"
+        server_options.reinforcement_checkpoint_directory = environment_or(
+            "GAMEAGENT_RL_CHECKPOINT_DIR",
+            "/workspace/gameagent/rl_checkpoints"
         );
         server_options.reinforcement_network_hidden_size = parse_positive_size(
             environment_or("GAMEAGENT_RL_HIDDEN_SIZE", "128"),
@@ -297,8 +301,8 @@ int main(int argc, char** argv) {
                 environment_or("GAMEAGENT_RL_SCRIPTED_EXPLORATION", "0.50"),
                 "RL scripted exploration probability", 0.0f, 1.0f
             );
-        server_options.mock_facing_right = parse_facing_right(
-            environment_or("GAMEAGENT_SUBZERO_FACING", "right")
+        server_options.default_facing_right = parse_facing_right(
+            environment_or("GAMEAGENT_DEFAULT_FACING", "right")
         );
         if (const char* token = std::getenv("GAMEAGENT_API_TOKEN");
             token != nullptr && token[0] != '\0') {
@@ -357,6 +361,12 @@ int main(int argc, char** argv) {
                 server_options.capture_directory = require_value(argument);
             } else if (argument == "--save-frames") {
                 server_options.save_frames = true;
+            } else if (argument == "--debug-capture-ms") {
+                server_options.debug_capture_interval =
+                    std::chrono::milliseconds(parse_positive_size(
+                        require_value(argument),
+                        "debug capture interval"
+                    ));
             } else if (argument == "--collect-training-data") {
                 server_options.collect_training_data = true;
             } else if (argument == "--training-capture-dir") {
@@ -368,8 +378,9 @@ int main(int argc, char** argv) {
                 server_options.reinforcement_learning_enabled = true;
             } else if (argument == "--rl-evaluation") {
                 server_options.reinforcement_training_enabled = false;
-            } else if (argument == "--rl-checkpoint") {
-                server_options.reinforcement_checkpoint = require_value(argument);
+            } else if (argument == "--rl-checkpoint-dir") {
+                server_options.reinforcement_checkpoint_directory =
+                    require_value(argument);
             } else if (argument == "--rl-reward-log-ms") {
                 server_options.reinforcement_reward_log_interval =
                     std::chrono::milliseconds(parse_positive_size(
@@ -402,8 +413,8 @@ int main(int argc, char** argv) {
                     parse_positive_size(
                         require_value(argument), "LSTM hidden size"
                     );
-            } else if (argument == "--subzero-facing") {
-                server_options.mock_facing_right = parse_facing_right(
+            } else if (argument == "--default-facing") {
+                server_options.default_facing_right = parse_facing_right(
                     require_value(argument)
                 );
             } else if (argument == "--seed") {
@@ -444,8 +455,9 @@ int main(int argc, char** argv) {
             << "buffer circular: " << server_options.frame_buffer_capacity << " frames\n"
             << "historico confirmado: " << server_options.applied_action_history_size
             << " acoes\n"
-            << "mock: Sub-Zero, olhando para "
-            << (server_options.mock_facing_right ? "direita" : "esquerda")
+            << "perfis: subzero, scorpion, noob_saibot, sindel; "
+               "padrao subzero olhando para "
+            << (server_options.default_facing_right ? "direita" : "esquerda")
             << '\n'
             << "modelo temporal: "
             << (
@@ -477,7 +489,15 @@ int main(int argc, char** argv) {
             )
             << '\n'
             << "salvamento de frames: "
-            << (server_options.save_frames ? "habilitado (debug)" : "desabilitado")
+            << (
+                server_options.save_frames
+                    ? "habilitado (debug a cada " +
+                          std::to_string(
+                              server_options.debug_capture_interval.count()
+                          ) +
+                          " ms)"
+                    : "desabilitado"
+            )
             << '\n'
             << "coleta de treinamento: "
             << (

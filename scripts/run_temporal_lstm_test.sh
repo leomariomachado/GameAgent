@@ -5,7 +5,7 @@ GAMEAGENT_ROOT="${GAMEAGENT_ROOT:-/tmp/GameAgent}"
 BASEAI_ROOT="${BASEAI_ROOT:-/tmp/BaseAI}"
 BUILD_DIR="${GAMEAGENT_BUILD_DIR:-${GAMEAGENT_ROOT}/buildrelease}"
 CHECKPOINT="${GAMEAGENT_RESNET50_CHECKPOINT:-/workspace/resnet50_best.ckpt}"
-TEMPORAL_CHECKPOINT="${GAMEAGENT_TEMPORAL_CHECKPOINT:-/workspace/gameagent/checkpoints/subzero_temporal_best.gat}"
+TEMPORAL_CHECKPOINT="${GAMEAGENT_TEMPORAL_CHECKPOINT:-}"
 BUILD_JOBS="${GAMEAGENT_BUILD_JOBS:-$(nproc)}"
 
 if [[ ! -f "${GAMEAGENT_ROOT}/CMakeLists.txt" ]]; then

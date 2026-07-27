@@ -3,12 +3,19 @@
 The current stage runs a persistent, low-latency WebSocket server. It receives
 JPEG frames continuously, decodes them into RGB images, retains only a bounded
 window of the newest frames, and returns command-state vectors through the same
-connection. The original Sub-Zero teacher remains available, while an optional
-online reinforcement learner can now control active fight frames.
+connection. A character-specific scripted teacher or online reinforcement
+learner can control active fight frames.
 
 The mock remains isolated behind `MockAgent`; enabling reinforcement learning
 does not change transport, buffering, acknowledgement, or client controller
 semantics.
+
+The available profiles are Sub-Zero, Scorpion, Noob Saibot, and Sindel. At
+connection start, the client identifies the current fighter with a protocol-v2
+`session_config`; old clients that send a frame first continue to default to
+Sub-Zero. All four profiles use the same architecture. Each character owns an
+independent epsilon schedule and action head, while all profiles train one
+shared strategy trunk, embedding tables, replay and latest checkpoint.
 
 ## Frozen ResNet50 visual features
 
@@ -90,98 +97,46 @@ decision ring. The controller input comes from `action_ack`, so the temporal mod
 sees what the client actually applied rather than assuming every requested
 state succeeded.
 
-Without a temporal checkpoint, the LSTM uses deterministic initialization only.
-With a trained checkpoint, the student predicts in shadow mode while controller
-actions still come from the Sub-Zero teacher. The optional temporal metrics
-report the sequence, aligned frame/ACK, hidden-state norm, inference time,
-student prediction and errors. Student control can therefore be enabled later
-without changing transport or acknowledgement semantics. `infer_device()`
-already exposes the final FP32 hidden vector on the same CUDA stream; the
-current host copy exists only for tests and diagnostic metrics.
+Without a temporal checkpoint, the LSTM uses one deterministic initialization
+shared by every character. This is the clean default: only the ImageNet
+ResNet50 is pretrained, and the shared RL policy starts from scratch. An
+optional `.gat` temporal checkpoint can still be supplied for experiments, but
+it is not required by reinforcement mode.
 
-## Sub-Zero curriculum and behavior cloning
+## Uniform character curricula
 
-The teacher now samples a weighted curriculum:
+Every profile is built by the same pipeline:
 
-- 50% conditional plans: Freeze, observe, approach and complete a three- or
-  four-hit combo;
-- 30% known isolated Sub-Zero moves;
-- 15% structured combat variations: forward jump/high kick, crouching
-  uppercut, and running approaches followed by three- or four-hit combos;
-- 5% bounded exploration containing no contradictory directions and explicit
-  release states.
+1. load only the declared special moves and combos for that character;
+2. add an equal-weight Forward/Back mirror for each unique directional move;
+3. preserve explicit neutral states between repeated taps;
+4. combine simultaneous controls such as `B+X` in one state vector;
+5. add the same 11 generic primitive options for reinforcement learning.
 
-Every unique curriculum program that uses Forward or Back now has an
-equal-weight ` [Espelho F/B]` variant with every directional state exchanged,
-including simultaneous buttons and conditional recovery branches. Freeze and
-Ice Clone already form the same directional pair, so they are not duplicated.
-The total probability of each original family is preserved. All variants also
-mirror Forward/Back automatically when the fighter changes side. Every movement
-and attack is represented by complete controller states at the configured
-decision cadence, including explicit releases, so the existing protocol-v2
-client requires no change.
-
-The mirrored curriculum expands the DQN action set from 28 to 39 options.
-`run_subzero_rl.sh` therefore uses separate
-`subzero_dqn_fb_mirrors_{latest,best}.garl` checkpoints. Existing checkpoints
-remain untouched, but cannot be resumed into this different output
-architecture.
-
-After Freeze, the teacher compares a conservative opponent-side ice-color score
-with the pre-move baseline. A clear miss branches to block/retreat; a confirmed
-or visually ambiguous result continues through approach and combo. Every
-decision records `curriculum_source`, `curriculum_phase`,
-`curriculum_branch`, `freeze_visual_score` and `freeze_visual_delta`, so
-ambiguous heuristic labels remain auditable.
-
-The first learner is behavior cloning, not reinforcement learning. It joins
-timestamped ResNet50 features with the latest client-confirmed controller state
-and learns both whether controls should be active and the teacher's next
-complete 10-button state. The trainable model is:
-
-```text
-8 decision ticks, each with the newest FP32[2048] visual feature
-→ tanh visual projection (256)
-+ 10 confirmed buttons + ACK-known + command age
-→ one-layer LSTM (hidden 256)
-→ active/release logit
-→ 10-logit multi-label action head
-```
-
-The trainer uses AdamW, gradient clipping, focal binary loss, real per-command
-positive-class balancing, session-level train/validation splits, calibrated
-active/command thresholds and early stopping. Checkpoint selection uses
-active F1, command F1 and exact match on active actions; it does not use the
-misleading majority-zero bit accuracy. Version-1 inference checkpoints remain
-loadable, while training resume requires a version-2 `.pt`. It writes:
-
-```text
-/workspace/gameagent/checkpoints/
-├── subzero_temporal_latest.pt   # model + AdamW + epoch/step; resumable
-├── subzero_temporal_best.pt
-├── subzero_temporal_latest.gat  # compact C++/CUDA inference weights
-├── subzero_temporal_best.gat
-└── subzero_dataset_summary.json
-```
-
-The server loads `.gat` weights in student-shadow mode. The teacher still
-controls the client, while the student's active probability, commands,
-probabilities and exact match are logged for safe evaluation.
+Sub-Zero no longer receives conditional freeze follow-ups, hand-authored
+running plans, extra exploration programs, or a pretrained temporal policy.
+Its six declared base moves produce nine unique scripted variants after
+mirroring. Noob Saibot, Scorpion, and Sindel produce 7, 11, and 12 scripted
+variants respectively. Different counts reflect their declared move lists, not
+different learning privileges.
 
 ## Online reinforcement learning
 
-Reinforcement mode promotes the frozen ResNet50/LSTM encoder from shadow
-diagnostics to the state encoder for a semi-Markov Double DQN. It adds the
+Reinforcement mode uses the frozen ResNet50 and deterministic temporal encoder
+as the state encoder for a shared semi-Markov Double DQN. It adds the
 controlled and opponent health fractions, health advantage, HUD confidence,
 the latest client-confirmed 10-button state and ACK-known flag to the 256-value
 LSTM hidden state.
 
-The DQN chooses among 28 high-level options:
+The state is concatenated with learned 16-value embeddings for the controlled
+character and opponent. A shared hidden trunk learns spacing, defense, timing
+and fight-state strategy from every character. Each controlled character has a
+small action head so specials with different meanings never collide. The
+selected head chooses among high-level options:
 
 - bounded primitive holds such as move, block, jump, punch and kick;
-- known Sub-Zero specials and combos;
-- Freeze/approach/combo plans;
-- running, jumping and crouching variations.
+- that character's declared specials and combos;
+- the unique Forward/Back mirrors of those programs.
 
 An option emits one complete protocol-v2 controller state every 50 ms. Its
 discounted reward is accumulated until the option ends, and replay stores its
@@ -192,8 +147,10 @@ tick.
 Exploration is hierarchical. Epsilon first decides exploration versus DQN
 exploitation. During exploration, `GAMEAGENT_RL_SCRIPTED_EXPLORATION` chooses
 between a valid character-specific sequence and a bounded primitive action.
-The default is a 50/50 split. Epsilon decays from 1.0 to 0.05 over 100,000 option
-selections.
+The default is a 50/50 split. Epsilon decays from 1.0 to 0.05 over 100,000
+option selections independently for each character. Replay is shared and
+sampled uniformly across non-empty player/opponent matchups so a frequently
+used character cannot completely suppress rarer matchups.
 
 ### Fight gate and reward
 
@@ -223,21 +180,24 @@ once. `action_ack` remains the source of truth for commands actually applied.
 
 ### Checkpoints and resume
 
-RL checkpoints include online and target networks, Adam moments, counters,
-epsilon progress and replay memory. They are written atomically at round end
-and connection shutdown:
+RL format-v4 checkpoints include the online/target shared trunk, learned
+embeddings, all four action heads, Adam moments, per-character epsilon and
+episode counters, plus matchup-labelled replay memory. They are written
+atomically at round end and connection shutdown:
 
 ```text
 /workspace/gameagent/rl_checkpoints/
-├── subzero_dqn_fb_mirrors_latest.garl
-└── subzero_dqn_fb_mirrors_best.garl
+├── shared_policy_latest.garl
+├── shared_policy_best_subzero.garl
+├── shared_policy_best_scorpion.garl
+├── shared_policy_best_noob_saibot.garl
+└── shared_policy_best_sindel.garl
 ```
 
-The full agent requires both pretrained encoders:
+The only required pretrained artifact is:
 
 ```text
 /workspace/resnet50_best.ckpt
-/workspace/gameagent/checkpoints_v2/subzero_temporal_latest.gat
 ```
 
 Start or resume online training:
@@ -246,29 +206,29 @@ Start or resume online training:
 cd /tmp/GameAgent
 
 export GAMEAGENT_API_TOKEN="$(< /workspace/gameagent/api_token)"
-GAMEAGENT_RL_RESUME=1 bash scripts/run_subzero_rl.sh
+GAMEAGENT_RL_RESUME=1 bash scripts/run_character_rl.sh
 ```
 
-Start from fresh DQN/replay weights while preserving the previous run by using
-new output paths:
+The client then selects the character and opponent in `session_config`. A
+different character loads the same shared latest checkpoint and selects its own
+head. To start the complete shared policy from scratch in an empty directory:
 
 ```bash
 GAMEAGENT_RL_RESUME=0 \
-GAMEAGENT_RL_CHECKPOINT=/workspace/gameagent/rl_checkpoints/fresh_latest.garl \
-GAMEAGENT_RL_BEST_CHECKPOINT=/workspace/gameagent/rl_checkpoints/fresh_best.garl \
-bash scripts/run_subzero_rl.sh
+GAMEAGENT_RL_CHECKPOINT_DIR=/workspace/gameagent/rl_checkpoints_clean \
+bash scripts/run_character_rl.sh
 ```
 
 Evaluation uses the same checkpoint and disables updates:
 
 ```bash
-GAMEAGENT_RL_TRAINING=0 bash scripts/run_subzero_rl.sh
+GAMEAGENT_RL_TRAINING=0 bash scripts/run_character_rl.sh
 ```
 
 Frame persistence remains off by default in RL mode. Health detection, visual
 features and decisions operate directly on the decoded in-memory frame.
 
-The Sub-Zero RL launcher uses a 100 ms decision interval (10 controller states
+The character RL launcher uses a 100 ms decision interval (10 controller states
 per second) and advertises a 750 ms client failsafe. This matches a 10 FPS
 client without changing the generic server defaults. The fight gate still
 releases controls when the newest frame is older than three decision intervals,
@@ -278,7 +238,7 @@ Both values remain configurable:
 ```bash
 GAMEAGENT_DECISION_INTERVAL_MS=100 \
 GAMEAGENT_FAILSAFE_TIMEOUT_MS=750 \
-bash scripts/run_subzero_rl.sh
+bash scripts/run_character_rl.sh
 ```
 
 The server prints one accumulated learning summary every five seconds without
@@ -298,7 +258,7 @@ make reward events easier to scan.
 Change only the reporting cadence, in milliseconds, with:
 
 ```bash
-GAMEAGENT_RL_REWARD_LOG_INTERVAL_MS=3000 bash scripts/run_subzero_rl.sh
+GAMEAGENT_RL_REWARD_LOG_INTERVAL_MS=3000 bash scripts/run_character_rl.sh
 ```
 
 Run the standalone production-shape test:
@@ -329,6 +289,54 @@ wss://POD_ID-8080.proxy.runpod.net/ws
 
 RunPod terminates TLS at the proxy. The process inside the Pod therefore serves
 ordinary WebSocket traffic on port 8080; it does not need a certificate.
+
+## Character selection
+
+Immediately after connecting and before sending the first frame, send:
+
+```json
+{
+  "protocol_version": 2,
+  "type": "session_config",
+  "player_character": "noob_saibot",
+  "opponent_character": "scorpion",
+  "player_side": "left",
+  "initial_facing": "right"
+}
+```
+
+Supported `player_character` values are `subzero`, `scorpion`,
+`noob_saibot`, and `sindel`.
+
+`opponent_character` selects one row from a learned embedding table and accepts:
+
+```text
+unknown, cyrax, ermac, jade, jax, kabal, kano, kitana, kung_lao,
+liu_kang, mileena, motaro, nightwolf, noob_saibot, rain, reptile,
+scorpion, sektor, shang_tsung, shao_kahn, sheeva, sindel, smoke,
+human_smoke, sonya, stryker, subzero, classic_subzero
+```
+
+`unknown` is used when the field is omitted. `sheeva` is retained for arcade
+UMK3 compatibility even though she is absent from the SNES port.
+`player_side` and `initial_facing` are optional and accept `left` or `right`.
+The client must wait for `session_config_ack` before transmitting frames.
+Changing either fighter identity requires a reconnect; a later
+`session_config` is rejected. If the first data message is already a frame, the
+server preserves legacy behavior and selects Sub-Zero versus `unknown` without
+an acknowledgement.
+
+The acknowledgement reports the canonical character slug, selected profile,
+canonical opponent slug/name and embedding index, number of scripted curriculum
+variants, effective side/facing, active agent mode, and whether a compatible
+checkpoint is loaded. Unsupported opponent values produce
+`session_config_error` with `supported_opponent_characters`.
+
+The latest policy checkpoint is shared across every controlled fighter and
+matchup. For example, Sub-Zero experience updates the common strategy used by
+Sindel, while their specials remain in distinct action heads. Opponent
+embeddings allow the same policy to learn different behavior against Scorpion,
+Motaro and Shao Kahn. Reinforcement checkpoints use format version 4.
 
 ## Binary frame protocol (recommended)
 
@@ -370,6 +378,8 @@ so the existing GameAgent JSON parser can continue reading it:
   "protocol_version": 2,
   "type": "action",
   "action_mode": "state",
+  "player_character": "subzero",
+  "opponent_character": "scorpion",
   "commands": [7],
   "mock_move": "Congelar",
   "mock_step": 1,
@@ -431,8 +441,8 @@ whether the applied set matches the requested set, and keeps the newest confirme
 states in an in-memory action history. The agent receives this confirmed history
 alongside the decoded frame observation. No disk access is involved.
 
-The teacher samples the weighted Sub-Zero curriculum and completes the selected
-state sequence or conditional recovery branch before choosing another plan. At
+The teacher samples the selected character's weighted curriculum and completes
+the selected state sequence before choosing another plan. At
 the default 50 ms decision
 interval, every row below is one WebSocket action. `[]` releases all controls;
 it is deliberately used between repeated button presses and between moves.
@@ -451,6 +461,13 @@ With Sub-Zero facing right, the exact sequences are:
 Here `B` in the final position of a special move means the B/low-punch button
 (`2`); `B` used as a direction means Back. A plus sign means simultaneous
 controls in one vector. Commas mean consecutive 50 ms states.
+
+Scorpion, Noob Saibot, and Sindel use the moves listed in their source
+specification, plus an equal-weight Forward/Back mirror for every unique
+directional program. Repeated directions contain an explicit neutral state
+between taps, aerial variants begin with Up states, and combinations such as
+`B+X` or `D+Y` are emitted atomically in one `commands` vector. Their current
+curriculum sizes are respectively 11, 7, and 12 variants.
 
 The command mapping remains:
 
@@ -501,10 +518,11 @@ no image is re-encoded.
 
 For an explicit debug run, set `GAMEAGENT_SAVE_FRAMES=1`. The original compressed
 JPEG received from the client is then written to disk only after its decoded
-image has been accepted into the circular buffer. Only the first valid JPEG is
-saved for each WebSocket connection; every later frame remains memory-only.
-Each capture directory also contains a one-line `frames.jsonl` mapping the
-sample filename to its frame ID and timestamps.
+image has been accepted into the circular buffer. The first valid JPEG is saved
+immediately and later samples are limited by
+`GAMEAGENT_DEBUG_CAPTURE_INTERVAL_MS`, which defaults to 3000 ms. All frames
+between samples remain memory-only. Each capture directory also contains a
+`frames.jsonl` mapping each sample filename to its frame ID and timestamps.
 
 ## Configuration
 
@@ -524,10 +542,11 @@ sample filename to its frame ID and timestamps.
 | `GAMEAGENT_MAX_JPEG_MB` | `8` | maximum JPEG payload |
 | `GAMEAGENT_METRICS_PATH` | `metrics.jsonl` | JSONL metrics output |
 | `GAMEAGENT_CAPTURE_DIR` | `captures` | optional JPEG inspection output |
-| `GAMEAGENT_SAVE_FRAMES` | `0` | save only the first valid JPEG from each connection; zero keeps everything in memory |
+| `GAMEAGENT_SAVE_FRAMES` | `0` | enable periodic debug JPEG samples; zero keeps everything in memory |
+| `GAMEAGENT_DEBUG_CAPTURE_INTERVAL_MS` | `3000` | minimum time between debug JPEG samples |
 | `GAMEAGENT_COLLECT_TRAINING_DATA` | `0` | enqueue accepted JPEGs and aligned ACK metadata for offline training without blocking reception |
 | `GAMEAGENT_TRAINING_CAPTURE_DIR` | `/workspace/gameagent/training_captures` | full-session training capture root |
-| `GAMEAGENT_SUBZERO_FACING` | `right` | maps Forward/Back for a character facing `right` or `left` |
+| `GAMEAGENT_DEFAULT_FACING` | `right` | legacy/default Forward/Back mapping when the client omits `session_config` |
 | `GAMEAGENT_API_TOKEN` | unset | Bearer or X-API-Key credential |
 | `GAMEAGENT_RANDOM_SEED` | random | deterministic mock seed |
 | `GAMEAGENT_TEMPORAL_MODEL` | `0` | enable frozen ResNet50 plus GPU LSTM feature path |
@@ -536,6 +555,8 @@ sample filename to its frame ID and timestamps.
 | `GAMEAGENT_DEVICE_ID` | `0` | CUDA device used by ResNet50 and LSTM |
 | `GAMEAGENT_LSTM_PROJECTION_SIZE` | `256` | ResNet50 feature projection width |
 | `GAMEAGENT_LSTM_HIDDEN_SIZE` | `256` | temporal hidden-state width |
+| `GAMEAGENT_REINFORCEMENT_LEARNING` | `0` | enable shared multi-character Double DQN |
+| `GAMEAGENT_RL_CHECKPOINT_DIR` | `/workspace/gameagent/rl_checkpoints` | shared latest policy/replay plus per-character best snapshots |
 
 `GAMEAGENT_OBSERVATION_FRAMES` cannot exceed the buffer capacity.
 
@@ -627,44 +648,16 @@ is only active under this training flag. If the persistent volume cannot keep
 up, the oldest pending disk write is dropped and
 `persistence_frames_dropped` is incremented; live control remains prioritized.
 
-Convert a collected session to features and train/checkpoint the student:
+The previous Sub-Zero-only behavior-cloning checkpoints are not part of the
+runtime path. Fresh reinforcement training needs only the shared ResNet50;
+character-specific learning state is created automatically on first use.
+
+Debug capture, saving one JPEG immediately and then at most one every 3 seconds:
 
 ```bash
-GAMEAGENT_PRETRAIN_EPOCHS=30 \
-GAMEAGENT_PRETRAIN_BATCH_SIZE=64 \
-GAMEAGENT_PRETRAIN_PATIENCE=6 \
-bash scripts/run_subzero_training_pipeline.sh
-```
-
-Resume a version-2 run for another 20 epochs:
-
-```bash
-GAMEAGENT_PRETRAIN_RESUME=1 \
-GAMEAGENT_PRETRAIN_EPOCHS=20 \
-bash scripts/run_subzero_pretraining.sh
-```
-
-Validate the complete decision-clock trainer and binary checkpoint format on a
-small deterministic dataset before a long run:
-
-```bash
-cd /tmp/GameAgent
-bash scripts/run_temporal_trainer_smoke.sh
-```
-
-Load the best trained student in safe shadow mode:
-
-```bash
-GAMEAGENT_TEMPORAL_MODEL=1 \
-GAMEAGENT_TEMPORAL_CHECKPOINT=/workspace/gameagent/checkpoints/subzero_temporal_best.gat \
-GAMEAGENT_SAVE_FRAMES=0 \
+GAMEAGENT_SAVE_FRAMES=1 \
+GAMEAGENT_DEBUG_CAPTURE_INTERVAL_MS=3000 \
 bash scripts/run_runpod_server.sh
-```
-
-Debug capture, saving only one sample JPEG per WebSocket connection:
-
-```bash
-GAMEAGENT_SAVE_FRAMES=1 bash scripts/run_runpod_server.sh
 ```
 
 Health check from another machine:

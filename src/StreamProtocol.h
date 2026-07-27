@@ -5,6 +5,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <optional>
 #include <variant>
 #include <vector>
 
@@ -27,7 +28,18 @@ struct ActionAcknowledgement {
     std::vector<int> applied_commands;
 };
 
-using ClientTextMessage = std::variant<FrameEnvelope, ActionAcknowledgement>;
+struct SessionConfiguration {
+    std::string player_character;
+    std::optional<std::string> opponent_character;
+    std::optional<std::string> player_side;
+    std::optional<std::string> initial_facing;
+};
+
+using ClientTextMessage = std::variant<
+    FrameEnvelope,
+    ActionAcknowledgement,
+    SessionConfiguration
+>;
 
 FrameEnvelope parse_binary_frame_envelope(std::span<const std::uint8_t> payload);
 

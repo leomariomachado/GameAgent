@@ -23,7 +23,7 @@ struct WebSocketServerOptions {
     std::chrono::milliseconds reinforcement_reward_log_interval{5000};
     std::optional<std::string> api_token;
     std::optional<std::uint32_t> random_seed;
-    bool mock_facing_right = true;
+    bool default_facing_right = true;
     bool temporal_model_enabled = false;
     bool reinforcement_learning_enabled = false;
     bool reinforcement_training_enabled = true;
@@ -35,10 +35,8 @@ struct WebSocketServerOptions {
     std::size_t temporal_visual_projection_size = 256;
     std::size_t temporal_hidden_size = 256;
     int temporal_device_id = 0;
-    std::filesystem::path reinforcement_checkpoint =
-        "/workspace/gameagent/rl_checkpoints/subzero_dqn_latest.garl";
-    std::filesystem::path reinforcement_best_checkpoint =
-        "/workspace/gameagent/rl_checkpoints/subzero_dqn_best.garl";
+    std::filesystem::path reinforcement_checkpoint_directory =
+        "/workspace/gameagent/rl_checkpoints";
     std::size_t reinforcement_network_hidden_size = 128;
     std::size_t reinforcement_replay_capacity = 20000;
     std::size_t reinforcement_minimum_replay_size = 256;
@@ -55,6 +53,7 @@ struct WebSocketServerOptions {
     std::filesystem::path training_capture_directory =
         "/workspace/gameagent/training_captures";
     bool save_frames = false;
+    std::chrono::milliseconds debug_capture_interval{3000};
     bool collect_training_data = false;
 };
 

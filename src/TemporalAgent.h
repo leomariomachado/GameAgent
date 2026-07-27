@@ -40,9 +40,9 @@ struct TemporalAgentOutput {
 // decoded RGB frame -> frozen ResNet50 -> cached FP16[2048]
 //                   + latest client-confirmed command -> GPU LSTM
 //
-// A loaded policy predicts active/release plus controller state in shadow mode.
-// The server keeps the deterministic Sub-Zero teacher in control until the
-// student passes offline and online safety validation.
+// A loaded policy may predict active/release plus controller state for
+// diagnostics. Without one, every character uses the same deterministic
+// from-scratch temporal encoder and learns only through its own DQN.
 class TemporalAgent {
 public:
     explicit TemporalAgent(TemporalAgentConfig config);

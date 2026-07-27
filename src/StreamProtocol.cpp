@@ -249,6 +249,71 @@ ClientTextMessage parse_client_text_message(std::string_view payload) {
     }
 
     const std::string type = request.value("type", "frame");
+    if (type == "session_config") {
+        if (!request.contains("protocol_version") ||
+            !request["protocol_version"].is_number_integer() ||
+            request["protocol_version"].get<int>() !=
+                static_cast<int>(kActionProtocolVersion)) {
+            throw std::invalid_argument(
+                "session_config protocol_version must be 2"
+            );
+        }
+        if (!request.contains("player_character") ||
+            !request["player_character"].is_string()) {
+            throw std::invalid_argument(
+                "session_config player_character must be a string"
+            );
+        }
+        const std::string player_character =
+            request["player_character"].get<std::string>();
+        if (player_character.empty() || player_character.size() > 32U) {
+            throw std::invalid_argument(
+                "session_config player_character must contain 1..32 characters"
+            );
+        }
+        const auto optional_string =
+            [&](std::string_view field) -> std::optional<std::string> {
+                const std::string key(field);
+                if (!request.contains(key)) {
+                    return std::nullopt;
+                }
+                if (!request[key].is_string()) {
+                    throw std::invalid_argument(
+                        "session_config " + key + " must be a string"
+                    );
+                }
+                std::string value = request[key].get<std::string>();
+                if (value.empty() || value.size() > 32U) {
+                    throw std::invalid_argument(
+                        "session_config " + key +
+                        " must contain 1..32 characters"
+                    );
+                }
+                return value;
+            };
+        auto opponent_character = optional_string("opponent_character");
+        auto player_side = optional_string("player_side");
+        auto initial_facing = optional_string("initial_facing");
+        if (player_side.has_value() &&
+            *player_side != "left" && *player_side != "right") {
+            throw std::invalid_argument(
+                "session_config player_side must be left or right"
+            );
+        }
+        if (initial_facing.has_value() &&
+            *initial_facing != "left" && *initial_facing != "right") {
+            throw std::invalid_argument(
+                "session_config initial_facing must be left or right"
+            );
+        }
+        return SessionConfiguration{
+            .player_character = player_character,
+            .opponent_character = std::move(opponent_character),
+            .player_side = std::move(player_side),
+            .initial_facing = std::move(initial_facing),
+        };
+    }
+
     if (type == "action_ack") {
         if (!request.contains("protocol_version") ||
             !request["protocol_version"].is_number_integer() ||

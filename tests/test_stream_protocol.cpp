@@ -59,6 +59,23 @@ int main() {
         require(parsed_ack.applied_commands.empty(),
                 "empty applied command state was not preserved");
 
+        const auto session = gameagent::parse_client_text_message(
+            R"({"protocol_version":2,"type":"session_config","player_character":"scorpion","opponent_character":"subzero","player_side":"left","initial_facing":"right"})"
+        );
+        require(
+            std::holds_alternative<gameagent::SessionConfiguration>(session),
+            "session_config was not recognized"
+        );
+        const auto& parsed_session =
+            std::get<gameagent::SessionConfiguration>(session);
+        require(
+            parsed_session.player_character == "scorpion" &&
+                parsed_session.opponent_character == "subzero" &&
+                parsed_session.player_side == "left" &&
+                parsed_session.initial_facing == "right",
+            "session_config fields were not preserved"
+        );
+
         std::cout << "[PASS] GameAgent stream protocol test passed\n";
         return 0;
     } catch (const std::exception& error) {

@@ -64,7 +64,186 @@ Não colocar o token na URL nem nos logs.
 
 ---
 
-## 2. Remover o fluxo HTTP em lote
+## 2. Informar o personagem ao abrir a sessão
+
+Logo depois de o WebSocket conectar, antes de enviar qualquer frame, o cliente
+deve enviar uma mensagem de texto:
+
+```json
+{
+  "protocol_version": 2,
+  "type": "session_config",
+  "player_character": "scorpion",
+  "opponent_character": "subzero",
+  "player_side": "left",
+  "initial_facing": "right"
+}
+```
+
+Campos:
+
+- `player_character`: obrigatório; usar `subzero`, `scorpion`,
+  `noob_saibot` ou `sindel`;
+- `opponent_character`: obrigatório para o cliente novo; identifica o
+  adversário que também será fornecido como entrada ao agente;
+- `player_side`: opcional; `left` ou `right`, indicando qual barra de vida é
+  a do agente;
+- `initial_facing`: opcional; `left` ou `right`, indicando para onde o
+  personagem olha no começo.
+
+Esses valores devem vir da seleção feita pelo usuário no cliente. Não inferir
+o personagem a partir da imagem nesta etapa.
+
+Valores canônicos aceitos para `opponent_character`:
+
+```text
+unknown
+cyrax
+ermac
+jade
+jax
+kabal
+kano
+kitana
+kung_lao
+liu_kang
+mileena
+motaro
+nightwolf
+noob_saibot
+rain
+reptile
+scorpion
+sektor
+shang_tsung
+shao_kahn
+sheeva
+sindel
+smoke
+human_smoke
+sonya
+stryker
+subzero
+classic_subzero
+```
+
+Usar `unknown` quando não for possível determinar o oponente. `sheeva` existe
+na lista para compatibilidade com o UMK3 de arcade, embora não esteja presente
+no port de SNES. Shao Kahn e Motaro devem aparecer normalmente na seleção.
+
+O cliente deve aguardar a confirmação antes de iniciar o envio dos frames:
+
+```json
+{
+  "protocol_version": 2,
+  "type": "session_config_ack",
+  "player_character": "scorpion",
+  "player_character_name": "Scorpion",
+  "opponent_character": "subzero",
+  "opponent_character_name": "Sub-Zero",
+  "opponent_feature_index": 26,
+  "opponent_embedding_index": 26,
+  "opponent_feature_count": 28,
+  "opponent_vocabulary_size": 28,
+  "opponent_embedding_size": 16,
+  "player_side": "left",
+  "initial_facing": "right",
+  "profile": "scorpion_v1",
+  "mock_move_count": 11,
+  "agent_mode": "mock_teacher",
+  "checkpoint_loaded": false
+}
+```
+
+Se receber `session_config_error`, registrar/exibir a mensagem, não enviar
+frames e reconectar somente depois de corrigir a configuração. Quando o
+oponente for inválido, a resposta contém `supported_opponent_characters`. Para
+trocar o personagem controlado ou o oponente, desconectar, liberar todos os
+controles, abrir uma nova conexão e enviar uma nova configuração. O servidor
+rejeita uma troca no meio da conexão.
+
+### Controle da sessão pelo botão “Permitir que o agente controle”
+
+O estado desse botão determina se a sessão WebSocket do agente deve existir.
+Ele não deve apenas bloquear localmente a execução das teclas enquanto mantém
+uma sessão antiga aberta.
+
+Ao desmarcar o botão:
+
+1. Definir imediatamente o estado local como `agentControlEnabled = false`.
+2. Cancelar qualquer tentativa de reconexão automática.
+3. Parar a captura e o envio de frames destinados ao agente.
+4. Ignorar ações ou callbacks que ainda cheguem da conexão antiga.
+5. Chamar `releaseAllControls()` imediatamente.
+6. Limpar `currentCommands`, o frame pendente e `lastDecisionId`.
+7. Encerrar o WebSocket atual.
+
+Depois disso, o cliente não deve enviar frames nem `action_ack` até que o
+controle seja habilitado novamente.
+
+Ao marcar o botão:
+
+1. Ler novamente da interface os valores atuais de `player_character`,
+   `opponent_character`, `player_side` e `initial_facing`.
+2. Abrir uma conexão WebSocket nova.
+3. Enviar um novo `session_config` assim que o WebSocket conectar.
+4. Permanecer no estado `configuring` e não enviar frames nem aplicar ações.
+5. Ao receber um `session_config_ack` compatível com a seleção atual, entrar
+   no estado `active`, iniciar o envio dos frames e aceitar ações.
+6. Se receber `session_config_error`, liberar os controles, fechar a conexão,
+   voltar o botão para desmarcado e exibir ou registrar o erro.
+
+Trocar o personagem ou o adversário enquanto o botão estiver marcado deve
+executar automaticamente a mesma transição:
+
+```text
+releaseAllControls()
+→ fechar WebSocket atual
+→ abrir WebSocket novo
+→ enviar session_config atualizado
+→ aguardar session_config_ack
+→ retomar frames e ações
+```
+
+Se a seleção mudar enquanto o botão estiver desmarcado, apenas atualizar a
+configuração local. Ela será enviada quando o usuário marcar o botão.
+
+Reconexões automáticas só podem acontecer enquanto
+`agentControlEnabled == true`. Cada conexão deve possuir uma geração ou
+identificador local; callbacks de gerações anteriores devem ser descartados
+para impedir que uma ação atrasada volte a pressionar teclas depois da
+desativação.
+
+Essa operação reinicia somente a sessão WebSocket. O processo do servidor não
+precisa ser reiniciado, e os checkpoints de aprendizado permanecem
+preservados.
+
+Compatibilidade: um cliente antigo que envie um frame como primeira mensagem
+continua funcionando e recebe o perfil padrão do Sub-Zero contra `unknown`, mas
+não receberá `session_config_ack`.
+
+Os quatro personagens usam uma única política compartilhada de formato v4.
+Ela contém embeddings aprendidos do personagem e do oponente, um tronco de
+representação compartilhado, replay único balanceado por combinação
+personagem/oponente e um head de ações específico para cada personagem
+controlado. Epsilon, contadores de seleção e melhor retorno continuam
+independentes por personagem.
+
+O arquivo retomável de todos os personagens é
+`/workspace/gameagent/rl_checkpoints/shared_policy_latest.garl`. Melhores
+resultados geram snapshots completos chamados
+`shared_policy_best_<personagem>.garl`. Não existe checkpoint por dupla.
+A ResNet50 congelada continua sendo o único peso pré-treinado.
+
+`opponent_embedding_index` é a linha usada na tabela de embeddings,
+`opponent_vocabulary_size` é a quantidade atual de identidades reconhecidas e
+`opponent_embedding_size` é a largura do vetor aprendido. Os aliases legados
+`opponent_feature_index` e `opponent_feature_count` permanecem no ACK por
+compatibilidade, mas não representam mais um vetor one-hot.
+
+---
+
+## 3. Remover o fluxo HTTP em lote
 
 O cliente não deve mais:
 
@@ -89,7 +268,7 @@ O fluxo HTTP atual em `src/MainWindow.cpp` deve ser substituído pelo WebSocket 
 
 ---
 
-## 3. Taxas
+## 4. Taxas
 
 ### Captura e envio
 
@@ -119,7 +298,7 @@ As taxas são independentes. É normal que duas ações consecutivas utilizem o 
 
 ---
 
-## 4. Captura
+## 5. Captura
 
 Configuração inicial:
 
@@ -144,7 +323,7 @@ Cada captura deve gerar um JPEG novo. Não reutilizar uma imagem fixa.
 
 ---
 
-## 5. Fila de frames
+## 6. Fila de frames
 
 O cliente não deve acumular frames antigos.
 
@@ -167,7 +346,7 @@ Nunca criar uma fila crescente de imagens.
 
 ---
 
-## 6. Identificação
+## 7. Identificação
 
 Cada conexão deve possuir um contador:
 
@@ -189,7 +368,7 @@ O contador deve:
 
 ---
 
-## 7. Timestamp
+## 8. Timestamp
 
 Cada frame deve conter o horário da captura em Unix epoch milliseconds:
 
@@ -202,7 +381,7 @@ O timestamp deve ser obtido no momento da captura, antes da codificação JPEG.
 
 ---
 
-## 8. Formato binário enviado
+## 9. Formato binário enviado
 
 Cada JPEG deve ser enviado em uma mensagem WebSocket binária separada.
 
@@ -271,7 +450,7 @@ Não colocar mais de um JPEG na mesma mensagem.
 
 ---
 
-## 9. Formato recebido
+## 10. Formato recebido
 
 O servidor envia mensagens WebSocket de texto contendo JSON:
 
@@ -280,6 +459,8 @@ O servidor envia mensagens WebSocket de texto contendo JSON:
   "protocol_version": 2,
   "type": "action",
   "action_mode": "state",
+  "player_character": "scorpion",
+  "opponent_character": "subzero",
   "commands": [7],
   "mock_move": "Congelar",
   "mock_step": 1,
@@ -322,14 +503,15 @@ Mensagens inválidas devem ser registradas e ignoradas.
 
 Uma mensagem inválida não deve liberar imediatamente os controles. O failsafe cuidará disso se nenhuma ação válida chegar.
 
+Os campos `player_character` e `opponent_character` identificam a sessão.
 Os campos `mock_move`, `mock_step`, `mock_steps` e
 `mock_step_duration_ms` existem somente para acompanhar o teste temporal do
-Sub-Zero. O cliente pode exibi-los ou registrá-los, mas deve ignorá-los para
+personagem selecionado. O cliente pode exibi-los ou registrá-los, mas deve ignorá-los para
 executar os controles. Campos JSON adicionais não tornam uma ação inválida.
 
 ---
 
-## 10. Mapeamento
+## 11. Mapeamento
 
 ### Campos opcionais do agente de reforço
 
@@ -377,7 +559,7 @@ Os valores devem ser tratados como um conjunto sem ordem.
 
 ---
 
-## 11. Regra mais importante: `commands` é estado
+## 12. Regra mais importante: `commands` é estado
 
 O vetor não representa cliques.
 
@@ -415,7 +597,7 @@ Ação 3: soltar tudo
 
 ---
 
-## 12. Estado interno
+## 13. Estado interno
 
 Manter no cliente:
 
@@ -459,7 +641,7 @@ Comandos que permanecem no vetor não devem gerar eventos repetidos.
 
 ---
 
-## 13. Confirmação da ação realmente aplicada
+## 14. Confirmação da ação realmente aplicada
 
 Depois de atualizar o estado do emulador, o cliente deve enviar uma mensagem
 WebSocket de texto confirmando o resultado:
@@ -537,7 +719,7 @@ Esse histórico é reiniciado ao reconectar.
 
 ---
 
-## 14. Vetor vazio
+## 15. Vetor vazio
 
 Isto é uma ação válida:
 
@@ -557,7 +739,7 @@ Não interpretar como erro, resposta ausente ou “manter ação anterior”.
 
 ---
 
-## 15. Botões simultâneos
+## 16. Botões simultâneos
 
 Exemplo:
 
@@ -579,7 +761,7 @@ A diferença de microssegundos entre eventos de teclado será percebida pelo emu
 
 ---
 
-## 16. Diagonais
+## 17. Diagonais
 
 As diagonais são representadas por duas direções:
 
@@ -596,7 +778,7 @@ Combinações opostas, como Cima+Baixo, podem aparecer no mock. Devem ser tolera
 
 ---
 
-## 17. Sequências
+## 18. Sequências
 
 Sequências são formadas por vários estados consecutivos.
 
@@ -618,7 +800,7 @@ Não criar macros nem filas locais de sequências nesta versão.
 
 ---
 
-## 18. Toques repetidos
+## 19. Toques repetidos
 
 Para apertar A duas vezes, o servidor deve produzir:
 
@@ -645,7 +827,7 @@ significa manter A pressionado, não apertar duas vezes.
 
 ---
 
-## 19. Failsafe
+## 20. Failsafe
 
 Cada ação informa:
 
@@ -670,7 +852,7 @@ O timeout não deve ser 50 ms, porque pequenas variações de rede poderiam caus
 
 ---
 
-## 20. Desconexão
+## 21. Desconexão
 
 Ao detectar desconexão:
 
@@ -679,7 +861,8 @@ Ao detectar desconexão:
 3. Limpar o frame pendente.
 4. Invalidar callbacks da conexão antiga.
 5. Reiniciar `lastDecisionId`.
-6. Iniciar reconexão automática.
+6. Iniciar reconexão automática somente se
+   `agentControlEnabled == true`.
 
 Função obrigatória:
 
@@ -694,13 +877,15 @@ Ela também deve ser chamada:
 
 - ao fechar o programa;
 - ao parar a captura;
+- ao desmarcar “Permitir que o agente controle”;
+- antes de trocar o personagem controlado ou o oponente;
 - ao trocar de emulador;
 - em erro fatal;
 - antes de destruir a janela principal.
 
 ---
 
-## 21. Reconexão
+## 22. Reconexão
 
 Usar backoff:
 
@@ -720,7 +905,7 @@ Manter apenas uma conexão WebSocket ativa.
 
 ---
 
-## 22. Ping e conexão ociosa
+## 23. Ping e conexão ociosa
 
 Enviar ping WebSocket a cada 20–30 segundos.
 
@@ -730,7 +915,7 @@ A ausência de pong ou o fechamento da conexão deve iniciar o fluxo de reconex�
 
 ---
 
-## 23. Organização recomendada
+## 24. Organização recomendada
 
 Separar em componentes:
 
@@ -765,7 +950,7 @@ A aplicação da ação não deve esperar a próxima captura.
 
 ---
 
-## 24. Métricas locais recomendadas
+## 25. Métricas locais recomendadas
 
 Registrar:
 
@@ -800,7 +985,7 @@ Não registrar o token nem o conteúdo completo dos JPEGs.
 
 ---
 
-## 25. Critérios de aceite
+## 26. Critérios de aceite
 
 A implementação estará correta quando:
 
@@ -831,7 +1016,7 @@ A implementação estará correta quando:
 
 ---
 
-## 26. Testes obrigatórios
+## 27. Testes obrigatórios
 
 ### Manutenção
 

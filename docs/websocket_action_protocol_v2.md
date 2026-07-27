@@ -1,5 +1,120 @@
 # GameAgent WebSocket action protocol v2
 
+## Session configuration
+
+Immediately after the WebSocket upgrade and before the first frame, the client
+should send one unfragmented text message identifying the selected fighter:
+
+```json
+{
+  "protocol_version": 2,
+  "type": "session_config",
+  "player_character": "scorpion",
+  "opponent_character": "subzero",
+  "player_side": "left",
+  "initial_facing": "right"
+}
+```
+
+`player_character` is required and accepts `subzero`, `scorpion`,
+`noob_saibot`, or `sindel`.
+
+`opponent_character` should always be sent by a new client and accepts exactly:
+
+```text
+unknown, cyrax, ermac, jade, jax, kabal, kano, kitana, kung_lao,
+liu_kang, mileena, motaro, nightwolf, noob_saibot, rain, reptile,
+scorpion, sektor, shang_tsung, shao_kahn, sheeva, sindel, smoke,
+human_smoke, sonya, stryker, subzero, classic_subzero
+```
+
+Send `unknown` when the opponent is not known. For compatibility, omission is
+also interpreted as `unknown`. `sheeva` covers arcade UMK3; the SNES port does
+not contain her. `player_side`
+identifies which HUD health bar belongs to the agent; `initial_facing` defines
+how character-relative Forward and Back are mapped to Left and Right.
+
+The server answers before accepting gameplay frames:
+
+```json
+{
+  "protocol_version": 2,
+  "type": "session_config_ack",
+  "player_character": "scorpion",
+  "player_character_name": "Scorpion",
+  "opponent_character": "subzero",
+  "opponent_character_name": "Sub-Zero",
+  "opponent_feature_index": 26,
+  "opponent_embedding_index": 26,
+  "opponent_feature_count": 28,
+  "opponent_vocabulary_size": 28,
+  "opponent_embedding_size": 16,
+  "player_side": "left",
+  "initial_facing": "right",
+  "profile": "scorpion_v1",
+  "mock_move_count": 11,
+  "rl_option_count": 22,
+  "agent_mode": "reinforcement_learning",
+  "shared_policy": true,
+  "checkpoint_loaded": false,
+  "rl_checkpoint": "/workspace/gameagent/rl_checkpoints/shared_policy_latest.garl"
+}
+```
+
+The client must wait for this acknowledgement before sending the first frame.
+On `session_config_error`, it must display/log the error and reconnect only
+after correcting the configuration. The error includes
+`supported_opponent_characters` when the opponent is invalid. A player or
+opponent cannot change during a connection; reconnect and send a new
+configuration instead.
+
+## Client control toggle lifecycle
+
+The UI control “Permitir que o agente controle” owns the WebSocket session.
+
+When unchecked, the client must first mark agent control disabled, cancel
+automatic reconnects, stop sending frames, release every held control, clear
+pending frame/action state, invalidate callbacks from the old connection, and
+close the WebSocket. It must not send frames or acknowledgements while
+disabled.
+
+When checked, the client must read the current player, opponent, HUD side and
+facing selections, open a new WebSocket, send a fresh `session_config`, and
+wait for a matching `session_config_ack`. Frames and actions are enabled only
+after that acknowledgement.
+
+Changing either character while control is enabled performs the same
+release/close/reconnect/configure sequence automatically. Changing a selection
+while control is disabled only updates local configuration for the next
+connection. Automatic reconnects are allowed only while the toggle remains
+checked. Callbacks must carry a local connection generation so late actions
+from a closed session cannot press controls again.
+
+This restarts only the WebSocket session. It does not restart the server or
+discard reinforcement checkpoints.
+
+For backward compatibility, a connection whose first data message is a frame
+uses the server defaults: Sub-Zero, configured player side, and configured
+facing. Such a legacy connection receives no configuration acknowledgement.
+
+In reinforcement mode all supported characters use one format-v4 shared
+policy. It has learned player/opponent embeddings, one shared representation
+trunk and one action head per controlled character. Replay is also shared and
+sampled across non-empty player/opponent matchup buckets. Epsilon progress,
+action-selection counters and best episode return remain independent for each
+controlled character.
+
+`shared_policy_latest.garl` is the resumable checkpoint used by every
+character. `shared_policy_best_<character>.garl` is a full shared-policy
+snapshot taken when that character improves. There is no checkpoint per
+matchup. The frozen ResNet50 remains the only pretrained artifact.
+
+`opponent_embedding_index` selects the row in the learned opponent table;
+`opponent_vocabulary_size` is the current number of recognized identities and
+`opponent_embedding_size` is the vector width used by the network. The legacy
+aliases `opponent_feature_index` and `opponent_feature_count` remain in the ACK
+so existing clients do not break; they no longer describe a one-hot vector.
+
 ## Semantics
 
 Version 2 uses full controller-state actions. Every action atomically replaces
@@ -39,22 +154,19 @@ must remain pressed until the next valid action arrives.
 }
 ```
 
-The `mock_*` fields identify the current Sub-Zero test sequence and are
+The `mock_*` fields identify the current character-specific test sequence and are
 diagnostic metadata. Clients may display or log them, but controller execution
 depends only on `commands`, `decision_id`, and the protocol-v2 state rules.
 When enabled, `temporal_*` fields under `metrics` describe the server-side
 ResNet50/LSTM feature pipeline. They are optional diagnostics and require no
 client protocol change.
 
-The Sub-Zero teacher also reports optional curriculum metadata:
+The scripted teacher also reports optional curriculum metadata:
 
 ```json
 {
-  "curriculum_source": "scripted_conditional",
-  "curriculum_phase": "approach",
-  "curriculum_branch": "freeze_confirmed_followup",
-  "freeze_visual_score": 0.071,
-  "freeze_visual_delta": 0.028
+  "curriculum_source": "scripted_move",
+  "curriculum_phase": "special"
 }
 ```
 
@@ -82,10 +194,10 @@ When reinforcement mode is enabled, an action may also contain:
   "player_health": 0.82,
   "opponent_health": 0.61,
   "reward": 0.31,
-  "rl_option": "Congelar + Corrida + 3 Golpes",
-  "rl_option_index": 17,
-  "rl_option_step": 4,
-  "rl_option_steps": 18,
+  "rl_option": "Soco Teleportado",
+  "rl_option_index": 12,
+  "rl_option_step": 2,
+  "rl_option_steps": 5,
   "rl_selection_source": "epsilon_scripted"
 }
 ```

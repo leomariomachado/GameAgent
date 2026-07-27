@@ -31,14 +31,16 @@ struct ReinforcementAgentConfig {
     std::uint64_t epsilon_decay_selections = 100000;
     float scripted_exploration_probability = 0.50f;
     std::uint32_t random_seed = 0x524c444eU;
+    FighterCharacter character = FighterCharacter::subzero;
+    OpponentCharacter opponent_character = OpponentCharacter::unknown;
     FighterFacing facing = FighterFacing::right;
+    std::size_t character_embedding_size = 16;
+    std::size_t opponent_embedding_size = 16;
     bool training_enabled = true;
     bool resume = true;
     bool save_replay = true;
-    std::filesystem::path checkpoint_path =
-        "/workspace/gameagent/rl_checkpoints/subzero_dqn_latest.garl";
-    std::filesystem::path best_checkpoint_path =
-        "/workspace/gameagent/rl_checkpoints/subzero_dqn_best.garl";
+    std::filesystem::path checkpoint_path;
+    std::filesystem::path best_checkpoint_path;
 };
 
 struct ReinforcementStepInput {
@@ -80,13 +82,16 @@ struct ReinforcementAgentStats {
     float last_training_loss = 0.0f;
     float current_episode_return = 0.0f;
     float best_episode_return = 0.0f;
+    double shared_parameter_checksum = 0.0;
+    std::size_t shared_replay_matchups = 0;
     bool checkpoint_loaded = false;
 };
 
-// Online semi-Markov Double DQN. Actions are controller "options": short
-// primitive holds and complete Sub-Zero sequences. A transition is closed at
-// the end of an option, so delayed damage is credited to the whole move rather
-// than to an arbitrary 50 ms controller state.
+// Online semi-Markov Double DQN with a shared strategy trunk, learned
+// player/opponent embeddings, one action head per controlled character and a
+// matchup-balanced replay. A transition is closed at the end of an option, so
+// delayed damage is credited to the whole move rather than an arbitrary
+// controller state.
 class ReinforcementAgent {
 public:
     explicit ReinforcementAgent(ReinforcementAgentConfig config);

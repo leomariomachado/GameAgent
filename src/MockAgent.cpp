@@ -1,7 +1,8 @@
 #include "MockAgent.h"
 
 #include <algorithm>
-#include <cmath>
+#include <array>
+#include <cctype>
 #include <iterator>
 #include <stdexcept>
 
@@ -13,11 +14,58 @@ constexpr int kXHighKick = 1;
 constexpr int kBLowPunch = 2;
 constexpr int kALowKick = 3;
 constexpr int kBlock = 4;
-constexpr int kRun = 5;
 constexpr int kUp = 6;
 constexpr int kDown = 7;
 constexpr int kLeft = 8;
 constexpr int kRight = 9;
+
+struct OpponentCharacterRecord {
+    OpponentCharacter character;
+    std::string_view slug;
+    std::string_view name;
+};
+
+constexpr std::array<
+    OpponentCharacterRecord,
+    kOpponentCharacterFeatureCount
+> kOpponentCharacters{{
+    {OpponentCharacter::unknown, "unknown", "Unknown"},
+    {OpponentCharacter::cyrax, "cyrax", "Cyrax"},
+    {OpponentCharacter::ermac, "ermac", "Ermac"},
+    {OpponentCharacter::jade, "jade", "Jade"},
+    {OpponentCharacter::jax, "jax", "Jax"},
+    {OpponentCharacter::kabal, "kabal", "Kabal"},
+    {OpponentCharacter::kano, "kano", "Kano"},
+    {OpponentCharacter::kitana, "kitana", "Kitana"},
+    {OpponentCharacter::kung_lao, "kung_lao", "Kung Lao"},
+    {OpponentCharacter::liu_kang, "liu_kang", "Liu Kang"},
+    {OpponentCharacter::mileena, "mileena", "Mileena"},
+    {OpponentCharacter::motaro, "motaro", "Motaro"},
+    {OpponentCharacter::nightwolf, "nightwolf", "Nightwolf"},
+    {OpponentCharacter::noob_saibot, "noob_saibot", "Noob Saibot"},
+    {OpponentCharacter::rain, "rain", "Rain"},
+    {OpponentCharacter::reptile, "reptile", "Reptile"},
+    {OpponentCharacter::scorpion, "scorpion", "Scorpion"},
+    {OpponentCharacter::sektor, "sektor", "Sektor"},
+    {OpponentCharacter::shang_tsung, "shang_tsung", "Shang Tsung"},
+    {OpponentCharacter::shao_kahn, "shao_kahn", "Shao Kahn"},
+    {OpponentCharacter::sheeva, "sheeva", "Sheeva"},
+    {OpponentCharacter::sindel, "sindel", "Sindel"},
+    {OpponentCharacter::smoke, "smoke", "Smoke"},
+    {OpponentCharacter::human_smoke, "human_smoke", "Human Smoke"},
+    {OpponentCharacter::sonya, "sonya", "Sonya Blade"},
+    {OpponentCharacter::stryker, "stryker", "Stryker"},
+    {OpponentCharacter::subzero, "subzero", "Sub-Zero"},
+    {
+        OpponentCharacter::classic_subzero,
+        "classic_subzero",
+        "Classic Sub-Zero"
+    },
+}};
+
+static_assert(
+    kOpponentCharacters.size() == kOpponentCharacterFeatureCount
+);
 
 bool program_uses_direction(
     const std::vector<std::vector<int>>& states,
@@ -50,11 +98,7 @@ bool same_controller_program(
     const MockMoveDefinition& first,
     const MockMoveDefinition& second
 ) {
-    return first.states == second.states &&
-        first.conditional_freeze_follow_up ==
-            second.conditional_freeze_follow_up &&
-        first.freeze_confirmation_step == second.freeze_confirmation_step &&
-        first.freeze_miss_states == second.freeze_miss_states;
+    return first.states == second.states;
 }
 
 void append_spatial_mirrors(
@@ -66,17 +110,13 @@ void append_spatial_mirrors(
     std::vector<MockMoveDefinition> mirrors;
     for (std::size_t index = 0; index < original_count; ++index) {
         const bool directional =
-            program_uses_direction(moves[index].states, forward, back) ||
-            program_uses_direction(
-                moves[index].freeze_miss_states, forward, back
-            );
+            program_uses_direction(moves[index].states, forward, back);
         if (!directional) {
             continue;
         }
 
         MockMoveDefinition mirror = moves[index];
         mirror_program(mirror.states, forward, back);
-        mirror_program(mirror.freeze_miss_states, forward, back);
         const bool already_known =
             std::any_of(
                 moves.begin(), moves.end(), [&](const auto& known) {
@@ -106,40 +146,296 @@ void append_spatial_mirrors(
     );
 }
 
-}  // namespace
-
-float sub_zero_freeze_visual_score(
-    const base::data::image::Image& image,
-    FighterFacing facing
+MockMoveDefinition make_move(
+    std::string name,
+    std::vector<std::vector<int>> states,
+    std::string phase = "special"
 ) {
-    if (image.empty() || image.channels() != 3) {
-        return 0.0f;
+    if (states.empty()) {
+        throw std::invalid_argument("mock move must contain controller states");
     }
-    const int x_begin =
-        facing == FighterFacing::right ? image.width() / 2 : 0;
-    const int x_end =
-        facing == FighterFacing::right ? image.width() : image.width() / 2;
-    const int y_begin = image.height() / 6;
-    const int y_end = image.height() * 5 / 6;
-    std::size_t selected = 0;
-    std::size_t sampled = 0;
-    for (int y = y_begin; y < y_end; y += 2) {
-        for (int x = x_begin; x < x_end; x += 2) {
-            const float red = image.at(y, x, 0);
-            const float green = image.at(y, x, 1);
-            const float blue = image.at(y, x, 2);
-            const bool ice_colored =
-                blue >= 100.0f &&
-                blue >= red * 1.20f &&
-                green >= red * 0.90f &&
-                std::abs(blue - green) <= 105.0f;
-            selected += ice_colored ? 1U : 0U;
-            ++sampled;
+    std::vector<std::string> phases;
+    phases.reserve(states.size());
+    for (std::size_t index = 0; index < states.size(); ++index) {
+        if (states[index].empty()) {
+            phases.push_back(
+                index + 1U == states.size() ? "observe" : "release"
+            );
+        } else {
+            phases.push_back(phase);
         }
     }
-    return sampled == 0
-        ? 0.0f
-        : static_cast<float>(selected) / static_cast<float>(sampled);
+    return MockMoveDefinition{
+        .name = std::move(name),
+        .states = std::move(states),
+        .phases = std::move(phases),
+    };
+}
+
+std::string normalized_character_slug(std::string_view value) {
+    std::string normalized;
+    normalized.reserve(value.size());
+    bool separator_pending = false;
+    for (const unsigned char character : value) {
+        if (std::isalnum(character)) {
+            if (separator_pending && !normalized.empty()) {
+                normalized.push_back('_');
+            }
+            normalized.push_back(
+                static_cast<char>(std::tolower(character))
+            );
+            separator_pending = false;
+        } else {
+            separator_pending = !normalized.empty();
+        }
+    }
+    return normalized;
+}
+
+std::vector<MockMoveDefinition> make_noob_saibot_moves(
+    FighterFacing facing
+) {
+    const int forward = facing == FighterFacing::right ? kRight : kLeft;
+    return {
+        make_move(
+            "Arremesso de Sombra",
+            {{forward}, {}, {forward}, {kYHighPunch}, {}, {}}
+        ),
+        make_move(
+            "Teleporte com Arremesso",
+            {{kDown}, {kUp}, {}, {}}
+        ),
+        make_move(
+            "Nuvem de Desativação",
+            {{kDown}, {forward}, {kBLowPunch}, {}, {}}
+        ),
+        make_move(
+            "4 Golpes (Y, Y, B, A)",
+            {
+                {kYHighPunch}, {}, {kYHighPunch}, {},
+                {kBLowPunch}, {}, {kALowKick}, {}, {}
+            },
+            "combo"
+        ),
+        make_move(
+            "4 Golpes (X, A, A, X)",
+            {
+                {kXHighKick}, {}, {kALowKick}, {},
+                {kALowKick}, {}, {kXHighKick}, {}, {}
+            },
+            "combo"
+        ),
+    };
+}
+
+std::vector<MockMoveDefinition> make_scorpion_moves(
+    FighterFacing facing
+) {
+    const int back = facing == FighterFacing::right ? kLeft : kRight;
+    return {
+        make_move(
+            "Arpão",
+            {{back}, {}, {back}, {kBLowPunch}, {}, {}}
+        ),
+        make_move(
+            "Soco Teleportado",
+            {{kDown}, {back}, {kYHighPunch}, {}, {}}
+        ),
+        make_move(
+            "Soco Teleportado (Aéreo)",
+            {
+                {kUp}, {kUp}, {}, {kDown}, {back},
+                {kYHighPunch}, {}, {}
+            }
+        ),
+        make_move(
+            "Agarrão Aéreo",
+            {{kUp}, {kUp}, {}, {kBlock}, {kBlock}, {}, {}}
+        ),
+        make_move(
+            "4 Golpes (Y, Y, X, B+X)",
+            {
+                {kYHighPunch}, {}, {kYHighPunch}, {},
+                {kXHighKick}, {}, {back, kXHighKick}, {}, {}
+            },
+            "combo"
+        ),
+        make_move(
+            "3 Golpes (X, X, A, B+X)",
+            {
+                {kXHighKick}, {}, {kXHighKick}, {},
+                {kALowKick}, {}, {back, kXHighKick}, {}, {}
+            },
+            "combo"
+        ),
+    };
+}
+
+std::vector<MockMoveDefinition> make_sindel_moves(
+    FighterFacing facing
+) {
+    const int forward = facing == FighterFacing::right ? kRight : kLeft;
+    const int back = facing == FighterFacing::right ? kLeft : kRight;
+    return {
+        make_move(
+            "Bola de Fogo",
+            {{forward}, {}, {forward}, {kBLowPunch}, {}, {}}
+        ),
+        make_move(
+            "Bola de Fogo (Aérea)",
+            {
+                {kUp}, {kUp}, {}, {forward}, {}, {forward},
+                {kBLowPunch}, {}, {}
+            }
+        ),
+        make_move(
+            "Grito",
+            {
+                {forward}, {}, {forward}, {}, {forward},
+                {kYHighPunch}, {}, {}
+            }
+        ),
+        make_move(
+            "Levitar",
+            {{back}, {}, {back}, {forward}, {kXHighKick}, {}, {}}
+        ),
+        make_move(
+            "3 Golpes (Y, Y, D+Y)",
+            {
+                {kYHighPunch}, {}, {kYHighPunch}, {},
+                {kDown, kYHighPunch}, {}, {}
+            },
+            "combo"
+        ),
+        make_move(
+            "4 Golpes (X, Y, Y, B)",
+            {
+                {kXHighKick}, {}, {kYHighPunch}, {},
+                {kYHighPunch}, {}, {kBLowPunch}, {}, {}
+            },
+            "combo"
+        ),
+        make_move(
+            "Combo Alternativo (X, X, B+X)",
+            {
+                {kXHighKick}, {}, {kXHighKick}, {},
+                {back, kXHighKick}, {}, {}
+            },
+            "combo"
+        ),
+    };
+}
+
+}  // namespace
+
+std::optional<FighterCharacter> parse_fighter_character(
+    std::string_view value
+) {
+    const std::string normalized = normalized_character_slug(value);
+    if (normalized == "subzero" || normalized == "sub_zero") {
+        return FighterCharacter::subzero;
+    }
+    if (normalized == "scorpion") {
+        return FighterCharacter::scorpion;
+    }
+    if (normalized == "noob_saibot" || normalized == "noobsaibot") {
+        return FighterCharacter::noob_saibot;
+    }
+    if (normalized == "sindel") {
+        return FighterCharacter::sindel;
+    }
+    return std::nullopt;
+}
+
+std::string_view fighter_character_slug(FighterCharacter character) {
+    switch (character) {
+        case FighterCharacter::subzero: return "subzero";
+        case FighterCharacter::scorpion: return "scorpion";
+        case FighterCharacter::noob_saibot: return "noob_saibot";
+        case FighterCharacter::sindel: return "sindel";
+    }
+    throw std::invalid_argument("unsupported fighter character");
+}
+
+std::string_view fighter_character_name(FighterCharacter character) {
+    switch (character) {
+        case FighterCharacter::subzero: return "Sub-Zero";
+        case FighterCharacter::scorpion: return "Scorpion";
+        case FighterCharacter::noob_saibot: return "Noob Saibot";
+        case FighterCharacter::sindel: return "Sindel";
+    }
+    throw std::invalid_argument("unsupported fighter character");
+}
+
+std::vector<std::string> supported_fighter_characters() {
+    return {"subzero", "scorpion", "noob_saibot", "sindel"};
+}
+
+std::optional<OpponentCharacter> parse_opponent_character(
+    std::string_view value
+) {
+    std::string normalized = normalized_character_slug(value);
+    if (normalized == "sub_zero") {
+        normalized = "subzero";
+    } else if (
+        normalized == "classic_sub_zero" ||
+        normalized == "subzero_classic" ||
+        normalized == "sub_zero_classic"
+    ) {
+        normalized = "classic_subzero";
+    } else if (normalized == "noobsaibot") {
+        normalized = "noob_saibot";
+    } else if (normalized == "humansmoke" || normalized == "smoke_human") {
+        normalized = "human_smoke";
+    } else if (normalized == "sonyablade" || normalized == "sonya_blade") {
+        normalized = "sonya";
+    } else if (normalized == "kunglao") {
+        normalized = "kung_lao";
+    } else if (normalized == "liukang") {
+        normalized = "liu_kang";
+    } else if (normalized == "shangtsung") {
+        normalized = "shang_tsung";
+    } else if (normalized == "shaokahn") {
+        normalized = "shao_kahn";
+    } else if (normalized == "montaro") {
+        normalized = "motaro";
+    }
+
+    const auto found = std::find_if(
+        kOpponentCharacters.begin(),
+        kOpponentCharacters.end(),
+        [&](const OpponentCharacterRecord& record) {
+            return record.slug == normalized;
+        }
+    );
+    return found == kOpponentCharacters.end()
+        ? std::nullopt
+        : std::optional<OpponentCharacter>(found->character);
+}
+
+std::string_view opponent_character_slug(OpponentCharacter character) {
+    const std::size_t index = static_cast<std::size_t>(character);
+    if (index >= kOpponentCharacters.size()) {
+        throw std::invalid_argument("unsupported opponent character");
+    }
+    return kOpponentCharacters[index].slug;
+}
+
+std::string_view opponent_character_name(OpponentCharacter character) {
+    const std::size_t index = static_cast<std::size_t>(character);
+    if (index >= kOpponentCharacters.size()) {
+        throw std::invalid_argument("unsupported opponent character");
+    }
+    return kOpponentCharacters[index].name;
+}
+
+std::vector<std::string> supported_opponent_characters() {
+    std::vector<std::string> characters;
+    characters.reserve(kOpponentCharacters.size());
+    for (const auto& record : kOpponentCharacters) {
+        characters.emplace_back(record.slug);
+    }
+    return characters;
 }
 
 std::vector<MockMoveDefinition> make_sub_zero_mock_moves(FighterFacing facing) {
@@ -212,223 +508,63 @@ std::vector<MockMoveDefinition> make_sub_zero_mock_moves(FighterFacing facing) {
     };
 }
 
+std::vector<MockMoveDefinition> make_character_mock_moves(
+    FighterCharacter character,
+    FighterFacing facing
+) {
+    switch (character) {
+        case FighterCharacter::subzero:
+            return make_sub_zero_mock_moves(facing);
+        case FighterCharacter::scorpion:
+            return make_scorpion_moves(facing);
+        case FighterCharacter::noob_saibot:
+            return make_noob_saibot_moves(facing);
+        case FighterCharacter::sindel:
+            return make_sindel_moves(facing);
+    }
+    throw std::invalid_argument("unsupported fighter character");
+}
+
 std::vector<MockMoveDefinition> make_sub_zero_curriculum(
     FighterFacing facing
 ) {
     const int forward = facing == FighterFacing::right ? kRight : kLeft;
     const int back = facing == FighterFacing::right ? kLeft : kRight;
     auto moves = make_sub_zero_mock_moves(facing);
+    const float family_weight =
+        100.0f / static_cast<float>(moves.size());
     for (auto& move : moves) {
-        move.curriculum_weight = 5.0f;
+        move.curriculum_weight = family_weight;
     }
+    append_spatial_mirrors(moves, forward, back);
+    return moves;
+}
 
-    moves.push_back({
-        .name = "Congelar + Corrida + 3 Golpes",
-        .states = {
-            {kDown}, {forward}, {kBLowPunch}, {}, {}, {}, {},
-            {kRun, forward}, {kRun, forward}, {forward}, {},
-            {kYHighPunch}, {}, {kYHighPunch}, {},
-            {kDown, kBLowPunch}, {}, {},
-        },
-        .phases = {
-            "freeze", "freeze", "freeze", "release",
-            "observe", "observe", "observe",
-            "approach", "approach", "approach", "release",
-            "combo", "release", "combo", "release",
-            "combo", "release", "observe",
-        },
-        .action_source = "scripted_conditional",
-        .curriculum_weight = 25.0f,
-        .conditional_freeze_follow_up = true,
-        .freeze_confirmation_step = 7,
-        .freeze_miss_states = {
-            {kDown}, {forward}, {kBLowPunch}, {}, {}, {}, {},
-            {kBlock, back}, {kBlock}, {}, {},
-        },
-        .freeze_miss_phases = {
-            "freeze", "freeze", "freeze", "release",
-            "observe", "observe", "observe",
-            "recover", "recover", "release", "observe",
-        },
-    });
-    moves.push_back({
-        .name = "Congelar + Corrida + 4 Golpes",
-        .states = {
-            {kDown}, {forward}, {kBLowPunch}, {}, {}, {}, {},
-            {kRun, forward}, {kRun, forward}, {forward}, {},
-            {kXHighKick}, {}, {kXHighKick}, {},
-            {back, kXHighKick}, {}, {forward, kALowKick}, {}, {},
-        },
-        .phases = {
-            "freeze", "freeze", "freeze", "release",
-            "observe", "observe", "observe",
-            "approach", "approach", "approach", "release",
-            "combo", "release", "combo", "release", "combo",
-            "release", "combo", "release", "observe",
-        },
-        .action_source = "scripted_conditional",
-        .curriculum_weight = 25.0f,
-        .conditional_freeze_follow_up = true,
-        .freeze_confirmation_step = 7,
-        .freeze_miss_states = {
-            {kDown}, {forward}, {kBLowPunch}, {}, {}, {}, {},
-            {kBlock, back}, {kBlock}, {}, {},
-        },
-        .freeze_miss_phases = {
-            "freeze", "freeze", "freeze", "release",
-            "observe", "observe", "observe",
-            "recover", "recover", "release", "observe",
-        },
-    });
-
-    const std::vector<MockMoveDefinition> combat_variations{
-        {
-            .name = "Pulo para Frente + Chute Alto",
-            .states = {
-                {kUp, forward},
-                {kUp, forward},
-                {forward},
-                {forward, kXHighKick},
-                {forward, kXHighKick},
-                {},
-                {},
-            },
-            .phases = {
-                "jump", "jump", "airborne", "air_attack",
-                "air_attack", "release", "observe",
-            },
-            .action_source = "scripted_variation",
-            .curriculum_weight = 4.0f,
-        },
-        {
-            .name = "Uppercut Agachado",
-            .states = {
-                {kDown},
-                {kDown},
-                {kDown, kYHighPunch},
-                {kDown, kYHighPunch},
-                {},
-                {},
-            },
-            .phases = {
-                "crouch", "crouch", "uppercut",
-                "uppercut", "release", "observe",
-            },
-            .action_source = "scripted_variation",
-            .curriculum_weight = 3.0f,
-        },
-        {
-            .name = "Corrida + 3 Golpes",
-            .states = {
-                {kRun, forward},
-                {kRun, forward},
-                {kRun, forward},
-                {forward},
-                {},
-                {kYHighPunch},
-                {},
-                {kYHighPunch},
-                {},
-                {kDown, kBLowPunch},
-                {},
-                {},
-            },
-            .phases = {
-                "run", "run", "run", "approach", "release",
-                "combo", "release", "combo", "release",
-                "combo", "release", "observe",
-            },
-            .action_source = "scripted_variation",
-            .curriculum_weight = 4.0f,
-        },
-        {
-            .name = "Corrida + 4 Golpes",
-            .states = {
-                {kRun, forward},
-                {kRun, forward},
-                {kRun, forward},
-                {forward},
-                {},
-                {kXHighKick},
-                {},
-                {kXHighKick},
-                {},
-                {back, kXHighKick},
-                {},
-                {forward, kALowKick},
-                {},
-                {},
-            },
-            .phases = {
-                "run", "run", "run", "approach", "release",
-                "combo", "release", "combo", "release",
-                "combo", "release", "combo", "release", "observe",
-            },
-            .action_source = "scripted_variation",
-            .curriculum_weight = 4.0f,
-        },
-    };
-    moves.insert(
-        moves.end(), combat_variations.begin(), combat_variations.end()
-    );
-
-    const std::vector<MockMoveDefinition> exploration{
-        {
-            .name = "Explorar: avançar e A",
-            .states = {{forward}, {forward, kALowKick}, {}, {}},
-            .phases = {"explore", "explore", "release", "observe"},
-            .action_source = "random_exploration",
-            .curriculum_weight = 1.0f,
-        },
-        {
-            .name = "Explorar: agachar e B",
-            .states = {{kDown}, {kDown, kBLowPunch}, {}, {}},
-            .phases = {"explore", "explore", "release", "observe"},
-            .action_source = "random_exploration",
-            .curriculum_weight = 1.0f,
-        },
-        {
-            .name = "Explorar: bloquear e recuar",
-            .states = {{kBlock}, {kBlock, back}, {kBlock}, {}, {}},
-            .phases = {
-                "explore", "explore", "explore", "release", "observe"
-            },
-            .action_source = "random_exploration",
-            .curriculum_weight = 1.0f,
-        },
-        {
-            .name = "Explorar: corrida curta",
-            .states = {{kRun, forward}, {kRun, forward}, {forward}, {}, {}},
-            .phases = {
-                "explore", "explore", "explore", "release", "observe"
-            },
-            .action_source = "random_exploration",
-            .curriculum_weight = 1.0f,
-        },
-        {
-            .name = "Explorar: X e liberar",
-            .states = {{kXHighKick}, {}, {}, {}},
-            .phases = {"explore", "release", "release", "observe"},
-            .action_source = "random_exploration",
-            .curriculum_weight = 1.0f,
-        },
-    };
-    moves.insert(moves.end(), exploration.begin(), exploration.end());
+std::vector<MockMoveDefinition> make_character_curriculum(
+    FighterCharacter character,
+    FighterFacing facing
+) {
+    const int forward = facing == FighterFacing::right ? kRight : kLeft;
+    const int back = facing == FighterFacing::right ? kLeft : kRight;
+    auto moves = make_character_mock_moves(character, facing);
+    const float family_weight =
+        100.0f / static_cast<float>(moves.size());
+    for (auto& move : moves) {
+        move.curriculum_weight = family_weight;
+    }
     append_spatial_mirrors(moves, forward, back);
     return moves;
 }
 
 MockAgent::MockAgent(
     std::optional<std::uint32_t> random_seed,
-    FighterFacing facing
+    FighterFacing facing,
+    FighterCharacter character
 )
-    : facing_(facing),
-      moves_(make_sub_zero_curriculum(facing)),
+    : moves_(make_character_curriculum(character, facing)),
       random_engine_(random_seed.value_or(std::random_device{}())) {}
 
-void MockAgent::select_next_move(
-    const std::vector<std::shared_ptr<const BufferedFrame>>& observation
-) {
+void MockAgent::select_next_move() {
     std::vector<double> weights;
     weights.reserve(moves_.size());
     for (const auto& move : moves_) {
@@ -441,18 +577,7 @@ void MockAgent::select_next_move(
     const auto& move = moves_[*active_move_];
     active_states_ = move.states;
     active_phases_ = move.phases;
-    active_branch_ = move.conditional_freeze_follow_up
-        ? "freeze_pending"
-        : "direct";
     active_step_ = 0;
-    freeze_baseline_score_ =
-        observation.empty() || !observation.back()
-            ? 0.0f
-            : sub_zero_freeze_visual_score(
-                  observation.back()->image, facing_
-              );
-    freeze_latest_score_ = freeze_baseline_score_;
-    freeze_delta_ = 0.0f;
 }
 
 MockAgentDecision MockAgent::infer(
@@ -466,40 +591,10 @@ MockAgentDecision MockAgent::infer(
     std::lock_guard lock(mutex_);
 
     if (!active_move_.has_value()) {
-        select_next_move(observation);
+        select_next_move();
     }
 
     const MockMoveDefinition& move = moves_[*active_move_];
-    if (move.conditional_freeze_follow_up &&
-        active_step_ == move.freeze_confirmation_step) {
-        const bool has_image =
-            !observation.empty() &&
-            observation.back() &&
-            !observation.back()->image.empty();
-        freeze_latest_score_ = has_image
-            ? sub_zero_freeze_visual_score(
-                  observation.back()->image, facing_
-              )
-            : freeze_baseline_score_;
-        freeze_delta_ =
-            freeze_latest_score_ - freeze_baseline_score_;
-        const bool confirmed =
-            has_image &&
-            freeze_latest_score_ >= 0.025f &&
-            freeze_delta_ >= 0.010f;
-        const bool clearly_missed =
-            has_image &&
-            freeze_delta_ < 0.004f;
-        if (clearly_missed) {
-            active_states_ = move.freeze_miss_states;
-            active_phases_ = move.freeze_miss_phases;
-            active_branch_ = "freeze_missed_recover";
-        } else {
-            active_branch_ = confirmed
-                ? "freeze_confirmed_followup"
-                : "freeze_ambiguous_followup";
-        }
-    }
     MockAgentDecision decision{
         .commands = active_states_[active_step_],
         .move_name = move.name,
@@ -510,9 +605,6 @@ MockAgentDecision MockAgent::infer(
                 ? active_phases_[active_step_]
                 : "unspecified",
         .action_source = move.action_source,
-        .branch = active_branch_,
-        .freeze_visual_score = freeze_latest_score_,
-        .freeze_visual_delta = freeze_delta_,
     };
 
     ++active_step_;
@@ -520,7 +612,6 @@ MockAgentDecision MockAgent::infer(
         active_move_.reset();
         active_states_.clear();
         active_phases_.clear();
-        active_branch_.clear();
         active_step_ = 0;
     }
     return decision;
@@ -531,10 +622,6 @@ void MockAgent::reset_sequence() {
     active_move_.reset();
     active_states_.clear();
     active_phases_.clear();
-    active_branch_.clear();
-    freeze_baseline_score_ = 0.0f;
-    freeze_latest_score_ = 0.0f;
-    freeze_delta_ = 0.0f;
     active_step_ = 0;
 }
 

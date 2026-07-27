@@ -1,3 +1,4 @@
+#include "MockAgent.h"
 #include "StreamProtocol.h"
 #include "WebSocketServer.h"
 
@@ -225,6 +226,31 @@ void send_action_acknowledgement(
     );
 }
 
+nlohmann::json configure_session(
+    int socket_fd,
+    std::string_view player_character,
+    std::string_view opponent_character = "subzero"
+) {
+    const nlohmann::json configuration{
+        {"protocol_version", 2},
+        {"type", "session_config"},
+        {"player_character", player_character},
+        {"opponent_character", opponent_character},
+        {"player_side", "left"},
+        {"initial_facing", "right"},
+    };
+    const std::string text = configuration.dump();
+    send_masked_frame(
+        socket_fd,
+        0x1U,
+        std::span<const std::uint8_t>(
+            reinterpret_cast<const std::uint8_t*>(text.data()),
+            text.size()
+        )
+    );
+    return receive_json_frame(socket_fd);
+}
+
 nlohmann::json receive_action_with_acknowledgement_visible(
     int socket_fd,
     std::uint64_t acknowledged_decision_id
@@ -284,6 +310,7 @@ int main() {
             .metrics_path = root / "metrics.jsonl",
             .capture_directory = root / "captures",
             .save_frames = true,
+            .debug_capture_interval = std::chrono::milliseconds(100),
         });
         server_thread = std::thread([&] {
             try {
@@ -303,6 +330,8 @@ int main() {
                 "action protocol version is not 2");
         require(first_action.value("action_mode", "") == "state",
                 "action mode is not state");
+        require(first_action.value("player_character", "") == "subzero",
+                "legacy connection did not use the Sub-Zero default");
         require(first_action.value("control_interval_ms", 0) == 20,
                 "action control interval is incorrect");
         require(first_action.value("failsafe_timeout_ms", 0) == 100,
@@ -330,6 +359,11 @@ int main() {
             send_one_frame_and_receive_action(first_client, 12U);
         require(second_frame_action.value("type", "") == "action",
                 "second frame response is not an action");
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        const nlohmann::json third_frame_action =
+            send_one_frame_and_receive_action(first_client, 13U);
+        require(third_frame_action.value("type", "") == "action",
+                "third frame response is not an action");
         send_action_acknowledgement(first_client, first_action);
         const nlohmann::json action_after_first_ack =
             receive_action_with_acknowledgement_visible(
@@ -353,10 +387,44 @@ int main() {
         first_client = -1;
 
         second_client = upgrade(port, true);
+        const nlohmann::json session_ack =
+            configure_session(second_client, "scorpion", "shao_kahn");
+        require(
+            session_ack.value("type", "") == "session_config_ack" &&
+                session_ack.value("player_character", "") == "scorpion" &&
+                session_ack.value("opponent_character", "") ==
+                    "shao_kahn" &&
+                session_ack.value("opponent_character_name", "") ==
+                    "Shao Kahn" &&
+                session_ack.value("opponent_feature_count", 0U) ==
+                    gameagent::kOpponentCharacterFeatureCount &&
+                session_ack.value("opponent_vocabulary_size", 0U) ==
+                    gameagent::kOpponentCharacterFeatureCount &&
+                session_ack.value(
+                    "opponent_embedding_index", 0U
+                ) ==
+                    session_ack.value(
+                        "opponent_feature_index", 1U
+                    ) &&
+                session_ack.value("opponent_embedding_size", 0U) ==
+                    16U &&
+                !session_ack.value("shared_policy", true) &&
+                session_ack.value("agent_mode", "") == "mock_teacher" &&
+                session_ack.value("mock_move_count", 0U) == 11U,
+            "Scorpion versus Shao Kahn session was not acknowledged"
+        );
         const nlohmann::json second_action = send_one_frame_and_receive_action(second_client, 1U);
         require(second_action.value("type", "") == "action", "reconnect response is not an action");
         require(second_action.value("frame_id", 0U) == 1U,
                 "new connection did not start with a fresh buffer");
+        require(
+            second_action.value("player_character", "") == "scorpion" &&
+                second_action.value("opponent_character", "") ==
+                    "shao_kahn" &&
+                second_action.value("agent_mode", "") ==
+                    "scorpion_mock_teacher",
+            "configured Scorpion versus Shao Kahn profile did not produce the action"
+        );
         send_action_acknowledgement(second_client, second_action);
         const nlohmann::json action_after_second_ack =
             receive_action_with_acknowledgement_visible(
@@ -400,11 +468,33 @@ int main() {
             !std::filesystem::exists(
                 capture_session / "connection_1" / "frame_12.jpg"
             ),
-            "debug mode saved more than one JPEG for the connection"
+            "debug mode ignored its periodic capture interval"
+        );
+        require(
+            std::filesystem::exists(
+                capture_session / "connection_1" / "frame_13.jpg"
+            ),
+            "debug mode did not save another JPEG after its interval"
         );
         require(
             std::filesystem::exists(capture_session / "connection_2" / "frame_1.jpg"),
             "reconnected client frame was not saved"
+        );
+        std::ifstream second_metadata(
+            capture_session / "connection_2" / "frames.jsonl"
+        );
+        const std::string second_metadata_text{
+            std::istreambuf_iterator<char>(second_metadata),
+            std::istreambuf_iterator<char>()
+        };
+        require(
+            second_metadata_text.find(
+                R"("player_character":"scorpion")"
+            ) != std::string::npos &&
+                second_metadata_text.find(
+                    R"("opponent_character":"shao_kahn")"
+                ) != std::string::npos,
+            "capture metadata did not retain the selected fighters"
         );
 
         std::filesystem::remove_all(root);
