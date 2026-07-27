@@ -56,6 +56,9 @@ The server answers before accepting gameplay frames:
   "rl_option_count": 22,
   "agent_mode": "reinforcement_learning",
   "shared_policy": true,
+  "training_reset_state_enabled": true,
+  "training_reset_trigger": "round_lost",
+  "training_reset_ack_type": "training_reset_ack",
   "checkpoint_loaded": false,
   "rl_checkpoint": "/workspace/gameagent/rl_checkpoints/shared_policy_latest.garl"
 }
@@ -211,6 +214,58 @@ all controls when applying that empty state and must still send its normal
 Possible `fight_phase` values are `no_hud`, `acquiring`, `round_intro`,
 `active_fight` and `round_end`. Only `active_fight` can carry non-empty RL
 commands. The client must not try to override this gate locally.
+
+## Training-state reset after a defeat
+
+In reinforcement-learning mode, one lost round is treated as a complete failed
+training attempt. The server first emits its normal empty `action` state, then
+emits exactly one reset request for that episode:
+
+```json
+{
+  "protocol_version": 2,
+  "type": "training_reset_state",
+  "reset_id": 4,
+  "episode_id": 19,
+  "frame_id": 8821,
+  "timestamp_ms": 1784740000400,
+  "reason": "round_lost",
+  "requested_operation": "load_training_state",
+  "player_character": "scorpion",
+  "opponent_character": "subzero",
+  "release_controls": true,
+  "cancel_pending_sequence": true,
+  "ack_required": true
+}
+```
+
+The client must process this message outside the normal action parser. It must
+release every control, cancel queued input, suspend action application, load
+the locally configured emulator save state, clear stale frame/action state and
+then answer:
+
+```json
+{
+  "protocol_version": 2,
+  "type": "training_reset_ack",
+  "reset_id": 4,
+  "success": true,
+  "completed_timestamp_ms": 1784740000710,
+  "message": "save state loaded"
+}
+```
+
+`message` is optional. On failure the client sends `success: false` with a
+short diagnostic message and keeps controls released. `reset_id` is monotonic
+within one WebSocket connection and makes the operation idempotent: a reset ID
+already completed must not load the state a second time.
+
+The server does not have direct access to the emulator and therefore requests,
+rather than performs, the load. The fight gate continues emitting empty actions
+until fresh post-load HUD frames establish a new active round. `round_won`,
+`double_ko`, menus and ordinary round transitions do not request a reset.
+`session_config_ack.training_reset_state_enabled` tells the client whether this
+extension is active.
 
 ## Client state transition
 

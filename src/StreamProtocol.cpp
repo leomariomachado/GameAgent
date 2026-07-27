@@ -360,6 +360,58 @@ ClientTextMessage parse_client_text_message(std::string_view payload) {
         };
     }
 
+    if (type == "training_reset_ack") {
+        if (!request.contains("protocol_version") ||
+            !request["protocol_version"].is_number_integer() ||
+            request["protocol_version"].get<int>() !=
+                static_cast<int>(kActionProtocolVersion)) {
+            throw std::invalid_argument(
+                "training_reset_ack protocol_version must be 2"
+            );
+        }
+        if (!request.contains("reset_id") ||
+            !request["reset_id"].is_number_unsigned() ||
+            request["reset_id"].get<std::uint64_t>() == 0) {
+            throw std::invalid_argument(
+                "training_reset_ack reset_id must be a positive uint64"
+            );
+        }
+        if (!request.contains("completed_timestamp_ms") ||
+            !request["completed_timestamp_ms"].is_number_integer() ||
+            request["completed_timestamp_ms"].get<std::int64_t>() <= 0) {
+            throw std::invalid_argument(
+                "training_reset_ack completed_timestamp_ms must be positive"
+            );
+        }
+        if (!request.contains("success") ||
+            !request["success"].is_boolean()) {
+            throw std::invalid_argument(
+                "training_reset_ack success must be a boolean"
+            );
+        }
+        std::optional<std::string> message;
+        if (request.contains("message")) {
+            if (!request["message"].is_string()) {
+                throw std::invalid_argument(
+                    "training_reset_ack message must be a string"
+                );
+            }
+            message = request["message"].get<std::string>();
+            if (message->size() > 512U) {
+                throw std::invalid_argument(
+                    "training_reset_ack message is too large"
+                );
+            }
+        }
+        return TrainingResetAcknowledgement{
+            .reset_id = request["reset_id"].get<std::uint64_t>(),
+            .completed_timestamp_ms =
+                request["completed_timestamp_ms"].get<std::int64_t>(),
+            .success = request["success"].get<bool>(),
+            .message = std::move(message),
+        };
+    }
+
     if (type != "frame" || !request.contains("frame_id") ||
         !request["frame_id"].is_number_unsigned() ||
         !request.contains("timestamp_ms") || !request["timestamp_ms"].is_number_integer() ||

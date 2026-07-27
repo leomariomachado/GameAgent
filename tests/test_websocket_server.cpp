@@ -409,6 +409,11 @@ int main() {
                 session_ack.value("opponent_embedding_size", 0U) ==
                     16U &&
                 !session_ack.value("shared_policy", true) &&
+                !session_ack.value(
+                    "training_reset_state_enabled", true
+                ) &&
+                session_ack.value("training_reset_trigger", "") ==
+                    "round_lost" &&
                 session_ack.value("agent_mode", "") == "mock_teacher" &&
                 session_ack.value("mock_move_count", 0U) == 11U,
             "Scorpion versus Shao Kahn session was not acknowledged"

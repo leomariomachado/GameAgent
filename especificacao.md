@@ -151,6 +151,9 @@ O cliente deve aguardar a confirmação antes de iniciar o envio dos frames:
   "profile": "scorpion_v1",
   "mock_move_count": 11,
   "agent_mode": "mock_teacher",
+  "training_reset_state_enabled": false,
+  "training_reset_trigger": "round_lost",
+  "training_reset_ack_type": "training_reset_ack",
   "checkpoint_loaded": false
 }
 ```
@@ -541,6 +544,59 @@ O cliente não deve tentar tomar decisões durante load, menu, introdução ou f
 de round. Essa filtragem é feita pelo servidor, e `fight_phase` serve para log e
 interface. Valores possíveis: `no_hud`, `acquiring`, `round_intro`,
 `active_fight` e `round_end`.
+
+### Reset automático depois de derrota
+
+No modo de aprendizado por reforço, um round perdido representa uma tentativa
+de treino encerrada. O servidor primeiro envia a ação normal com
+`commands: []` para soltar os controles e, logo depois, envia uma única
+solicitação para aquele episódio:
+
+```json
+{
+  "protocol_version": 2,
+  "type": "training_reset_state",
+  "reset_id": 4,
+  "episode_id": 19,
+  "frame_id": 8821,
+  "timestamp_ms": 1784740000400,
+  "reason": "round_lost",
+  "requested_operation": "load_training_state",
+  "player_character": "scorpion",
+  "opponent_character": "subzero",
+  "release_controls": true,
+  "cancel_pending_sequence": true,
+  "ack_required": true
+}
+```
+
+O cliente deve tratar essa mensagem fora do parser de `action`: soltar todas
+as teclas, cancelar sequências pendentes, suspender a aplicação de ações,
+carregar o save state de treino configurado localmente e limpar frames e ações
+antigos. Quando terminar, deve responder:
+
+```json
+{
+  "protocol_version": 2,
+  "type": "training_reset_ack",
+  "reset_id": 4,
+  "success": true,
+  "completed_timestamp_ms": 1784740000710,
+  "message": "save state loaded"
+}
+```
+
+`message` é opcional. Em caso de erro, responder `success: false` com uma
+mensagem curta e manter os controles liberados. O `reset_id` cresce dentro da
+conexão e torna a operação idempotente: o cliente nunca deve carregar o mesmo
+reset duas vezes.
+
+O servidor não controla diretamente o emulador; ele solicita a operação ao
+cliente. Até chegarem novos frames válidos depois do carregamento, o gate da
+luta continua enviando ações vazias. Somente `round_lost` dispara o reset:
+`round_won`, `double_ko`, menus e transições normais não disparam. O campo
+`training_reset_state_enabled` no `session_config_ack` informa se a extensão
+está ativa.
 
 | Valor | Controle |
 |---:|---|

@@ -951,6 +951,11 @@ void handle_websocket_connection(
                      : "mock_teacher"},
                 {"shared_policy",
                  reinforcement_agent != nullptr},
+                {"training_reset_state_enabled",
+                 reinforcement_agent != nullptr &&
+                     options.training_reset_state_enabled},
+                {"training_reset_trigger", "round_lost"},
+                {"training_reset_ack_type", "training_reset_ack"},
                 {"checkpoint_loaded",
                  reinforcement_agent != nullptr &&
                      reinforcement_agent->stats().checkpoint_loaded},
@@ -980,6 +985,9 @@ void handle_websocket_connection(
          reinforcement_agent != nullptr
              ? "reinforcement_learning"
              : "mock_teacher"},
+        {"training_reset_state_enabled",
+         reinforcement_agent != nullptr &&
+             options.training_reset_state_enabled},
         {"rl_checkpoint",
          reinforcement_agent != nullptr
              ? reinforcement_agent->config().checkpoint_path.string()
@@ -1008,6 +1016,7 @@ void handle_websocket_connection(
 
     CircularFrameBuffer buffer(options.frame_buffer_capacity);
     std::unique_ptr<FightStateTracker> fight_tracker;
+    std::unique_ptr<TrainingResetTracker> training_reset_tracker;
     if (reinforcement_agent != nullptr) {
         fight_tracker = std::make_unique<FightStateTracker>(FightStateConfig{
             .player_side = player_is_left
@@ -1019,6 +1028,10 @@ void handle_websocket_connection(
                     options.decision_interval.count() * 3
                 ),
         });
+        if (options.training_reset_state_enabled) {
+            training_reset_tracker =
+                std::make_unique<TrainingResetTracker>();
+        }
         reinforcement_agent->reset_episode(false);
     }
     if (temporal_agent != nullptr) {
@@ -1032,6 +1045,12 @@ void handle_websocket_connection(
     std::atomic<std::uint64_t> decode_errors{0};
     std::atomic<std::uint64_t> acknowledgements_received{0};
     std::atomic<std::uint64_t> acknowledgements_rejected{0};
+    std::atomic<std::uint64_t> training_reset_requests{0};
+    std::atomic<std::uint64_t> training_reset_acknowledgements{0};
+    std::atomic<std::uint64_t>
+        training_reset_acknowledgements_rejected{0};
+    std::atomic<std::uint64_t> last_training_reset_id{0};
+    std::atomic<std::uint64_t> last_training_reset_ack_id{0};
     std::atomic<std::uint64_t> client_message_errors{0};
     std::atomic<std::uint64_t> temporal_model_errors{0};
     std::atomic<std::uint64_t> reinforcement_errors{0};
@@ -1200,8 +1219,14 @@ void handle_websocket_connection(
                 const auto latest_applied =
                     latest_applied_record(action_history);
                 FightControlSnapshot fight;
+                std::optional<TrainingResetTrigger>
+                    training_reset_trigger;
                 if (fight_tracker != nullptr) {
                     fight = fight_tracker->consume(decision_tick_ms);
+                    if (training_reset_tracker != nullptr) {
+                        training_reset_trigger =
+                            training_reset_tracker->observe(fight);
+                    }
                     if (fight.episode_ended && temporal_agent != nullptr) {
                         temporal_agent->reset();
                     }
@@ -1409,6 +1434,8 @@ void handle_websocket_connection(
                         !fight.action_allowed || !reinforcement_step_ok;
                     response["fight_phase"] = fight_phase_name(fight.phase);
                     response["episode_id"] = fight.episode_id;
+                    response["episode_ended"] = fight.episode_ended;
+                    response["terminal"] = fight.terminal;
                     response["player_health"] = fight.player_health;
                     response["opponent_health"] = fight.opponent_health;
                     response["reward"] = fight.reward;
@@ -1528,6 +1555,54 @@ void handle_websocket_connection(
                 metric_record["event"] = "decision";
                 metric_record["connection_id"] = connection_id;
                 metrics.write(metric_record);
+                if (training_reset_trigger.has_value()) {
+                    const std::uint64_t reset_id =
+                        last_training_reset_id.fetch_add(1U) + 1U;
+                    const std::int64_t requested_at_ms =
+                        epoch_milliseconds();
+                    const nlohmann::json reset_request{
+                        {"protocol_version", kActionProtocolVersion},
+                        {"type", "training_reset_state"},
+                        {"reset_id", reset_id},
+                        {"episode_id",
+                         training_reset_trigger->episode_id},
+                        {"frame_id", training_reset_trigger->frame_id},
+                        {"timestamp_ms", requested_at_ms},
+                        {"reason", training_reset_trigger->reason},
+                        {"requested_operation",
+                         "load_training_state"},
+                        {"player_character",
+                         fighter_character_slug(player_character)},
+                        {"opponent_character",
+                         opponent_character_slug(opponent_character)},
+                        {"release_controls", true},
+                        {"cancel_pending_sequence", true},
+                        {"ack_required", true},
+                    };
+                    if (!writer.send_json(reset_request)) {
+                        connected.store(false);
+                        shutdown(socket, SHUT_RDWR);
+                        break;
+                    }
+                    training_reset_requests.fetch_add(1U);
+                    nlohmann::json reset_metric = reset_request;
+                    reset_metric["event"] =
+                        "training_reset_state_requested";
+                    reset_metric["connection_id"] = connection_id;
+                    metrics.write(reset_metric);
+                    std::cout
+                        << "\n[TRAINING_RESET] request reset_id="
+                        << reset_id
+                        << " connection=" << connection_id
+                        << " episode="
+                        << training_reset_trigger->episode_id
+                        << " frame="
+                        << training_reset_trigger->frame_id
+                        << " reason="
+                        << training_reset_trigger->reason
+                        << " operation=load_training_state\n\n"
+                        << std::flush;
+                }
                 if (decision_id == 1 || decision_id % 20U == 0U) {
                     std::cout << "[DECISION] connection=" << connection_id
                               << " character="
@@ -1768,6 +1843,85 @@ void handle_websocket_connection(
                         }
                         continue;
                     }
+                    if (std::holds_alternative<
+                            TrainingResetAcknowledgement
+                        >(client_message)) {
+                        const auto& acknowledgement = std::get<
+                            TrainingResetAcknowledgement
+                        >(client_message);
+                        const std::uint64_t expected =
+                            last_training_reset_id.load();
+                        const std::uint64_t already_acknowledged =
+                            last_training_reset_ack_id.load();
+                        if (
+                            expected == 0 ||
+                            acknowledgement.reset_id != expected ||
+                            acknowledgement.reset_id <=
+                                already_acknowledged
+                        ) {
+                            training_reset_acknowledgements_rejected
+                                .fetch_add(1U);
+                            const std::string reason =
+                                expected == 0
+                                    ? "no training reset is pending"
+                                    : acknowledgement.reset_id != expected
+                                        ? "training reset ID does not match the pending request"
+                                        : "training reset acknowledgement is duplicated";
+                            writer.send_json({
+                                {"protocol_version",
+                                 kActionProtocolVersion},
+                                {"type", "warning"},
+                                {"message", reason},
+                                {"expected_reset_id", expected},
+                            });
+                            std::cerr
+                                << "[TRAINING_RESET_ACK] connection="
+                                << connection_id
+                                << " reset_id="
+                                << acknowledgement.reset_id
+                                << " rejected: " << reason << '\n';
+                        } else {
+                            last_training_reset_ack_id.store(
+                                acknowledgement.reset_id
+                            );
+                            training_reset_acknowledgements.fetch_add(
+                                1U
+                            );
+                            metrics.write({
+                                {"protocol_version",
+                                 kActionProtocolVersion},
+                                {"event", "training_reset_ack"},
+                                {"connection_id", connection_id},
+                                {"reset_id",
+                                 acknowledgement.reset_id},
+                                {"success", acknowledgement.success},
+                                {"completed_timestamp_ms",
+                                 acknowledgement
+                                     .completed_timestamp_ms},
+                                {"acknowledgement_received_timestamp_ms",
+                                 received_ms},
+                                {"message",
+                                 acknowledgement.message.value_or("")},
+                            });
+                            std::cout
+                                << "\n[TRAINING_RESET_ACK] reset_id="
+                                << acknowledgement.reset_id
+                                << " connection=" << connection_id
+                                << " success="
+                                << (
+                                    acknowledgement.success
+                                        ? "true"
+                                        : "false"
+                                );
+                            if (acknowledgement.message.has_value()) {
+                                std::cout << " message=\""
+                                          << *acknowledgement.message
+                                          << '"';
+                            }
+                            std::cout << "\n\n" << std::flush;
+                        }
+                        continue;
+                    }
                     if (std::holds_alternative<SessionConfiguration>(
                             client_message
                         )) {
@@ -1848,6 +2002,12 @@ void handle_websocket_connection(
         {"decode_errors", decode_errors.load()},
         {"acknowledgements_received", acknowledgements_received.load()},
         {"acknowledgements_rejected", acknowledgements_rejected.load()},
+        {"training_reset_requests", training_reset_requests.load()},
+        {"training_reset_acknowledgements",
+         training_reset_acknowledgements.load()},
+        {"training_reset_acknowledgements_rejected",
+         training_reset_acknowledgements_rejected.load()},
+        {"last_training_reset_id", last_training_reset_id.load()},
         {"client_message_errors", client_message_errors.load()},
         {"temporal_model_errors", temporal_model_errors.load()},
         {"temporal_frames_processed", temporal_frames_processed.load()},
@@ -1875,6 +2035,10 @@ void handle_websocket_connection(
               << " acknowledgements=" << acknowledgements_received.load()
               << " rejected_acknowledgements="
               << acknowledgements_rejected.load()
+              << " training_resets="
+              << training_reset_requests.load()
+              << " training_reset_acks="
+              << training_reset_acknowledgements.load()
               << " temporal_overwritten="
               << temporal_frames_overwritten.load()
               << " persistence_dropped="
@@ -2087,6 +2251,12 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                      options_.reinforcement_training_enabled},
                     {"reinforcement_reward_log_interval_ms",
                      options_.reinforcement_reward_log_interval.count()},
+                    {"training_reset_state_enabled",
+                     options_.reinforcement_learning_enabled &&
+                         options_.training_reset_state_enabled},
+                    {"training_reset_trigger", "round_lost"},
+                    {"training_reset_ack_type",
+                     "training_reset_ack"},
                     {"fight_gating_enabled",
                      options_.reinforcement_learning_enabled},
                     {"player_side",

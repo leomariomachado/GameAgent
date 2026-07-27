@@ -59,6 +59,24 @@ int main() {
         require(parsed_ack.applied_commands.empty(),
                 "empty applied command state was not preserved");
 
+        const auto reset_ack = gameagent::parse_client_text_message(
+            R"({"protocol_version":2,"type":"training_reset_ack","reset_id":3,"success":true,"completed_timestamp_ms":1784740000300,"message":"save state loaded"})"
+        );
+        require(
+            std::holds_alternative<
+                gameagent::TrainingResetAcknowledgement
+            >(reset_ack),
+            "training_reset_ack was not recognized"
+        );
+        const auto& parsed_reset_ack =
+            std::get<gameagent::TrainingResetAcknowledgement>(reset_ack);
+        require(
+            parsed_reset_ack.reset_id == 3 &&
+                parsed_reset_ack.success &&
+                parsed_reset_ack.message == "save state loaded",
+            "training_reset_ack fields were not preserved"
+        );
+
         const auto session = gameagent::parse_client_text_message(
             R"({"protocol_version":2,"type":"session_config","player_character":"scorpion","opponent_character":"subzero","player_side":"left","initial_facing":"right"})"
         );

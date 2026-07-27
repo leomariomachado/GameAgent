@@ -493,4 +493,28 @@ void FightStateTracker::reset() {
     pending_transition_reason_.clear();
 }
 
+std::optional<TrainingResetTrigger> TrainingResetTracker::observe(
+    const FightControlSnapshot& fight
+) {
+    if (
+        !fight.episode_ended ||
+        !fight.terminal ||
+        fight.episode_id == 0 ||
+        fight.transition_reason != "round_lost" ||
+        fight.episode_id == last_reset_episode_id_
+    ) {
+        return std::nullopt;
+    }
+    last_reset_episode_id_ = fight.episode_id;
+    return TrainingResetTrigger{
+        .episode_id = fight.episode_id,
+        .frame_id = fight.frame_id,
+        .reason = "round_lost",
+    };
+}
+
+void TrainingResetTracker::reset() {
+    last_reset_episode_id_ = 0;
+}
+
 }  // namespace gameagent

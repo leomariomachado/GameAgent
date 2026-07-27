@@ -146,6 +146,7 @@ void print_help(const char* executable) {
         << "  --rl-checkpoint-dir P   Shared RL policy checkpoint directory\n"
         << "  --rl-reward-log-ms MS   Accumulated RL reward log interval (default: 5000)\n"
         << "  --rl-no-resume          Start RL weights/replay from scratch\n"
+        << "  --no-training-reset     Disable training_reset_state after a lost round\n"
         << "  --player-side SIDE      Controlled HUD side: left/P1 or right/P2\n"
         << "  --resnet50-checkpoint P ImageNet ResNet50 checkpoint path\n"
         << "  --temporal-checkpoint P Trained LSTM/action-head checkpoint\n"
@@ -225,6 +226,10 @@ int main(int argc, char** argv) {
         server_options.reinforcement_resume = parse_boolean(
             environment_or("GAMEAGENT_RL_RESUME", "1"),
             "reinforcement-resume flag"
+        );
+        server_options.training_reset_state_enabled = parse_boolean(
+            environment_or("GAMEAGENT_TRAINING_RESET_STATE", "1"),
+            "training-reset-state flag"
         );
         server_options.reinforcement_reward_log_interval =
             std::chrono::milliseconds(parse_positive_size(
@@ -388,6 +393,8 @@ int main(int argc, char** argv) {
                     ));
             } else if (argument == "--rl-no-resume") {
                 server_options.reinforcement_resume = false;
+            } else if (argument == "--no-training-reset") {
+                server_options.training_reset_state_enabled = false;
             } else if (argument == "--player-side") {
                 server_options.player_is_left = parse_player_is_left(
                     require_value(argument)

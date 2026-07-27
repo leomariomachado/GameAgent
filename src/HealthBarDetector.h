@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -92,6 +93,25 @@ struct FightControlSnapshot {
     float terminal_reward = 0.0f;
     float hud_confidence = 0.0f;
     std::string transition_reason;
+};
+
+struct TrainingResetTrigger {
+    std::uint64_t episode_id = 0;
+    std::uint64_t frame_id = 0;
+    std::string reason;
+};
+
+// Training treats a lost round as a complete failed attempt. This tracker
+// converts that boundary into one reset request and suppresses duplicates.
+class TrainingResetTracker {
+public:
+    [[nodiscard]] std::optional<TrainingResetTrigger> observe(
+        const FightControlSnapshot& fight
+    );
+    void reset();
+
+private:
+    std::uint64_t last_reset_episode_id_ = 0;
 };
 
 // Converts individual bar measurements into an episode/control state. Reward

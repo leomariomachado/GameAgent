@@ -255,6 +255,12 @@ zero otherwise. `reward_gained` is the reward since the previous summary, while
 damage penalties and the terminal reward. A blank line follows each summary to
 make reward events easier to scan.
 
+After `round_lost`, the server releases controls and emits one
+`training_reset_state` request with a connection-local `reset_id`. The client
+loads its configured training save state and returns `training_reset_ack`.
+Wins and double KOs do not trigger this request. This behavior is enabled by
+default and can be disabled with `GAMEAGENT_TRAINING_RESET_STATE=0`.
+
 Change only the reporting cadence, in milliseconds, with:
 
 ```bash
@@ -557,6 +563,7 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_LSTM_HIDDEN_SIZE` | `256` | temporal hidden-state width |
 | `GAMEAGENT_REINFORCEMENT_LEARNING` | `0` | enable shared multi-character Double DQN |
 | `GAMEAGENT_RL_CHECKPOINT_DIR` | `/workspace/gameagent/rl_checkpoints` | shared latest policy/replay plus per-character best snapshots |
+| `GAMEAGENT_TRAINING_RESET_STATE` | `1` | request a client-side save-state load once after each `round_lost` |
 
 `GAMEAGENT_OBSERVATION_FRAMES` cannot exceed the buffer capacity.
 

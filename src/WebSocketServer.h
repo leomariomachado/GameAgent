@@ -28,6 +28,7 @@ struct WebSocketServerOptions {
     bool reinforcement_learning_enabled = false;
     bool reinforcement_training_enabled = true;
     bool reinforcement_resume = true;
+    bool training_reset_state_enabled = true;
     bool player_is_left = true;
     std::filesystem::path resnet50_checkpoint =
         "/workspace/resnet50_best.ckpt";

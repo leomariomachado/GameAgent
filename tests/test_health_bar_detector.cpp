@@ -188,6 +188,35 @@ int main() {
         require_near(terminal.terminal_reward, 5.0f, 0.001f, "round win bonus is inaccurate");
         require_near(terminal.reward, 20.0f, 0.2f, "round win did not include damage and terminal bonus");
 
+        gameagent::TrainingResetTracker reset_tracker;
+        const gameagent::FightControlSnapshot lost_round{
+            .frame_id = 77,
+            .episode_id = 9,
+            .phase = gameagent::FightPhase::round_end,
+            .episode_ended = true,
+            .terminal = true,
+            .transition_reason = "round_lost",
+        };
+        const auto reset_trigger = reset_tracker.observe(lost_round);
+        require(
+            reset_trigger.has_value() &&
+                reset_trigger->episode_id == 9 &&
+                reset_trigger->frame_id == 77 &&
+                reset_trigger->reason == "round_lost",
+            "lost round did not request a training-state reset"
+        );
+        require(
+            !reset_tracker.observe(lost_round).has_value(),
+            "lost round generated more than one reset request"
+        );
+        auto won_round = lost_round;
+        won_round.episode_id = 10;
+        won_round.transition_reason = "round_won";
+        require(
+            !reset_tracker.observe(won_round).has_value(),
+            "won round incorrectly requested a training-state reset"
+        );
+
         tracker.observe(make_frame(21, 1600, 0.0f, 0.0f, false));
         const auto invalid = tracker.snapshot(1610);
         require(!invalid.action_allowed, "invalid HUD allowed an action");

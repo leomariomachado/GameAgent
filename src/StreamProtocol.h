@@ -28,6 +28,13 @@ struct ActionAcknowledgement {
     std::vector<int> applied_commands;
 };
 
+struct TrainingResetAcknowledgement {
+    std::uint64_t reset_id = 0;
+    std::int64_t completed_timestamp_ms = 0;
+    bool success = false;
+    std::optional<std::string> message;
+};
+
 struct SessionConfiguration {
     std::string player_character;
     std::optional<std::string> opponent_character;
@@ -38,6 +45,7 @@ struct SessionConfiguration {
 using ClientTextMessage = std::variant<
     FrameEnvelope,
     ActionAcknowledgement,
+    TrainingResetAcknowledgement,
     SessionConfiguration
 >;
 
