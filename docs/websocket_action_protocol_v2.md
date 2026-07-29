@@ -60,7 +60,10 @@ The server answers before accepting gameplay frames:
   "training_reset_trigger": "round_lost",
   "training_reset_ack_type": "training_reset_ack",
   "checkpoint_loaded": false,
-  "rl_checkpoint": "/workspace/gameagent/rl_checkpoints/shared_policy_latest.garl"
+  "trainable_lstm": true,
+  "recurrent_checkpoint_loaded": false,
+  "rl_training_device": "cuda:0",
+  "rl_checkpoint": "/workspace/gameagent/rl_checkpoints/shared_recurrent_metadata_latest.garl"
 }
 ```
 
@@ -100,17 +103,19 @@ For backward compatibility, a connection whose first data message is a frame
 uses the server defaults: Sub-Zero, configured player side, and configured
 facing. Such a legacy connection receives no configuration acknowledgement.
 
-In reinforcement mode all supported characters use one format-v4 shared
-policy. It has learned player/opponent embeddings, one shared representation
-trunk and one action head per controlled character. Replay is also shared and
-sampled across non-empty player/opponent matchup buckets. Epsilon progress,
-action-selection counters and best episode return remain independent for each
-controlled character.
+In reinforcement mode all supported characters use one shared recurrent
+policy. The ResNet50 remains frozen; the LSTM, player/opponent embeddings,
+shared strategy trunk and one action head per controlled character learn
+together with BPTT on CUDA. Replay is shared and sampled across non-empty
+player/opponent matchup buckets. Epsilon progress, action-selection counters
+and best episode return remain independent for each controlled character.
 
-`shared_policy_latest.garl` is the resumable checkpoint used by every
-character. `shared_policy_best_<character>.garl` is a full shared-policy
-snapshot taken when that character improves. There is no checkpoint per
-matchup. The frozen ResNet50 remains the only pretrained artifact.
+`shared_recurrent_latest.pt` is the resumable model/AdamW/replay checkpoint.
+`shared_recurrent_metadata_latest.garl` preserves the C++ option and epsilon
+metadata. Per-character best snapshots use the
+`shared_recurrent_metadata_best_<character>.garl.recurrent.pt` suffix. There is
+no checkpoint per matchup. The previous `shared_policy_latest.garl` remains an
+untouched inference-only baseline.
 
 `opponent_embedding_index` selects the row in the learned opponent table;
 `opponent_vocabulary_size` is the current number of recognized identities and

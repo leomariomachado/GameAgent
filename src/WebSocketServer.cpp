@@ -846,10 +846,20 @@ void handle_websocket_connection(
         );
         const auto latest_checkpoint =
             options.reinforcement_checkpoint_directory /
-            "shared_policy_latest.garl";
+            (
+                options.reinforcement_trainable_lstm
+                    ? "shared_recurrent_metadata_latest.garl"
+                    : "shared_policy_latest.garl"
+            );
         const auto best_checkpoint =
             options.reinforcement_checkpoint_directory /
-            ("shared_policy_best_" + character_slug + ".garl");
+            (
+                options.reinforcement_trainable_lstm
+                    ? "shared_recurrent_metadata_best_" +
+                          character_slug + ".garl"
+                    : "shared_policy_best_" +
+                          character_slug + ".garl"
+            );
         try {
             reinforcement_agent_storage =
                 std::make_unique<ReinforcementAgent>(
@@ -892,6 +902,28 @@ void handle_websocket_connection(
                             options.reinforcement_training_enabled,
                         .resume = options.reinforcement_resume,
                         .save_replay = true,
+                        .trainable_lstm =
+                            options.reinforcement_trainable_lstm,
+                        .temporal_visual_size =
+                            static_cast<std::size_t>(
+                                ResNet50FeatureExtractor::kFeatureSize
+                            ),
+                        .temporal_projection_size =
+                            options.temporal_visual_projection_size,
+                        .temporal_controller_size =
+                            TemporalLstmConfig::kControllerFeatureCount,
+                        .temporal_hidden_size =
+                            options.temporal_hidden_size,
+                        .temporal_sequence_capacity =
+                            options.observation_frames,
+                        .temporal_device_id =
+                            options.temporal_device_id,
+                        .recurrent_service_script =
+                            options.recurrent_service_script,
+                        .recurrent_checkpoint_path =
+                            options
+                                .reinforcement_checkpoint_directory /
+                            "shared_recurrent_latest.pt",
                         .checkpoint_path = latest_checkpoint,
                         .best_checkpoint_path = best_checkpoint,
                     }
@@ -971,6 +1003,18 @@ void handle_websocket_connection(
                 {"checkpoint_loaded",
                  reinforcement_agent != nullptr &&
                      reinforcement_agent->stats().checkpoint_loaded},
+                {"trainable_lstm",
+                 reinforcement_agent != nullptr &&
+                     reinforcement_agent->stats().trainable_lstm},
+                {"recurrent_checkpoint_loaded",
+                 reinforcement_agent != nullptr &&
+                     reinforcement_agent
+                         ->stats()
+                         .recurrent_checkpoint_loaded},
+                {"rl_training_device",
+                 reinforcement_agent != nullptr
+                     ? reinforcement_agent->stats().training_device
+                     : "none"},
                 {"rl_checkpoint",
                  reinforcement_agent != nullptr
                      ? reinforcement_agent
@@ -1003,6 +1047,13 @@ void handle_websocket_connection(
         {"rl_read_only",
          reinforcement_agent != nullptr &&
              !options.reinforcement_training_enabled},
+        {"trainable_lstm",
+         reinforcement_agent != nullptr &&
+             reinforcement_agent->stats().trainable_lstm},
+        {"rl_training_device",
+         reinforcement_agent != nullptr
+             ? reinforcement_agent->stats().training_device
+             : "none"},
         {"training_reset_state_enabled",
          reinforcement_agent != nullptr &&
              options.training_reset_state_enabled},
@@ -1029,6 +1080,13 @@ void handle_websocket_connection(
             reinforcement_agent != nullptr
                 ? reinforcement_agent->config().checkpoint_path.string()
                 : "none"
+        )
+        << " recurrent="
+        << (
+            reinforcement_agent != nullptr &&
+                    reinforcement_agent->stats().trainable_lstm
+                ? reinforcement_agent->stats().training_device
+                : "disabled"
         )
         << '\n';
 
@@ -1284,6 +1342,20 @@ void handle_websocket_connection(
                     try {
                         reinforcement_decision = reinforcement_agent->step({
                             .state = reinforcement_state,
+                            .temporal_visual_feature =
+                                temporal_output.has_value()
+                                    ? std::span<const float>(
+                                          temporal_output
+                                              ->visual_feature
+                                      )
+                                    : std::span<const float>{},
+                            .temporal_controller_features =
+                                temporal_output.has_value()
+                                    ? std::span<const float>(
+                                          temporal_output
+                                              ->controller_features
+                                      )
+                                    : std::span<const float>{},
                             .reward = fight.reward,
                             .action_allowed =
                                 fight.action_allowed &&
@@ -1444,6 +1516,8 @@ void handle_websocket_connection(
                     }},
                 };
                 if (reinforcement_agent != nullptr) {
+                    const ReinforcementAgentStats rl_stats =
+                        reinforcement_agent->stats();
                     response["agent_mode"] = "reinforcement_learning";
                     response["control_enabled"] =
                         fight.action_allowed && temporal_output.has_value() &&
@@ -1495,6 +1569,12 @@ void handle_websocket_connection(
                         reinforcement_decision.training_performed;
                     response_metrics["rl_checkpoint_saved"] =
                         reinforcement_decision.checkpoint_saved;
+                    response_metrics["rl_trainable_lstm"] =
+                        rl_stats.trainable_lstm;
+                    response_metrics["rl_recurrent_checkpoint_loaded"] =
+                        rl_stats.recurrent_checkpoint_loaded;
+                    response_metrics["rl_training_device"] =
+                        rl_stats.training_device;
                     response_metrics["rl_errors"] =
                         reinforcement_errors.load();
                 } else {
@@ -2105,6 +2185,15 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
     if (options_.reinforcement_learning_enabled &&
         (!options_.temporal_model_enabled ||
          options_.reinforcement_checkpoint_directory.empty() ||
+         (
+             options_.reinforcement_trainable_lstm &&
+             (
+                 options_.recurrent_service_script.empty() ||
+                 !std::filesystem::is_regular_file(
+                     options_.recurrent_service_script
+                 )
+             )
+         ) ||
          options_.reinforcement_network_hidden_size == 0 ||
          options_.reinforcement_replay_capacity == 0 ||
          options_.reinforcement_minimum_replay_size == 0 ||
@@ -2151,6 +2240,11 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                 .initialization_seed =
                     options_.random_seed.value_or(0x4c53544dU),
                 .verify_resnet50_checkpoint = true,
+                .frozen_lstm_inference_enabled =
+                    !(
+                        options_.reinforcement_learning_enabled &&
+                        options_.reinforcement_trainable_lstm
+                    ),
             }
         );
         const auto& report = temporal_agent->checkpoint_report();

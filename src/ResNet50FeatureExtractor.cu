@@ -493,6 +493,17 @@ std::vector<float> ResNet50FeatureExtractor::extract(
     const base::data::image::Image& image
 ) {
     const __half* feature = extract_device(image);
+    return download_device_feature(feature);
+}
+
+std::vector<float> ResNet50FeatureExtractor::download_device_feature(
+    const __half* device_feature
+) {
+    if (device_feature == nullptr) {
+        throw std::invalid_argument(
+            "cannot download a null ResNet50 device feature"
+        );
+    }
     constexpr int block_size = 256;
     half_to_float_kernel<<<
         (kFeatureSize + block_size - 1) / block_size,
@@ -500,7 +511,7 @@ std::vector<float> ResNet50FeatureExtractor::extract(
         0,
         stream_
     >>>(
-        feature,
+        device_feature,
         device_feature_float_,
         static_cast<std::size_t>(kFeatureSize)
     );

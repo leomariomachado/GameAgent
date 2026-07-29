@@ -71,37 +71,37 @@ image path, feature path, shape, inference time and numerical statistics.
 Records are ordered by the original client timestamp so later temporal windows
 can be formed without relying on lexicographic JPEG filenames.
 
-## Temporal LSTM prototype
+## Trainable temporal LSTM
 
-GameAgent now contains an inference-only GPU temporal path that can be enabled
-without changing the WebSocket protocol:
+The reinforcement path now trains the temporal model together with the
+Double-DQN on CUDA, without changing the WebSocket protocol:
 
 ```text
 new decoded frame
 → frozen ResNet50 once
 → cache FP16[2048] on the GPU
-→ project 2048 → 256
+→ fixed projection 2048 → 256
 → concatenate:
    - 10-value client-confirmed controller state
    - acknowledgement-known flag
    - normalized age of that state
-→ one recurrent step per 50 ms decision tick
-→ LSTM hidden size 256 over the newest 8 decision steps
-→ active/release head + 10-button action head
+→ one recurrent step per 100 ms decision tick
+→ trainable LSTM hidden size 256 over the newest 16 decision steps
+→ shared strategy trunk + character-specific Q head
 ```
 
 The ResNet50 is not repeated for the complete window on every decision. A
-latest-wins worker embeds each selected new frame once. Every 50 ms decision
-then reuses the newest cached visual vector and advances the bounded GPU
+latest-wins worker embeds each selected new frame once. Every decision then
+reuses the newest cached visual vector and advances the bounded recurrent
 decision ring. The controller input comes from `action_ack`, so the temporal model
 sees what the client actually applied rather than assuming every requested
 state succeeded.
 
-Without a temporal checkpoint, the LSTM uses one deterministic initialization
-shared by every character. This is the clean default: only the ImageNet
-ResNet50 is pretrained, and the shared RL policy starts from scratch. An
-optional `.gat` temporal checkpoint can still be supplied for experiments, but
-it is not required by reinforcement mode.
+The ResNet50 and the dimensionality-reduction projection remain frozen.
+Backpropagation through time updates the LSTM, shared strategy trunk,
+character/opponent embeddings and all four Q heads in GPU batches. The replay
+stores bounded sequences and never crosses an episode boundary. The older
+inference-only `.gat` path remains available when trainable RL is disabled.
 
 ## Uniform character curricula
 
@@ -122,8 +122,8 @@ different learning privileges.
 
 ## Online reinforcement learning
 
-Reinforcement mode uses the frozen ResNet50 and deterministic temporal encoder
-as the state encoder for a shared semi-Markov Double DQN. It adds the
+Reinforcement mode uses the frozen ResNet50 and trainable temporal encoder
+as the state encoder for a shared recurrent semi-Markov Double DQN. It adds the
 controlled and opponent health fractions, health advantage, HUD confidence,
 the latest client-confirmed 10-button state and ACK-known flag to the 256-value
 LSTM hidden state.
@@ -138,7 +138,7 @@ selected head chooses among high-level options:
 - that character's declared specials and combos;
 - the unique Forward/Back mirrors of those programs.
 
-An option emits one complete protocol-v2 controller state every 50 ms. Its
+An option emits one complete protocol-v2 controller state every 100 ms. Its
 discounted reward is accumulated until the option ends, and replay stores its
 actual duration. Double-DQN targets therefore use `gamma^duration`, assigning
 delayed game damage to the complete move instead of an arbitrary controller
@@ -174,25 +174,27 @@ round win  = +5
 round loss = -5
 ```
 
-Damage and episode flags accumulate until the 20 Hz decision loop consumes
+Damage and episode flags accumulate until the RL decision loop consumes
 them, so one camera frame cannot be counted twice. Terminal bonuses are emitted
 once. `action_ack` remains the source of truth for commands actually applied.
 
 ### Checkpoints and resume
 
-RL format-v4 checkpoints include the online/target shared trunk, learned
-embeddings, all four action heads, Adam moments, per-character epsilon and
-episode counters, plus matchup-labelled replay memory. They are written
-atomically at round end and connection shutdown:
+The recurrent checkpoint stores online/target LSTM and Double-DQN parameters,
+AdamW state, update counters and a compact recent replay snapshot. A separate
+format-v4 metadata checkpoint preserves per-character epsilon/episode state.
+Both are written atomically at round end and connection shutdown:
 
 ```text
 /workspace/gameagent/rl_checkpoints/
-├── shared_policy_latest.garl
-├── shared_policy_best_subzero.garl
-├── shared_policy_best_scorpion.garl
-├── shared_policy_best_noob_saibot.garl
-└── shared_policy_best_sindel.garl
+├── shared_recurrent_latest.pt
+├── shared_recurrent_metadata_latest.garl
+├── shared_recurrent_metadata_best_<character>.garl
+└── shared_recurrent_metadata_best_<character>.garl.recurrent.pt
 ```
+
+The former `shared_policy_latest.garl` is not overwritten, so it remains an
+independent baseline for the inference-only DQN.
 
 The only required pretrained artifact is:
 
@@ -234,9 +236,9 @@ python3 scripts/analyze_rl_evaluation.py
 ```
 
 The analyzer fails if it observes exploration, training, changing update
-counters or checkpoint saves. The original
-`/workspace/gameagent/rl_checkpoints/shared_policy_latest.garl` is never opened
-for writing; the launcher first copies it into the evaluation run directory.
+counters or checkpoint saves. The evaluator snapshots
+`shared_recurrent_latest.pt` (and metadata when present) before starting and
+verifies that every snapshot remains byte-identical.
 Use `GAMEAGENT_EVALUATION_PORT=8081` when evaluating on a separately exposed
 port.
 
@@ -558,8 +560,8 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_OBSERVATION_FRAMES` | `8` | newest frames used by the agent |
 | `GAMEAGENT_ACTION_HISTORY_SIZE` | `8` | newest client-confirmed states given to the agent |
 | `GAMEAGENT_PERSISTENCE_QUEUE_CAPACITY` | `256` | bounded asynchronous JPEG write queue; oldest pending write is dropped on overflow |
-| `GAMEAGENT_DECISION_INTERVAL_MS` | `50` | inference loop interval |
-| `GAMEAGENT_FAILSAFE_TIMEOUT_MS` | `200` | client safety release timeout advertised in every action |
+| `GAMEAGENT_DECISION_INTERVAL_MS` | `50` (`100` in RL launcher) | inference loop interval |
+| `GAMEAGENT_FAILSAFE_TIMEOUT_MS` | `200` (`750` in RL launcher) | client safety release timeout advertised in every action |
 | `GAMEAGENT_MAX_JPEG_MB` | `8` | maximum JPEG payload |
 | `GAMEAGENT_METRICS_PATH` | `metrics.jsonl` | JSONL metrics output |
 | `GAMEAGENT_CAPTURE_DIR` | `captures` | optional JPEG inspection output |
@@ -570,13 +572,15 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_DEFAULT_FACING` | `right` | legacy/default Forward/Back mapping when the client omits `session_config` |
 | `GAMEAGENT_API_TOKEN` | unset | Bearer or X-API-Key credential |
 | `GAMEAGENT_RANDOM_SEED` | random | deterministic mock seed |
-| `GAMEAGENT_TEMPORAL_MODEL` | `0` | enable frozen ResNet50 plus GPU LSTM feature path |
+| `GAMEAGENT_TEMPORAL_MODEL` | `0` | enable frozen ResNet50 plus GPU temporal feature path |
 | `GAMEAGENT_RESNET50_CHECKPOINT` | `/workspace/resnet50_best.ckpt` | frozen ImageNet ResNet50 checkpoint |
 | `GAMEAGENT_TEMPORAL_CHECKPOINT` | unset | trained `.gat` policy loaded in student-shadow mode |
 | `GAMEAGENT_DEVICE_ID` | `0` | CUDA device used by ResNet50 and LSTM |
 | `GAMEAGENT_LSTM_PROJECTION_SIZE` | `256` | ResNet50 feature projection width |
 | `GAMEAGENT_LSTM_HIDDEN_SIZE` | `256` | temporal hidden-state width |
-| `GAMEAGENT_REINFORCEMENT_LEARNING` | `0` | enable shared multi-character Double DQN |
+| `GAMEAGENT_REINFORCEMENT_LEARNING` | `0` | enable shared multi-character recurrent Double DQN |
+| `GAMEAGENT_RL_TRAINABLE_LSTM` | `1` | train the LSTM and Q network with BPTT on CUDA |
+| `GAMEAGENT_RL_RECURRENT_SERVICE` | `/tmp/GameAgent/scripts/recurrent_dqn_service.py` | persistent local PyTorch/CUDA recurrent backend |
 | `GAMEAGENT_RL_CHECKPOINT_DIR` | `/workspace/gameagent/rl_checkpoints` | shared latest policy/replay plus per-character best snapshots |
 | `GAMEAGENT_TRAINING_RESET_STATE` | `1` | request a client-side save-state load once after each `round_lost` |
 | `GAMEAGENT_EVALUATION_ROOT` | `/workspace/gameagent/evaluations` | isolated snapshots, logs and metrics produced by the pure-DQN evaluator |

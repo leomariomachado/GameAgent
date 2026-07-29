@@ -9,6 +9,8 @@
 #include <filesystem>
 #include <mutex>
 #include <optional>
+#include <array>
+#include <vector>
 
 namespace gameagent {
 
@@ -21,6 +23,7 @@ struct TemporalAgentConfig {
     int device_id = 0;
     std::uint32_t initialization_seed = 0x4c53544dU;
     bool verify_resnet50_checkpoint = true;
+    bool frozen_lstm_inference_enabled = true;
 };
 
 struct TemporalObservationResult {
@@ -32,6 +35,14 @@ struct TemporalObservationResult {
 struct TemporalAgentOutput {
     TemporalLstmOutput lstm;
     std::optional<TemporalActionPrediction> action_prediction;
+    // Frozen ResNet50 feature for the newest camera frame and the controller
+    // state used by this decision tick. The recurrent RL service retains a
+    // bounded sequence of these values and performs BPTT on the GPU.
+    std::vector<float> visual_feature;
+    std::array<
+        float,
+        TemporalLstmConfig::kControllerFeatureCount
+    > controller_features{};
     float hidden_l2 = 0.0f;
 };
 
@@ -74,6 +85,7 @@ private:
     std::optional<TemporalPolicyCheckpointReport>
         temporal_checkpoint_report_;
     const __half* latest_visual_feature_ = nullptr;
+    std::vector<float> latest_visual_feature_host_;
     TemporalStepMetadata latest_frame_metadata_;
     mutable std::mutex mutex_;
 };

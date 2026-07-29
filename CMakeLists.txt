@@ -33,6 +33,7 @@ add_library(
         src/HttpServer.cpp
         src/MockAgent.cpp
         src/MockProtocol.cpp
+        src/RecurrentPolicyBackend.cpp
         src/ReinforcementAgent.cpp
         src/ResNet50FeatureExtractor.cu
         src/StreamProtocol.cpp

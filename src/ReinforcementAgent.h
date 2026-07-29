@@ -40,12 +40,26 @@ struct ReinforcementAgentConfig {
     bool checkpoint_writes_enabled = true;
     bool resume = true;
     bool save_replay = true;
+    // Enables the CUDA/PyTorch recurrent Double-DQN backend. The legacy
+    // feed-forward DQN remains available for unit tests and checkpoint
+    // migration, but production RL uses a trainable LSTM by default.
+    bool trainable_lstm = false;
+    std::size_t temporal_visual_size = 2048;
+    std::size_t temporal_projection_size = 256;
+    std::size_t temporal_controller_size = 12;
+    std::size_t temporal_hidden_size = 256;
+    std::size_t temporal_sequence_capacity = 16;
+    int temporal_device_id = 0;
+    std::filesystem::path recurrent_service_script;
+    std::filesystem::path recurrent_checkpoint_path;
     std::filesystem::path checkpoint_path;
     std::filesystem::path best_checkpoint_path;
 };
 
 struct ReinforcementStepInput {
     std::span<const float> state;
+    std::span<const float> temporal_visual_feature;
+    std::span<const float> temporal_controller_features;
     float reward = 0.0f;
     bool action_allowed = false;
     bool episode_started = false;
@@ -86,6 +100,9 @@ struct ReinforcementAgentStats {
     double shared_parameter_checksum = 0.0;
     std::size_t shared_replay_matchups = 0;
     bool checkpoint_loaded = false;
+    bool trainable_lstm = false;
+    bool recurrent_checkpoint_loaded = false;
+    std::string training_device = "cpu";
 };
 
 // Online semi-Markov Double DQN with a shared strategy trunk, learned

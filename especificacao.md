@@ -225,18 +225,20 @@ Compatibilidade: um cliente antigo que envie um frame como primeira mensagem
 continua funcionando e recebe o perfil padrão do Sub-Zero contra `unknown`, mas
 não receberá `session_config_ack`.
 
-Os quatro personagens usam uma única política compartilhada de formato v4.
-Ela contém embeddings aprendidos do personagem e do oponente, um tronco de
-representação compartilhado, replay único balanceado por combinação
-personagem/oponente e um head de ações específico para cada personagem
-controlado. Epsilon, contadores de seleção e melhor retorno continuam
+Os quatro personagens usam uma única política recorrente compartilhada. A
+ResNet50 permanece congelada; LSTM, embeddings do personagem/oponente, tronco
+de estratégia e heads Q aprendem juntos por BPTT na GPU. O replay de sequências
+é balanceado por combinação personagem/oponente e nunca atravessa o limite
+entre duas lutas. Epsilon, contadores de seleção e melhor retorno continuam
 independentes por personagem.
 
-O arquivo retomável de todos os personagens é
-`/workspace/gameagent/rl_checkpoints/shared_policy_latest.garl`. Melhores
-resultados geram snapshots completos chamados
-`shared_policy_best_<personagem>.garl`. Não existe checkpoint por dupla.
-A ResNet50 congelada continua sendo o único peso pré-treinado.
+O modelo retomável é
+`/workspace/gameagent/rl_checkpoints/shared_recurrent_latest.pt`; o estado de
+opções/epsilon do C++ fica em `shared_recurrent_metadata_latest.garl`.
+Snapshots melhores usam
+`shared_recurrent_metadata_best_<personagem>.garl.recurrent.pt`. Não existe
+checkpoint por dupla. O antigo `shared_policy_latest.garl` não é sobrescrito e
+continua disponível como baseline da DQN sem LSTM treinável.
 
 `opponent_embedding_index` é a linha usada na tabela de embeddings,
 `opponent_vocabulary_size` é a quantidade atual de identidades reconhecidas e

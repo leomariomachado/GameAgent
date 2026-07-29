@@ -1150,6 +1150,19 @@ std::size_t TemporalLstm::hidden_size() const {
     return config_.hidden_size;
 }
 
+std::vector<TemporalStepMetadata> TemporalLstm::steps() const {
+    std::vector<TemporalStepMetadata> result;
+    result.reserve(size_);
+    const std::size_t first_slot =
+        size_ == config_.sequence_capacity ? next_slot_ : 0U;
+    for (std::size_t step = 0; step < size_; ++step) {
+        result.push_back(
+            metadata_[(first_slot + step) % config_.sequence_capacity]
+        );
+    }
+    return result;
+}
+
 const TemporalLstmConfig& TemporalLstm::config() const {
     return config_;
 }

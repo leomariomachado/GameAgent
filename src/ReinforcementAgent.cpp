@@ -1,4 +1,5 @@
 #include "ReinforcementAgent.h"
+#include "RecurrentPolicyBackend.h"
 
 #include <algorithm>
 #include <array>
@@ -551,6 +552,69 @@ struct ReinforcementAgent::Implementation {
             load(config.checkpoint_path);
             checkpoint_loaded = true;
         }
+        if (config.trainable_lstm) {
+            initialize_recurrent_backend();
+            // Legacy replay entries contain only the old frozen LSTM output.
+            // They remain preserved in the original checkpoint, but cannot be
+            // used for sequence BPTT.
+            replay.clear();
+            replay_next = 0;
+        }
+    }
+
+    void initialize_recurrent_backend() {
+        std::vector<std::size_t> action_sizes;
+        action_sizes.reserve(options_by_character.size());
+        for (const auto& character_options : options_by_character) {
+            action_sizes.push_back(character_options.size());
+        }
+        std::filesystem::path recurrent_checkpoint =
+            config.recurrent_checkpoint_path;
+        if (recurrent_checkpoint.empty()) {
+            recurrent_checkpoint =
+                config.checkpoint_path.string() + ".recurrent.pt";
+        }
+        recurrent_backend = std::make_unique<RecurrentPolicyBackend>(
+            RecurrentPolicyBackendConfig{
+                .service_script = config.recurrent_service_script,
+                .checkpoint_path = recurrent_checkpoint,
+                .action_sizes = std::move(action_sizes),
+                .visual_size = config.temporal_visual_size,
+                .projection_size = config.temporal_projection_size,
+                .controller_size = config.temporal_controller_size,
+                .temporal_hidden_size = config.temporal_hidden_size,
+                .context_size =
+                    config.input_size - config.temporal_hidden_size,
+                .strategy_hidden_size = config.network_hidden_size,
+                .sequence_capacity =
+                    config.temporal_sequence_capacity,
+                .character_embedding_size =
+                    config.character_embedding_size,
+                .opponent_embedding_size =
+                    config.opponent_embedding_size,
+                .opponent_count = kOpponentCharacterFeatureCount,
+                .replay_capacity = config.replay_capacity,
+                .minimum_replay_size = config.minimum_replay_size,
+                .batch_size = config.batch_size,
+                .training_updates_per_transition =
+                    config.training_updates_per_transition,
+                .target_update_interval =
+                    config.target_update_interval,
+                .initial_training_updates = training_updates,
+                .gamma = config.gamma,
+                .learning_rate = config.learning_rate,
+                .gradient_clip = config.gradient_clip,
+                .random_seed = config.random_seed,
+                .device_id = config.temporal_device_id,
+                .training_enabled = config.training_enabled,
+                .checkpoint_writes_enabled =
+                    config.checkpoint_writes_enabled,
+                .resume = config.resume,
+            }
+        );
+        const auto& recurrent_stats = recurrent_backend->stats();
+        training_updates = recurrent_stats.training_updates;
+        last_training_loss = recurrent_stats.last_loss;
     }
 
     const std::vector<OptionDefinition>& options() const {
@@ -598,7 +662,20 @@ struct ReinforcementAgent::Implementation {
             config.epsilon_final > config.epsilon_start ||
             config.epsilon_decay_selections == 0 ||
             config.scripted_exploration_probability < 0.0f ||
-            config.scripted_exploration_probability > 1.0f
+            config.scripted_exploration_probability > 1.0f ||
+            (
+                config.trainable_lstm &&
+                (
+                    config.temporal_visual_size == 0 ||
+                    config.temporal_projection_size == 0 ||
+                    config.temporal_controller_size == 0 ||
+                    config.temporal_hidden_size == 0 ||
+                    config.temporal_sequence_capacity == 0 ||
+                    config.temporal_device_id < 0 ||
+                    config.input_size <= config.temporal_hidden_size ||
+                    config.recurrent_service_script.empty()
+                )
+            )
         ) {
             throw std::invalid_argument(
                 "invalid reinforcement-agent configuration"
@@ -626,12 +703,19 @@ struct ReinforcementAgent::Implementation {
         std::span<const float> state,
         float& selected_q
     ) {
-        const std::vector<float> values = forward(
-            online,
-            state,
-            config.character,
-            config.opponent_character
-        );
+        const std::vector<float> values =
+            recurrent_backend != nullptr
+                ? recurrent_backend->q_values(
+                      character_index(config.character),
+                      opponent_index(config.opponent_character),
+                      options().size()
+                  )
+                : forward(
+                      online,
+                      state,
+                      config.character,
+                      config.opponent_character
+                  );
         std::uniform_real_distribution<float> probability(0.0f, 1.0f);
         std::size_t selected = 0;
         std::string source = "dqn_exploit";
@@ -1005,7 +1089,17 @@ struct ReinforcementAgent::Implementation {
             return false;
         }
         bool trained = false;
-        if (config.training_enabled) {
+        if (recurrent_backend != nullptr) {
+            const RecurrentPolicyCloseResult result =
+                recurrent_backend->close_transition(
+                    std::max<std::size_t>(1U, option_elapsed_steps),
+                    option_reward,
+                    terminal
+                );
+            trained = result.training_performed;
+            training_updates = result.stats.training_updates;
+            last_training_loss = result.stats.last_loss;
+        } else if (config.training_enabled) {
             std::vector<float> next;
             if (next_state.size() == config.input_size) {
                 next.assign(next_state.begin(), next_state.end());
@@ -1164,6 +1258,16 @@ struct ReinforcementAgent::Implementation {
         }
         output.close();
         std::filesystem::rename(temporary, path);
+        if (recurrent_backend != nullptr) {
+            const std::filesystem::path recurrent_path =
+                path == config.checkpoint_path &&
+                        !config.recurrent_checkpoint_path.empty()
+                    ? config.recurrent_checkpoint_path
+                    : std::filesystem::path(
+                          path.string() + ".recurrent.pt"
+                      );
+            recurrent_backend->save(recurrent_path, false);
+        }
     }
 
     void load(const std::filesystem::path& path) {
@@ -1326,6 +1430,7 @@ struct ReinforcementAgent::Implementation {
     SharedPolicyNetwork target;
     SharedPolicyVectors first_moment;
     SharedPolicyVectors second_moment;
+    std::unique_ptr<RecurrentPolicyBackend> recurrent_backend;
     std::vector<ReplayTransition> replay;
     std::size_t replay_next = 0;
     std::optional<std::size_t> active_option;
@@ -1383,6 +1488,30 @@ ReinforcementDecision ReinforcementAgent::step(
     if (!std::isfinite(input.reward)) {
         throw std::invalid_argument(
             "reinforcement reward is not finite"
+        );
+    }
+    if (
+        state.recurrent_backend != nullptr &&
+        !input.state.empty()
+    ) {
+        if (
+            input.temporal_visual_feature.size() !=
+                state.config.temporal_visual_size ||
+            input.temporal_controller_features.size() !=
+                state.config.temporal_controller_size
+        ) {
+            throw std::invalid_argument(
+                "trainable LSTM requires the current visual/controller "
+                "observation"
+            );
+        }
+        const std::span<const float> context =
+            input.state.subspan(state.config.temporal_hidden_size);
+        state.recurrent_backend->observe(
+            input.temporal_visual_feature,
+            input.temporal_controller_features,
+            context,
+            input.episode_started
         );
     }
 
@@ -1444,6 +1573,9 @@ ReinforcementDecision ReinforcementAgent::step(
                 state.config.best_checkpoint_path
             );
         }
+        if (state.recurrent_backend != nullptr) {
+            state.recurrent_backend->reset();
+        }
     }
 
     if (
@@ -1464,6 +1596,13 @@ ReinforcementDecision ReinforcementAgent::step(
             state.option_elapsed_steps = 0;
             state.active_selection_source = std::move(source);
             state.active_selected_q = q;
+            if (state.recurrent_backend != nullptr) {
+                state.recurrent_backend->begin_transition(
+                    selected,
+                    character_index(state.config.character),
+                    opponent_index(state.config.opponent_character)
+                );
+            }
         }
         const std::size_t selected = *state.active_option;
         const OptionDefinition& option = options[selected];
@@ -1490,9 +1629,16 @@ ReinforcementDecision ReinforcementAgent::step(
 
     decision.epsilon = state.epsilon(state.config.character);
     decision.episode_return = state.current_episode_return;
-    decision.training_loss = state.last_training_loss;
-    decision.replay_size = state.replay.size();
-    decision.training_updates = state.training_updates;
+    if (state.recurrent_backend != nullptr) {
+        const auto& recurrent = state.recurrent_backend->stats();
+        decision.training_loss = recurrent.last_loss;
+        decision.replay_size = recurrent.replay_size;
+        decision.training_updates = recurrent.training_updates;
+    } else {
+        decision.training_loss = state.last_training_loss;
+        decision.replay_size = state.replay.size();
+        decision.training_updates = state.training_updates;
+    }
     decision.training_performed = trained;
     return decision;
 }
@@ -1507,6 +1653,9 @@ void ReinforcementAgent::reset_episode(bool save_checkpoint) {
     state.option_elapsed_steps = 0;
     state.current_episode_return = 0.0f;
     state.current_episode_id = 0;
+    if (state.recurrent_backend != nullptr) {
+        state.recurrent_backend->reset();
+    }
     if (
         save_checkpoint &&
         state.config.checkpoint_writes_enabled &&
@@ -1536,23 +1685,45 @@ ReinforcementAgentStats ReinforcementAgent::stats() const {
     const auto& state = *implementation_;
     const std::size_t player =
         character_index(state.config.character);
+    const RecurrentPolicyBackendStats* recurrent =
+        state.recurrent_backend != nullptr
+            ? &state.recurrent_backend->stats()
+            : nullptr;
     return {
         .action_selections =
             state.character_action_selections[player],
-        .training_updates = state.training_updates,
+        .training_updates =
+            recurrent != nullptr
+                ? recurrent->training_updates
+                : state.training_updates,
         .episodes_completed =
             state.character_episodes_completed[player],
-        .replay_size = state.replay.size(),
+        .replay_size =
+            recurrent != nullptr
+                ? recurrent->replay_size
+                : state.replay.size(),
         .epsilon = state.epsilon(state.config.character),
-        .last_training_loss = state.last_training_loss,
+        .last_training_loss =
+            recurrent != nullptr
+                ? recurrent->last_loss
+                : state.last_training_loss,
         .current_episode_return = state.current_episode_return,
         .best_episode_return =
             state.character_best_episode_return[player],
         .shared_parameter_checksum =
-            shared_parameter_checksum(state.online),
+            recurrent != nullptr
+                ? recurrent->parameter_checksum
+                : shared_parameter_checksum(state.online),
         .shared_replay_matchups =
-            state.shared_replay_matchup_count(),
+            recurrent != nullptr
+                ? recurrent->matchup_count
+                : state.shared_replay_matchup_count(),
         .checkpoint_loaded = state.checkpoint_loaded,
+        .trainable_lstm = recurrent != nullptr,
+        .recurrent_checkpoint_loaded =
+            recurrent != nullptr && recurrent->checkpoint_loaded,
+        .training_device =
+            recurrent != nullptr ? recurrent->device : "cpu",
     };
 }
 

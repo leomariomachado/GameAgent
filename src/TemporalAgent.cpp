@@ -71,9 +71,11 @@ TemporalAgent::TemporalAgent(TemporalAgentConfig config)
         },
         feature_extractor_.stream()
     );
-    static_cast<void>(
-        temporal_lstm_.infer(feature_extractor_.stream())
-    );
+    if (config_.frozen_lstm_inference_enabled) {
+        static_cast<void>(
+            temporal_lstm_.infer(feature_extractor_.stream())
+        );
+    }
     temporal_lstm_.reset(feature_extractor_.stream());
 }
 
@@ -91,6 +93,10 @@ TemporalObservationResult TemporalAgent::observe_frame(
     const auto started = std::chrono::steady_clock::now();
     latest_visual_feature_ =
         feature_extractor_.extract_device(frame.image);
+    latest_visual_feature_host_ =
+        feature_extractor_.download_device_feature(
+            latest_visual_feature_
+        );
     latest_frame_metadata_ = {
         .frame_id = frame.frame_id,
         .frame_timestamp_ms =
@@ -160,10 +166,28 @@ TemporalAgentOutput TemporalAgent::advance_and_infer(
         feature_extractor_.stream()
     );
 
-    TemporalAgentOutput output{
-        .lstm = temporal_lstm_.infer(feature_extractor_.stream()),
-    };
-    if (temporal_lstm_.policy_loaded()) {
+    TemporalAgentOutput output;
+    if (config_.frozen_lstm_inference_enabled) {
+        output.lstm =
+            temporal_lstm_.infer(feature_extractor_.stream());
+    } else {
+        output.lstm.hidden.assign(config_.hidden_size, 0.0f);
+        output.lstm.steps = temporal_lstm_.steps();
+    }
+    output.visual_feature = latest_visual_feature_host_;
+    std::copy(
+        command_state.begin(),
+        command_state.end(),
+        output.controller_features.begin()
+    );
+    output.controller_features[10] = command_known ? 1.0f : 0.0f;
+    output.controller_features[11] = std::clamp(
+        command_age_seconds, 0.0f, 1.0f
+    );
+    if (
+        config_.frozen_lstm_inference_enabled &&
+        temporal_lstm_.policy_loaded()
+    ) {
         output.action_prediction =
             temporal_lstm_.predict_from_hidden(
                 feature_extractor_.stream()
@@ -179,10 +203,19 @@ TemporalAgentOutput TemporalAgent::advance_and_infer(
 
 TemporalAgentOutput TemporalAgent::infer() {
     std::lock_guard lock(mutex_);
-    TemporalAgentOutput output{
-        .lstm = temporal_lstm_.infer(feature_extractor_.stream()),
-    };
-    if (temporal_lstm_.policy_loaded()) {
+    TemporalAgentOutput output;
+    if (config_.frozen_lstm_inference_enabled) {
+        output.lstm =
+            temporal_lstm_.infer(feature_extractor_.stream());
+    } else {
+        output.lstm.hidden.assign(config_.hidden_size, 0.0f);
+        output.lstm.steps = temporal_lstm_.steps();
+    }
+    output.visual_feature = latest_visual_feature_host_;
+    if (
+        config_.frozen_lstm_inference_enabled &&
+        temporal_lstm_.policy_loaded()
+    ) {
         output.action_prediction =
             temporal_lstm_.predict_from_hidden(
                 feature_extractor_.stream()
@@ -200,6 +233,7 @@ void TemporalAgent::reset() {
     std::lock_guard lock(mutex_);
     temporal_lstm_.reset(feature_extractor_.stream());
     latest_visual_feature_ = nullptr;
+    latest_visual_feature_host_.clear();
     latest_frame_metadata_ = {};
 }
 

@@ -43,6 +43,8 @@ export GAMEAGENT_LSTM_HIDDEN_SIZE="${GAMEAGENT_LSTM_HIDDEN_SIZE:-256}"
 export GAMEAGENT_REINFORCEMENT_LEARNING="${GAMEAGENT_REINFORCEMENT_LEARNING:-0}"
 export GAMEAGENT_RL_TRAINING="${GAMEAGENT_RL_TRAINING:-1}"
 export GAMEAGENT_RL_RESUME="${GAMEAGENT_RL_RESUME:-1}"
+export GAMEAGENT_RL_TRAINABLE_LSTM="${GAMEAGENT_RL_TRAINABLE_LSTM:-1}"
+export GAMEAGENT_RL_RECURRENT_SERVICE="${GAMEAGENT_RL_RECURRENT_SERVICE:-${GAMEAGENT_ROOT}/scripts/recurrent_dqn_service.py}"
 export GAMEAGENT_PLAYER_SIDE="${GAMEAGENT_PLAYER_SIDE:-left}"
 export GAMEAGENT_RL_CHECKPOINT_DIR="${GAMEAGENT_RL_CHECKPOINT_DIR:-/workspace/gameagent/rl_checkpoints}"
 export GAMEAGENT_RL_HIDDEN_SIZE="${GAMEAGENT_RL_HIDDEN_SIZE:-128}"
@@ -125,7 +127,12 @@ if [[ "${GAMEAGENT_TEMPORAL_MODEL}" == "1" ]]; then
     echo "ResNet50 checkpoint not found: ${GAMEAGENT_RESNET50_CHECKPOINT}" >&2
     exit 1
   fi
-  echo "Temporal features: frozen ResNet50 + GPU LSTM"
+  if [[ "${GAMEAGENT_REINFORCEMENT_LEARNING}" == "1" &&
+        "${GAMEAGENT_RL_TRAINABLE_LSTM}" == "1" ]]; then
+    echo "Temporal features: frozen ResNet50 + trainable GPU LSTM"
+  else
+    echo "Temporal features: frozen ResNet50 + inference GPU LSTM"
+  fi
   echo "ResNet50 checkpoint: ${GAMEAGENT_RESNET50_CHECKPOINT}"
   echo "Temporal shape: projection=${GAMEAGENT_LSTM_PROJECTION_SIZE}, hidden=${GAMEAGENT_LSTM_HIDDEN_SIZE}"
   echo "Temporal CUDA device: ${GAMEAGENT_DEVICE_ID}"
@@ -136,7 +143,10 @@ if [[ "${GAMEAGENT_TEMPORAL_MODEL}" == "1" ]]; then
     fi
     echo "Optional temporal policy: ${GAMEAGENT_TEMPORAL_CHECKPOINT}"
   else
-    echo "Temporal policy: initialized uniformly from scratch"
+    if [[ "${GAMEAGENT_REINFORCEMENT_LEARNING}" != "1" ||
+          "${GAMEAGENT_RL_TRAINABLE_LSTM}" != "1" ]]; then
+      echo "Temporal policy: initialized uniformly from scratch"
+    fi
   fi
 else
   echo "Temporal features: disabled (set GAMEAGENT_TEMPORAL_MODEL=1 to enable)"
@@ -147,15 +157,33 @@ if [[ "${GAMEAGENT_REINFORCEMENT_LEARNING}" == "1" ]]; then
     exit 1
   fi
   mkdir -p "${GAMEAGENT_RL_CHECKPOINT_DIR}"
-  echo "Reinforcement control: shared multi-character semi-Markov Double DQN"
+  echo "Reinforcement control: shared multi-character recurrent semi-Markov Double DQN"
   echo "RL mode: $([[ "${GAMEAGENT_RL_TRAINING}" == "1" ]] && echo training || echo evaluation)"
   if [[ "${GAMEAGENT_RL_TRAINING}" == "0" ]]; then
     echo "RL persistence: read-only (no replay append, optimizer update or checkpoint write)"
   fi
   echo "Fight gate: health HUD, player ${GAMEAGENT_PLAYER_SIDE}"
-  echo "RL latest: ${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_policy_latest.garl"
-  echo "RL best: ${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_policy_best_<character>.garl"
+  if [[ "${GAMEAGENT_RL_TRAINABLE_LSTM}" == "1" ]]; then
+    echo "RL metadata: ${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_recurrent_metadata_latest.garl"
+    echo "RL best metadata: ${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_recurrent_metadata_best_<character>.garl"
+  else
+    echo "RL latest: ${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_policy_latest.garl"
+    echo "RL best: ${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_policy_best_<character>.garl"
+  fi
   echo "RL transfer: shared trunk + character/opponent embeddings + per-character heads"
+  echo "RL trainable LSTM: ${GAMEAGENT_RL_TRAINABLE_LSTM}"
+  if [[ "${GAMEAGENT_RL_TRAINABLE_LSTM}" == "1" ]]; then
+    if [[ ! -f "${GAMEAGENT_RL_RECURRENT_SERVICE}" ]]; then
+      echo "Recurrent RL service not found: ${GAMEAGENT_RL_RECURRENT_SERVICE}" >&2
+      exit 1
+    fi
+    if ! python3 -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)'; then
+      echo "Trainable recurrent RL requires PyTorch with CUDA support." >&2
+      exit 1
+    fi
+    echo "RL recurrent checkpoint: ${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_recurrent_latest.pt"
+    echo "RL recurrent device: cuda:${GAMEAGENT_DEVICE_ID}"
+  fi
   echo "RL resume: ${GAMEAGENT_RL_RESUME}"
   echo "RL replay=${GAMEAGENT_RL_REPLAY_CAPACITY}, warmup=${GAMEAGENT_RL_MIN_REPLAY_SIZE}, batch=${GAMEAGENT_RL_BATCH_SIZE}"
   echo "RL epsilon=${GAMEAGENT_RL_EPSILON_START}->${GAMEAGENT_RL_EPSILON_FINAL} over ${GAMEAGENT_RL_EPSILON_DECAY} options"

@@ -28,6 +28,7 @@ struct WebSocketServerOptions {
     bool reinforcement_learning_enabled = false;
     bool reinforcement_training_enabled = true;
     bool reinforcement_resume = true;
+    bool reinforcement_trainable_lstm = true;
     bool training_reset_state_enabled = true;
     bool player_is_left = true;
     std::filesystem::path resnet50_checkpoint =
@@ -38,6 +39,8 @@ struct WebSocketServerOptions {
     int temporal_device_id = 0;
     std::filesystem::path reinforcement_checkpoint_directory =
         "/workspace/gameagent/rl_checkpoints";
+    std::filesystem::path recurrent_service_script =
+        "/tmp/GameAgent/scripts/recurrent_dqn_service.py";
     std::size_t reinforcement_network_hidden_size = 128;
     std::size_t reinforcement_replay_capacity = 20000;
     std::size_t reinforcement_minimum_replay_size = 256;

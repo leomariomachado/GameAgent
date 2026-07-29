@@ -62,8 +62,16 @@ public:
         const base::data::image::Image& image
     );
 
+    // Downloads an already-computed device feature without running the
+    // backbone a second time. This is used by the trainable recurrent RL
+    // backend to keep the ResNet50 frozen while retaining the temporal
+    // observations required for BPTT.
+    std::vector<float> download_device_feature(
+        const __half* device_feature
+    );
+
     // Convenience path for the current GameAgent prototype and its tests.
-    // A future GPU LSTM should consume extract_device() directly.
+    // The online GPU LSTM consumes extract_device() directly.
     std::vector<float> extract(
         const base::data::image::Image& image
     );

@@ -108,6 +108,7 @@ public:
     [[nodiscard]] std::size_t size() const;
     [[nodiscard]] std::size_t capacity() const;
     [[nodiscard]] std::size_t hidden_size() const;
+    [[nodiscard]] std::vector<TemporalStepMetadata> steps() const;
     [[nodiscard]] const TemporalLstmConfig& config() const;
 
 private:

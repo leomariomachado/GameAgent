@@ -141,7 +141,7 @@ void print_help(const char* executable) {
         << "  --collect-training-data Save every accepted frame for offline training\n"
         << "  --training-capture-dir P Training JPEG/metadata directory\n"
         << "  --temporal-model        Enable frozen ResNet50 + GPU LSTM features\n"
-        << "  --reinforcement-learning Enable online semi-Markov Double DQN control\n"
+        << "  --reinforcement-learning Enable recurrent semi-Markov Double DQN control\n"
         << "  --rl-evaluation         Run RL without updating weights\n"
         << "  --rl-checkpoint-dir P   Shared RL policy checkpoint directory\n"
         << "  --rl-reward-log-ms MS   Accumulated RL reward log interval (default: 5000)\n"
@@ -227,6 +227,10 @@ int main(int argc, char** argv) {
             environment_or("GAMEAGENT_RL_RESUME", "1"),
             "reinforcement-resume flag"
         );
+        server_options.reinforcement_trainable_lstm = parse_boolean(
+            environment_or("GAMEAGENT_RL_TRAINABLE_LSTM", "1"),
+            "trainable-LSTM flag"
+        );
         server_options.training_reset_state_enabled = parse_boolean(
             environment_or("GAMEAGENT_TRAINING_RESET_STATE", "1"),
             "training-reset-state flag"
@@ -260,6 +264,10 @@ int main(int argc, char** argv) {
         server_options.reinforcement_checkpoint_directory = environment_or(
             "GAMEAGENT_RL_CHECKPOINT_DIR",
             "/workspace/gameagent/rl_checkpoints"
+        );
+        server_options.recurrent_service_script = environment_or(
+            "GAMEAGENT_RL_RECURRENT_SERVICE",
+            "/tmp/GameAgent/scripts/recurrent_dqn_service.py"
         );
         server_options.reinforcement_network_hidden_size = parse_positive_size(
             environment_or("GAMEAGENT_RL_HIDDEN_SIZE", "128"),
