@@ -149,6 +149,9 @@ if [[ "${GAMEAGENT_REINFORCEMENT_LEARNING}" == "1" ]]; then
   mkdir -p "${GAMEAGENT_RL_CHECKPOINT_DIR}"
   echo "Reinforcement control: shared multi-character semi-Markov Double DQN"
   echo "RL mode: $([[ "${GAMEAGENT_RL_TRAINING}" == "1" ]] && echo training || echo evaluation)"
+  if [[ "${GAMEAGENT_RL_TRAINING}" == "0" ]]; then
+    echo "RL persistence: read-only (no replay append, optimizer update or checkpoint write)"
+  fi
   echo "Fight gate: health HUD, player ${GAMEAGENT_PLAYER_SIDE}"
   echo "RL latest: ${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_policy_latest.garl"
   echo "RL best: ${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_policy_best_<character>.garl"

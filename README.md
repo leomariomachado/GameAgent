@@ -219,11 +219,26 @@ GAMEAGENT_RL_CHECKPOINT_DIR=/workspace/gameagent/rl_checkpoints_clean \
 bash scripts/run_character_rl.sh
 ```
 
-Evaluation uses the same checkpoint and disables updates:
+Pure-DQN evaluation uses an isolated checkpoint snapshot, disables replay,
+gradient/Adam updates and checkpoint writes, forces epsilon to zero, and writes
+metrics under a timestamped evaluation directory:
 
 ```bash
-GAMEAGENT_RL_TRAINING=0 bash scripts/run_character_rl.sh
+bash scripts/run_character_rl_evaluation.sh
 ```
+
+After stopping the evaluation server, summarize the latest run:
+
+```bash
+python3 scripts/analyze_rl_evaluation.py
+```
+
+The analyzer fails if it observes exploration, training, changing update
+counters or checkpoint saves. The original
+`/workspace/gameagent/rl_checkpoints/shared_policy_latest.garl` is never opened
+for writing; the launcher first copies it into the evaluation run directory.
+Use `GAMEAGENT_EVALUATION_PORT=8081` when evaluating on a separately exposed
+port.
 
 Frame persistence remains off by default in RL mode. Health detection, visual
 features and decisions operate directly on the decoded in-memory frame.
@@ -564,6 +579,7 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_REINFORCEMENT_LEARNING` | `0` | enable shared multi-character Double DQN |
 | `GAMEAGENT_RL_CHECKPOINT_DIR` | `/workspace/gameagent/rl_checkpoints` | shared latest policy/replay plus per-character best snapshots |
 | `GAMEAGENT_TRAINING_RESET_STATE` | `1` | request a client-side save-state load once after each `round_lost` |
+| `GAMEAGENT_EVALUATION_ROOT` | `/workspace/gameagent/evaluations` | isolated snapshots, logs and metrics produced by the pure-DQN evaluator |
 
 `GAMEAGENT_OBSERVATION_FRAMES` cannot exceed the buffer capacity.
 

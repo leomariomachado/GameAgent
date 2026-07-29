@@ -37,6 +37,7 @@ struct ReinforcementAgentConfig {
     std::size_t character_embedding_size = 16;
     std::size_t opponent_embedding_size = 16;
     bool training_enabled = true;
+    bool checkpoint_writes_enabled = true;
     bool resume = true;
     bool save_replay = true;
     std::filesystem::path checkpoint_path;

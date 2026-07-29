@@ -1004,31 +1004,33 @@ struct ReinforcementAgent::Implementation {
             active_option.reset();
             return false;
         }
-        std::vector<float> next;
-        if (next_state.size() == config.input_size) {
-            next.assign(next_state.begin(), next_state.end());
-        } else {
-            next = option_start_state;
-        }
-        append_replay({
-            .state = option_start_state,
-            .next_state = std::move(next),
-            .action = static_cast<std::uint32_t>(*active_option),
-            .duration = static_cast<std::uint32_t>(
-                std::max<std::size_t>(1U, option_elapsed_steps)
-            ),
-            .reward = option_reward,
-            .terminal = terminal,
-            .character = config.character,
-            .opponent = config.opponent_character,
-        });
         bool trained = false;
-        for (
-            std::size_t update = 0;
-            update < config.training_updates_per_transition;
-            ++update
-        ) {
-            trained = train_once() || trained;
+        if (config.training_enabled) {
+            std::vector<float> next;
+            if (next_state.size() == config.input_size) {
+                next.assign(next_state.begin(), next_state.end());
+            } else {
+                next = option_start_state;
+            }
+            append_replay({
+                .state = option_start_state,
+                .next_state = std::move(next),
+                .action = static_cast<std::uint32_t>(*active_option),
+                .duration = static_cast<std::uint32_t>(
+                    std::max<std::size_t>(1U, option_elapsed_steps)
+                ),
+                .reward = option_reward,
+                .terminal = terminal,
+                .character = config.character,
+                .opponent = config.opponent_character,
+            });
+            for (
+                std::size_t update = 0;
+                update < config.training_updates_per_transition;
+                ++update
+            ) {
+                trained = train_once() || trained;
+            }
         }
         active_option.reset();
         active_step = 0;
@@ -1040,7 +1042,7 @@ struct ReinforcementAgent::Implementation {
     }
 
     void write_checkpoint(const std::filesystem::path& path) const {
-        if (path.empty()) {
+        if (!config.checkpoint_writes_enabled || path.empty()) {
             return;
         }
         if (!path.parent_path().empty()) {
@@ -1426,11 +1428,15 @@ ReinforcementDecision ReinforcementAgent::step(
             state.character_best_episode_return[player] =
                 state.current_episode_return;
         }
-        if (!state.config.checkpoint_path.empty()) {
+        if (
+            state.config.checkpoint_writes_enabled &&
+            !state.config.checkpoint_path.empty()
+        ) {
             state.write_checkpoint(state.config.checkpoint_path);
             decision.checkpoint_saved = true;
         }
         if (
+            state.config.checkpoint_writes_enabled &&
             new_best &&
             !state.config.best_checkpoint_path.empty()
         ) {
@@ -1503,6 +1509,7 @@ void ReinforcementAgent::reset_episode(bool save_checkpoint) {
     state.current_episode_id = 0;
     if (
         save_checkpoint &&
+        state.config.checkpoint_writes_enabled &&
         !state.config.checkpoint_path.empty()
     ) {
         state.write_checkpoint(state.config.checkpoint_path);

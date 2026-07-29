@@ -2,7 +2,9 @@
 
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -13,6 +15,19 @@ void require(bool condition, const std::string& message) {
     if (!condition) {
         throw std::runtime_error(message);
     }
+}
+
+std::vector<char> read_file(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        throw std::runtime_error(
+            "could not read checkpoint for immutability test"
+        );
+    }
+    return {
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>()
+    };
 }
 
 gameagent::ReinforcementDecision complete_one_option(
@@ -242,6 +257,63 @@ int main() {
             );
         }
 
+        const std::vector<char> checkpoint_before = read_file(latest);
+        const std::vector<char> best_before = read_file(subzero_best);
+        auto evaluation_config = config;
+        evaluation_config.training_enabled = false;
+        evaluation_config.checkpoint_writes_enabled = false;
+        evaluation_config.epsilon_start = 0.0f;
+        evaluation_config.epsilon_final = 0.0f;
+        evaluation_config.character =
+            gameagent::FighterCharacter::subzero;
+        evaluation_config.opponent_character =
+            gameagent::OpponentCharacter::scorpion;
+        gameagent::ReinforcementAgent evaluation(evaluation_config);
+        const auto evaluation_before = evaluation.stats();
+        decision_id = 20;
+        decision = complete_one_option(
+            evaluation, state_a, state_b, 20, decision_id
+        );
+        require(
+            decision.selection_source == "dqn_exploit" &&
+                decision.epsilon == 0.0f &&
+                !decision.training_performed,
+            "read-only evaluation did not use pure DQN inference"
+        );
+        decision = evaluation.step({
+            .state = state_b,
+            .reward = -1.0f,
+            .action_allowed = false,
+            .episode_ended = true,
+            .terminal = true,
+            .episode_id = 20,
+            .frame_id = decision_id + 1,
+            .decision_id = decision_id + 1,
+        });
+        evaluation.reset_episode(true);
+        evaluation.save_checkpoint(
+            directory / "evaluation_must_not_write.garl"
+        );
+        const auto evaluation_after = evaluation.stats();
+        require(
+            !decision.checkpoint_saved &&
+                evaluation_after.training_updates ==
+                    evaluation_before.training_updates &&
+                evaluation_after.replay_size ==
+                    evaluation_before.replay_size &&
+                evaluation_after.shared_parameter_checksum ==
+                    evaluation_before.shared_parameter_checksum,
+            "read-only evaluation changed training state"
+        );
+        require(
+            read_file(latest) == checkpoint_before &&
+                read_file(subzero_best) == best_before &&
+                !std::filesystem::exists(
+                    directory / "evaluation_must_not_write.garl"
+                ),
+            "read-only evaluation modified a checkpoint"
+        );
+
         std::cout
             << "[INFO] shared_updates="
             << transferred_back.training_updates
@@ -252,7 +324,10 @@ int main() {
             << " subzero_epsilon="
             << transferred_back.epsilon
             << " scorpion_epsilon="
-            << scorpion_stats.epsilon << '\n'
+            << scorpion_stats.epsilon
+            << " evaluation_epsilon="
+            << evaluation_after.epsilon
+            << " checkpoint_unchanged=true\n"
             << "[PASS] shared multi-character Double DQN test passed\n";
         std::filesystem::remove_all(directory);
         return 0;

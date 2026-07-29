@@ -888,6 +888,8 @@ void handle_websocket_connection(
                         .facing = facing,
                         .training_enabled =
                             options.reinforcement_training_enabled,
+                        .checkpoint_writes_enabled =
+                            options.reinforcement_training_enabled,
                         .resume = options.reinforcement_resume,
                         .save_replay = true,
                         .checkpoint_path = latest_checkpoint,
@@ -951,6 +953,16 @@ void handle_websocket_connection(
                      : "mock_teacher"},
                 {"shared_policy",
                  reinforcement_agent != nullptr},
+                {"rl_training_enabled",
+                 reinforcement_agent != nullptr &&
+                     options.reinforcement_training_enabled},
+                {"rl_read_only",
+                 reinforcement_agent != nullptr &&
+                     !options.reinforcement_training_enabled},
+                {"rl_epsilon_start",
+                 options.reinforcement_epsilon_start},
+                {"rl_epsilon_final",
+                 options.reinforcement_epsilon_final},
                 {"training_reset_state_enabled",
                  reinforcement_agent != nullptr &&
                      options.training_reset_state_enabled},
@@ -985,6 +997,12 @@ void handle_websocket_connection(
          reinforcement_agent != nullptr
              ? "reinforcement_learning"
              : "mock_teacher"},
+        {"rl_training_enabled",
+         reinforcement_agent != nullptr &&
+             options.reinforcement_training_enabled},
+        {"rl_read_only",
+         reinforcement_agent != nullptr &&
+             !options.reinforcement_training_enabled},
         {"training_reset_state_enabled",
          reinforcement_agent != nullptr &&
              options.training_reset_state_enabled},
@@ -2249,6 +2267,13 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                      options_.reinforcement_learning_enabled},
                     {"reinforcement_training_enabled",
                      options_.reinforcement_training_enabled},
+                    {"reinforcement_read_only",
+                     options_.reinforcement_learning_enabled &&
+                         !options_.reinforcement_training_enabled},
+                    {"reinforcement_epsilon_start",
+                     options_.reinforcement_epsilon_start},
+                    {"reinforcement_epsilon_final",
+                     options_.reinforcement_epsilon_final},
                     {"reinforcement_reward_log_interval_ms",
                      options_.reinforcement_reward_log_interval.count()},
                     {"training_reset_state_enabled",
