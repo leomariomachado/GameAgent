@@ -6,7 +6,9 @@
 #include "TemporalLstm.h"
 
 #include <cstddef>
+#include <deque>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <array>
@@ -24,6 +26,10 @@ struct TemporalAgentConfig {
     std::uint32_t initialization_seed = 0x4c53544dU;
     bool verify_resnet50_checkpoint = true;
     bool frozen_lstm_inference_enabled = true;
+    // When enabled, the PyTorch recurrent service owns the ResNet50 forward
+    // and backward graph. C++ forwards the original in-memory JPEG and does
+    // not allocate a second frozen BaseAI backbone.
+    bool external_visual_encoder = false;
 };
 
 struct TemporalObservationResult {
@@ -39,6 +45,8 @@ struct TemporalAgentOutput {
     // state used by this decision tick. The recurrent RL service retains a
     // bounded sequence of these values and performs BPTT on the GPU.
     std::vector<float> visual_feature;
+    std::vector<std::uint8_t> visual_jpeg;
+    std::uint64_t visual_frame_id = 0;
     std::array<
         float,
         TemporalLstmConfig::kControllerFeatureCount
@@ -79,13 +87,15 @@ public:
 
 private:
     TemporalAgentConfig config_;
-    ResNet50FeatureExtractor feature_extractor_;
+    std::unique_ptr<ResNet50FeatureExtractor> feature_extractor_;
     TemporalLstm temporal_lstm_;
     ResNet50CheckpointReport checkpoint_report_;
     std::optional<TemporalPolicyCheckpointReport>
         temporal_checkpoint_report_;
     const __half* latest_visual_feature_ = nullptr;
     std::vector<float> latest_visual_feature_host_;
+    std::vector<std::uint8_t> latest_visual_jpeg_;
+    std::deque<TemporalStepMetadata> external_steps_;
     TemporalStepMetadata latest_frame_metadata_;
     mutable std::mutex mutex_;
 };

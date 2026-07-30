@@ -4,6 +4,7 @@ set -euo pipefail
 GAMEAGENT_ROOT="${GAMEAGENT_ROOT:-/tmp/GameAgent}"
 EVALUATION_ROOT="${GAMEAGENT_EVALUATION_ROOT:-/workspace/gameagent/evaluations}"
 TRAINABLE_LSTM="${GAMEAGENT_RL_TRAINABLE_LSTM:-1}"
+TRAINABLE_RESNET="${GAMEAGENT_RL_TRAINABLE_RESNET:-1}"
 if [[ "${TRAINABLE_LSTM}" == "1" ]]; then
   SOURCE_CHECKPOINT="${GAMEAGENT_EVALUATION_SOURCE_CHECKPOINT:-/workspace/gameagent/rl_checkpoints/shared_recurrent_latest.pt}"
   SOURCE_METADATA="${GAMEAGENT_EVALUATION_SOURCE_METADATA:-/workspace/gameagent/rl_checkpoints/shared_recurrent_metadata_latest.garl}"
@@ -50,6 +51,7 @@ ln -sfn "${RUN_DIRECTORY}" "${EVALUATION_ROOT}/latest"
 export GAMEAGENT_TEMPORAL_MODEL=1
 export GAMEAGENT_REINFORCEMENT_LEARNING=1
 export GAMEAGENT_RL_TRAINABLE_LSTM="${TRAINABLE_LSTM}"
+export GAMEAGENT_RL_TRAINABLE_RESNET="${TRAINABLE_RESNET}"
 export GAMEAGENT_RL_TRAINING=0
 export GAMEAGENT_RL_RESUME=1
 export GAMEAGENT_RL_EPSILON_START=0
@@ -93,7 +95,7 @@ trap stop_evaluation INT TERM
 
 exec > >(tee -a "${RUN_DIRECTORY}/server.log") 2>&1
 
-echo "[EVALUATION] pure recurrent DQN=${TRAINABLE_LSTM}, epsilon=0, training=off, checkpoint writes=off"
+echo "[EVALUATION] pure recurrent DQN=${TRAINABLE_LSTM}, trainable ResNet checkpoint=${TRAINABLE_RESNET}, epsilon=0, training=off, checkpoint writes=off"
 echo "[EVALUATION] source checkpoint: ${SOURCE_CHECKPOINT}"
 echo "[EVALUATION] isolated snapshot: ${SNAPSHOT_CHECKPOINT}"
 echo "[EVALUATION] metrics: ${GAMEAGENT_METRICS_PATH}"

@@ -507,6 +507,7 @@ std::shared_ptr<const BufferedFrame> decode_frame(
         .client_timestamp_ms = envelope.timestamp_ms,
         .received_timestamp_ms = received_timestamp_ms,
         .jpeg_size = envelope.jpeg.size(),
+        .jpeg = envelope.jpeg,
         .image = std::move(image),
     });
 }
@@ -904,6 +905,8 @@ void handle_websocket_connection(
                         .save_replay = true,
                         .trainable_lstm =
                             options.reinforcement_trainable_lstm,
+                        .trainable_resnet =
+                            options.reinforcement_trainable_resnet,
                         .temporal_visual_size =
                             static_cast<std::size_t>(
                                 ResNet50FeatureExtractor::kFeatureSize
@@ -918,6 +921,19 @@ void handle_websocket_connection(
                             options.observation_frames,
                         .temporal_device_id =
                             options.temporal_device_id,
+                        .resnet50_checkpoint_path =
+                            options.resnet50_checkpoint,
+                        .resnet_learning_rate =
+                            options
+                                .reinforcement_resnet_learning_rate,
+                        .resnet_batch_size =
+                            options.reinforcement_resnet_batch_size,
+                        .resnet_update_interval =
+                            options
+                                .reinforcement_resnet_update_interval,
+                        .resnet_replay_images =
+                            options
+                                .reinforcement_resnet_replay_images,
                         .recurrent_service_script =
                             options.recurrent_service_script,
                         .recurrent_checkpoint_path =
@@ -1011,6 +1027,14 @@ void handle_websocket_connection(
                      reinforcement_agent
                          ->stats()
                          .recurrent_checkpoint_loaded},
+                {"trainable_resnet",
+                 reinforcement_agent != nullptr &&
+                     reinforcement_agent->stats().trainable_resnet},
+                {"resnet_checkpoint_loaded",
+                 reinforcement_agent != nullptr &&
+                     reinforcement_agent
+                         ->stats()
+                         .resnet_checkpoint_loaded},
                 {"rl_training_device",
                  reinforcement_agent != nullptr
                      ? reinforcement_agent->stats().training_device
@@ -1050,6 +1074,9 @@ void handle_websocket_connection(
         {"trainable_lstm",
          reinforcement_agent != nullptr &&
              reinforcement_agent->stats().trainable_lstm},
+        {"trainable_resnet",
+         reinforcement_agent != nullptr &&
+             reinforcement_agent->stats().trainable_resnet},
         {"rl_training_device",
          reinforcement_agent != nullptr
              ? reinforcement_agent->stats().training_device
@@ -1087,6 +1114,13 @@ void handle_websocket_connection(
                     reinforcement_agent->stats().trainable_lstm
                 ? reinforcement_agent->stats().training_device
                 : "disabled"
+        )
+        << " resnet="
+        << (
+            reinforcement_agent != nullptr &&
+                    reinforcement_agent->stats().trainable_resnet
+                ? "trainable_stage4"
+                : "frozen"
         )
         << '\n';
 
@@ -1349,6 +1383,12 @@ void handle_websocket_connection(
                                               ->visual_feature
                                       )
                                     : std::span<const float>{},
+                            .temporal_jpeg =
+                                temporal_output.has_value()
+                                    ? std::span<const std::uint8_t>(
+                                          temporal_output->visual_jpeg
+                                      )
+                                    : std::span<const std::uint8_t>{},
                             .temporal_controller_features =
                                 temporal_output.has_value()
                                     ? std::span<const float>(
@@ -1573,6 +1613,14 @@ void handle_websocket_connection(
                         rl_stats.trainable_lstm;
                     response_metrics["rl_recurrent_checkpoint_loaded"] =
                         rl_stats.recurrent_checkpoint_loaded;
+                    response_metrics["rl_trainable_resnet"] =
+                        rl_stats.trainable_resnet;
+                    response_metrics["rl_resnet_checkpoint_loaded"] =
+                        rl_stats.resnet_checkpoint_loaded;
+                    response_metrics["rl_resnet_training_updates"] =
+                        rl_stats.resnet_training_updates;
+                    response_metrics["rl_resnet_parameter_checksum"] =
+                        rl_stats.resnet_parameter_checksum;
                     response_metrics["rl_training_device"] =
                         rl_stats.training_device;
                     response_metrics["rl_errors"] =
@@ -2186,6 +2234,16 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
         (!options_.temporal_model_enabled ||
          options_.reinforcement_checkpoint_directory.empty() ||
          (
+             options_.reinforcement_trainable_resnet &&
+             (
+                 !options_.reinforcement_trainable_lstm ||
+                 options_.reinforcement_resnet_learning_rate <= 0.0f ||
+                 options_.reinforcement_resnet_batch_size == 0 ||
+                 options_.reinforcement_resnet_update_interval == 0 ||
+                 options_.reinforcement_resnet_replay_images == 0
+             )
+         ) ||
+         (
              options_.reinforcement_trainable_lstm &&
              (
                  options_.recurrent_service_script.empty() ||
@@ -2225,7 +2283,14 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
     MetricsLogger metrics(options_.metrics_path);
     std::unique_ptr<TemporalAgent> temporal_agent;
     if (options_.temporal_model_enabled) {
-        std::cout << "[TEMPORAL] loading frozen ResNet50 checkpoint "
+        std::cout << "[TEMPORAL] loading "
+                  << (
+                      options_.reinforcement_learning_enabled &&
+                              options_.reinforcement_trainable_resnet
+                          ? "external trainable"
+                          : "frozen"
+                  )
+                  << " ResNet50 checkpoint "
                   << options_.resnet50_checkpoint << '\n';
         temporal_agent = std::make_unique<TemporalAgent>(
             TemporalAgentConfig{
@@ -2245,6 +2310,9 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                         options_.reinforcement_learning_enabled &&
                         options_.reinforcement_trainable_lstm
                     ),
+                .external_visual_encoder =
+                    options_.reinforcement_learning_enabled &&
+                    options_.reinforcement_trainable_resnet,
             }
         );
         const auto& report = temporal_agent->checkpoint_report();

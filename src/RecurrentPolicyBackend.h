@@ -13,6 +13,7 @@ namespace gameagent {
 struct RecurrentPolicyBackendConfig {
     std::filesystem::path service_script;
     std::filesystem::path checkpoint_path;
+    std::filesystem::path resnet50_checkpoint_path;
     std::vector<std::size_t> action_sizes;
     std::size_t visual_size = 2048;
     std::size_t projection_size = 256;
@@ -32,12 +33,17 @@ struct RecurrentPolicyBackendConfig {
     std::uint64_t initial_training_updates = 0;
     float gamma = 0.99f;
     float learning_rate = 1.0e-4f;
+    float resnet_learning_rate = 1.0e-6f;
     float gradient_clip = 5.0f;
     std::uint32_t random_seed = 0x524c444eU;
     int device_id = 0;
     bool training_enabled = true;
     bool checkpoint_writes_enabled = true;
     bool resume = true;
+    bool trainable_resnet = false;
+    std::size_t resnet_batch_size = 4;
+    std::size_t resnet_update_interval = 16;
+    std::size_t resnet_replay_images = 4096;
 };
 
 struct RecurrentPolicyBackendStats {
@@ -47,7 +53,11 @@ struct RecurrentPolicyBackendStats {
     std::size_t sequence_size = 0;
     float last_loss = 0.0f;
     double parameter_checksum = 0.0;
+    double resnet_parameter_checksum = 0.0;
+    std::uint64_t resnet_training_updates = 0;
     bool checkpoint_loaded = false;
+    bool resnet_checkpoint_loaded = false;
+    bool trainable_resnet = false;
     std::string device;
 };
 
@@ -71,6 +81,8 @@ public:
 
     void observe(
         std::span<const float> visual,
+        std::span<const std::uint8_t> jpeg,
+        std::uint64_t frame_id,
         std::span<const float> controller,
         std::span<const float> context,
         bool episode_started

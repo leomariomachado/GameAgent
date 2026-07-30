@@ -154,7 +154,12 @@ O cliente deve aguardar a confirmação antes de iniciar o envio dos frames:
   "training_reset_state_enabled": false,
   "training_reset_trigger": "round_lost",
   "training_reset_ack_type": "training_reset_ack",
-  "checkpoint_loaded": false
+  "checkpoint_loaded": false,
+  "trainable_lstm": false,
+  "recurrent_checkpoint_loaded": false,
+  "trainable_resnet": false,
+  "resnet_checkpoint_loaded": false,
+  "rl_training_device": "none"
 }
 ```
 
@@ -225,15 +230,18 @@ Compatibilidade: um cliente antigo que envie um frame como primeira mensagem
 continua funcionando e recebe o perfil padrão do Sub-Zero contra `unknown`, mas
 não receberá `session_config_ack`.
 
-Os quatro personagens usam uma única política recorrente compartilhada. A
-ResNet50 permanece congelada; LSTM, embeddings do personagem/oponente, tronco
-de estratégia e heads Q aprendem juntos por BPTT na GPU. O replay de sequências
-é balanceado por combinação personagem/oponente e nunca atravessa o limite
-entre duas lutas. Epsilon, contadores de seleção e melhor retorno continuam
-independentes por personagem.
+Os quatro personagens usam uma única política recorrente compartilhada. No
+launcher de treino, o último estágio (`layer4`) da ResNet50 também aprende; os
+estágios anteriores e as estatísticas de BatchNorm permanecem congelados.
+LSTM, embeddings do personagem/oponente, tronco de estratégia e heads Q
+aprendem juntos por BPTT na GPU. O replay de sequências é balanceado por
+combinação personagem/oponente e nunca atravessa o limite entre duas lutas.
+Epsilon, contadores de seleção e melhor retorno continuam independentes por
+personagem.
 
 O modelo retomável é
-`/workspace/gameagent/rl_checkpoints/shared_recurrent_latest.pt`; o estado de
+`/workspace/gameagent/rl_checkpoints/shared_recurrent_latest.pt`; ele inclui
+ResNet50, LSTM/DQN, estados dos otimizadores e replay compacto. O estado de
 opções/epsilon do C++ fica em `shared_recurrent_metadata_latest.garl`.
 Snapshots melhores usam
 `shared_recurrent_metadata_best_<personagem>.garl.recurrent.pt`. Não existe

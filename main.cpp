@@ -231,6 +231,10 @@ int main(int argc, char** argv) {
             environment_or("GAMEAGENT_RL_TRAINABLE_LSTM", "1"),
             "trainable-LSTM flag"
         );
+        server_options.reinforcement_trainable_resnet = parse_boolean(
+            environment_or("GAMEAGENT_RL_TRAINABLE_RESNET", "0"),
+            "trainable-ResNet flag"
+        );
         server_options.training_reset_state_enabled = parse_boolean(
             environment_or("GAMEAGENT_TRAINING_RESET_STATE", "1"),
             "training-reset-state flag"
@@ -301,6 +305,34 @@ int main(int argc, char** argv) {
             environment_or("GAMEAGENT_RL_LEARNING_RATE", "0.0001"),
             "RL learning rate", 1.0e-7f, 1.0f
         );
+        server_options.reinforcement_resnet_learning_rate =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_RESNET_LEARNING_RATE", "0.000001"
+                ),
+                "RL ResNet learning rate", 1.0e-9f, 1.0e-2f
+            );
+        server_options.reinforcement_resnet_batch_size =
+            parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_RL_RESNET_BATCH_SIZE", "4"
+                ),
+                "RL ResNet batch size"
+            );
+        server_options.reinforcement_resnet_update_interval =
+            parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_RL_RESNET_UPDATE_INTERVAL", "16"
+                ),
+                "RL ResNet update interval"
+            );
+        server_options.reinforcement_resnet_replay_images =
+            parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_RL_RESNET_REPLAY_IMAGES", "4096"
+                ),
+                "RL ResNet replay image limit"
+            );
         server_options.reinforcement_epsilon_start = parse_float_range(
             environment_or("GAMEAGENT_RL_EPSILON_START", "1.0"),
             "RL epsilon start", 0.0f, 1.0f

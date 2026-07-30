@@ -1,4 +1,5 @@
 #include "RecurrentPolicyBackend.h"
+#include "StreamProtocol.h"
 
 #include <json.hpp>
 
@@ -82,6 +83,30 @@ struct RecurrentPolicyBackend::Implementation {
         require_positive(config.replay_capacity, "replay capacity");
         require_positive(config.minimum_replay_size, "minimum replay");
         require_positive(config.batch_size, "batch size");
+        if (config.trainable_resnet) {
+            if (
+                config.resnet50_checkpoint_path.empty() ||
+                !std::filesystem::is_regular_file(
+                    config.resnet50_checkpoint_path
+                )
+            ) {
+                throw std::invalid_argument(
+                    "trainable ResNet50 checkpoint was not found: " +
+                    config.resnet50_checkpoint_path.string()
+                );
+            }
+            require_positive(
+                config.resnet_batch_size, "ResNet batch size"
+            );
+            require_positive(
+                config.resnet_update_interval,
+                "ResNet update interval"
+            );
+            require_positive(
+                config.resnet_replay_images,
+                "ResNet replay images"
+            );
+        }
         require_positive(
             config.training_updates_per_transition,
             "updates per transition"
@@ -96,6 +121,7 @@ struct RecurrentPolicyBackend::Implementation {
             config.batch_size > config.replay_capacity ||
             config.gamma <= 0.0f || config.gamma > 1.0f ||
             config.learning_rate <= 0.0f ||
+            config.resnet_learning_rate <= 0.0f ||
             config.gradient_clip <= 0.0f
         ) {
             throw std::invalid_argument(
@@ -164,6 +190,18 @@ struct RecurrentPolicyBackend::Implementation {
             std::to_string(config.initial_training_updates),
             "--gamma", std::to_string(config.gamma),
             "--learning-rate", std::to_string(config.learning_rate),
+            "--trainable-resnet",
+            config.trainable_resnet ? "1" : "0",
+            "--resnet-checkpoint",
+            config.resnet50_checkpoint_path.string(),
+            "--resnet-learning-rate",
+            std::to_string(config.resnet_learning_rate),
+            "--resnet-batch-size",
+            std::to_string(config.resnet_batch_size),
+            "--resnet-update-interval",
+            std::to_string(config.resnet_update_interval),
+            "--resnet-replay-images",
+            std::to_string(config.resnet_replay_images),
             "--gradient-clip", std::to_string(config.gradient_clip),
             "--seed", std::to_string(config.random_seed),
         };
@@ -279,10 +317,25 @@ struct RecurrentPolicyBackend::Implementation {
             response.value(
                 "parameter_checksum", stats.parameter_checksum
             );
+        stats.resnet_parameter_checksum = response.value(
+            "resnet_parameter_checksum",
+            stats.resnet_parameter_checksum
+        );
+        stats.resnet_training_updates = response.value(
+            "resnet_training_updates",
+            stats.resnet_training_updates
+        );
         stats.checkpoint_loaded =
             response.value(
                 "checkpoint_loaded", stats.checkpoint_loaded
             );
+        stats.resnet_checkpoint_loaded = response.value(
+            "resnet_checkpoint_loaded",
+            stats.resnet_checkpoint_loaded
+        );
+        stats.trainable_resnet = response.value(
+            "trainable_resnet", stats.trainable_resnet
+        );
         stats.device = response.value("device", stats.device);
     }
 
@@ -326,13 +379,22 @@ RecurrentPolicyBackend::~RecurrentPolicyBackend() = default;
 
 void RecurrentPolicyBackend::observe(
     std::span<const float> visual,
+    std::span<const std::uint8_t> jpeg,
+    std::uint64_t frame_id,
     std::span<const float> controller,
     std::span<const float> context,
     bool episode_started
 ) {
     auto& state = *implementation_;
     if (
-        visual.size() != state.config.visual_size ||
+        (
+            !state.config.trainable_resnet &&
+            visual.size() != state.config.visual_size
+        ) ||
+        (
+            state.config.trainable_resnet &&
+            (jpeg.empty() || frame_id == 0)
+        ) ||
         controller.size() != state.config.controller_size ||
         context.size() != state.config.context_size
     ) {
@@ -340,14 +402,21 @@ void RecurrentPolicyBackend::observe(
             "trainable recurrent observation shape mismatch"
         );
     }
-    static_cast<void>(state.transact({
+    nlohmann::json request{
         {"op", "observe"},
-        {"visual", std::vector<float>(visual.begin(), visual.end())},
         {"controller",
          std::vector<float>(controller.begin(), controller.end())},
         {"context", std::vector<float>(context.begin(), context.end())},
         {"episode_started", episode_started},
-    }));
+        {"frame_id", frame_id},
+    };
+    if (state.config.trainable_resnet) {
+        request["jpeg_base64"] = encode_base64(jpeg);
+    } else {
+        request["visual"] =
+            std::vector<float>(visual.begin(), visual.end());
+    }
+    static_cast<void>(state.transact(request));
 }
 
 std::vector<float> RecurrentPolicyBackend::q_values(

@@ -16,6 +16,9 @@ struct BufferedFrame {
     std::int64_t client_timestamp_ms = 0;
     std::int64_t received_timestamp_ms = 0;
     std::size_t jpeg_size = 0;
+    // Retained only in memory. The trainable visual backend consumes the
+    // original compressed frame directly, avoiding an RGB -> JPEG round trip.
+    std::vector<std::uint8_t> jpeg;
     base::data::image::Image image;
 };
 

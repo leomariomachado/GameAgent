@@ -44,6 +44,7 @@ export GAMEAGENT_REINFORCEMENT_LEARNING="${GAMEAGENT_REINFORCEMENT_LEARNING:-0}"
 export GAMEAGENT_RL_TRAINING="${GAMEAGENT_RL_TRAINING:-1}"
 export GAMEAGENT_RL_RESUME="${GAMEAGENT_RL_RESUME:-1}"
 export GAMEAGENT_RL_TRAINABLE_LSTM="${GAMEAGENT_RL_TRAINABLE_LSTM:-1}"
+export GAMEAGENT_RL_TRAINABLE_RESNET="${GAMEAGENT_RL_TRAINABLE_RESNET:-0}"
 export GAMEAGENT_RL_RECURRENT_SERVICE="${GAMEAGENT_RL_RECURRENT_SERVICE:-${GAMEAGENT_ROOT}/scripts/recurrent_dqn_service.py}"
 export GAMEAGENT_PLAYER_SIDE="${GAMEAGENT_PLAYER_SIDE:-left}"
 export GAMEAGENT_RL_CHECKPOINT_DIR="${GAMEAGENT_RL_CHECKPOINT_DIR:-/workspace/gameagent/rl_checkpoints}"
@@ -54,6 +55,10 @@ export GAMEAGENT_RL_BATCH_SIZE="${GAMEAGENT_RL_BATCH_SIZE:-64}"
 export GAMEAGENT_RL_TARGET_UPDATE="${GAMEAGENT_RL_TARGET_UPDATE:-500}"
 export GAMEAGENT_RL_GAMMA="${GAMEAGENT_RL_GAMMA:-0.99}"
 export GAMEAGENT_RL_LEARNING_RATE="${GAMEAGENT_RL_LEARNING_RATE:-0.0001}"
+export GAMEAGENT_RL_RESNET_LEARNING_RATE="${GAMEAGENT_RL_RESNET_LEARNING_RATE:-0.000001}"
+export GAMEAGENT_RL_RESNET_BATCH_SIZE="${GAMEAGENT_RL_RESNET_BATCH_SIZE:-4}"
+export GAMEAGENT_RL_RESNET_UPDATE_INTERVAL="${GAMEAGENT_RL_RESNET_UPDATE_INTERVAL:-16}"
+export GAMEAGENT_RL_RESNET_REPLAY_IMAGES="${GAMEAGENT_RL_RESNET_REPLAY_IMAGES:-4096}"
 export GAMEAGENT_RL_EPSILON_START="${GAMEAGENT_RL_EPSILON_START:-1.0}"
 export GAMEAGENT_RL_EPSILON_FINAL="${GAMEAGENT_RL_EPSILON_FINAL:-0.05}"
 export GAMEAGENT_RL_EPSILON_DECAY="${GAMEAGENT_RL_EPSILON_DECAY:-100000}"
@@ -129,7 +134,11 @@ if [[ "${GAMEAGENT_TEMPORAL_MODEL}" == "1" ]]; then
   fi
   if [[ "${GAMEAGENT_REINFORCEMENT_LEARNING}" == "1" &&
         "${GAMEAGENT_RL_TRAINABLE_LSTM}" == "1" ]]; then
-    echo "Temporal features: frozen ResNet50 + trainable GPU LSTM"
+    if [[ "${GAMEAGENT_RL_TRAINABLE_RESNET}" == "1" ]]; then
+      echo "Temporal features: trainable ResNet50 stage 4 + trainable GPU LSTM"
+    else
+      echo "Temporal features: frozen ResNet50 + trainable GPU LSTM"
+    fi
   else
     echo "Temporal features: frozen ResNet50 + inference GPU LSTM"
   fi
@@ -172,6 +181,7 @@ if [[ "${GAMEAGENT_REINFORCEMENT_LEARNING}" == "1" ]]; then
   fi
   echo "RL transfer: shared trunk + character/opponent embeddings + per-character heads"
   echo "RL trainable LSTM: ${GAMEAGENT_RL_TRAINABLE_LSTM}"
+  echo "RL trainable ResNet50 stage 4: ${GAMEAGENT_RL_TRAINABLE_RESNET}"
   if [[ "${GAMEAGENT_RL_TRAINABLE_LSTM}" == "1" ]]; then
     if [[ ! -f "${GAMEAGENT_RL_RECURRENT_SERVICE}" ]]; then
       echo "Recurrent RL service not found: ${GAMEAGENT_RL_RECURRENT_SERVICE}" >&2
@@ -183,6 +193,10 @@ if [[ "${GAMEAGENT_REINFORCEMENT_LEARNING}" == "1" ]]; then
     fi
     echo "RL recurrent checkpoint: ${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_recurrent_latest.pt"
     echo "RL recurrent device: cuda:${GAMEAGENT_DEVICE_ID}"
+    if [[ "${GAMEAGENT_RL_TRAINABLE_RESNET}" == "1" ]]; then
+      echo "RL ResNet fine-tuning: lr=${GAMEAGENT_RL_RESNET_LEARNING_RATE}, batch=${GAMEAGENT_RL_RESNET_BATCH_SIZE}, every=${GAMEAGENT_RL_RESNET_UPDATE_INTERVAL} recurrent updates"
+      echo "RL ResNet compressed replay images: ${GAMEAGENT_RL_RESNET_REPLAY_IMAGES}"
+    fi
   fi
   echo "RL resume: ${GAMEAGENT_RL_RESUME}"
   echo "RL replay=${GAMEAGENT_RL_REPLAY_CAPACITY}, warmup=${GAMEAGENT_RL_MIN_REPLAY_SIZE}, batch=${GAMEAGENT_RL_BATCH_SIZE}"

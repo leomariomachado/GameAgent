@@ -62,6 +62,8 @@ The server answers before accepting gameplay frames:
   "checkpoint_loaded": false,
   "trainable_lstm": true,
   "recurrent_checkpoint_loaded": false,
+  "trainable_resnet": true,
+  "resnet_checkpoint_loaded": false,
   "rl_training_device": "cuda:0",
   "rl_checkpoint": "/workspace/gameagent/rl_checkpoints/shared_recurrent_metadata_latest.garl"
 }
@@ -104,13 +106,15 @@ uses the server defaults: Sub-Zero, configured player side, and configured
 facing. Such a legacy connection receives no configuration acknowledgement.
 
 In reinforcement mode all supported characters use one shared recurrent
-policy. The ResNet50 remains frozen; the LSTM, player/opponent embeddings,
-shared strategy trunk and one action head per controlled character learn
-together with BPTT on CUDA. Replay is shared and sampled across non-empty
+policy. The character RL launcher fine-tunes ResNet50 `layer4`; earlier stages
+and BatchNorm running statistics remain frozen. The LSTM, player/opponent
+embeddings, shared strategy trunk and one action head per controlled character
+learn together with BPTT on CUDA. Replay is shared and sampled across non-empty
 player/opponent matchup buckets. Epsilon progress, action-selection counters
 and best episode return remain independent for each controlled character.
 
-`shared_recurrent_latest.pt` is the resumable model/AdamW/replay checkpoint.
+`shared_recurrent_latest.pt` is the resumable ResNet50/LSTM/DQN,
+optimizer-state and compact-replay checkpoint.
 `shared_recurrent_metadata_latest.garl` preserves the C++ option and epsilon
 metadata. Per-character best snapshots use the
 `shared_recurrent_metadata_best_<character>.garl.recurrent.pt` suffix. There is
@@ -206,11 +210,23 @@ When reinforcement mode is enabled, an action may also contain:
   "rl_option_index": 12,
   "rl_option_step": 2,
   "rl_option_steps": 5,
-  "rl_selection_source": "epsilon_scripted"
+  "rl_selection_source": "epsilon_scripted",
+  "metrics": {
+    "rl_trainable_resnet": true,
+    "rl_resnet_checkpoint_loaded": true,
+    "rl_resnet_training_updates": 42,
+    "rl_resnet_parameter_checksum": 123456.789
+  }
 }
 ```
 
 These fields are optional metadata; `commands` remains authoritative. When
+visual fine-tuning is enabled, `rl_resnet_training_updates` advances only on
+scheduled visual mini-batches, not on every decision. The checksum is a
+diagnostic value for observing parameter changes; the resumable checkpoint is
+the source of truth.
+
+When
 `control_enabled` is false, the server sends `commands: []` and
 `cancel_pending_sequence: true`. A compliant state-mode client already releases
 all controls when applying that empty state and must still send its normal

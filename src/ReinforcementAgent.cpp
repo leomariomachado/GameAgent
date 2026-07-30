@@ -578,6 +578,8 @@ struct ReinforcementAgent::Implementation {
             RecurrentPolicyBackendConfig{
                 .service_script = config.recurrent_service_script,
                 .checkpoint_path = recurrent_checkpoint,
+                .resnet50_checkpoint_path =
+                    config.resnet50_checkpoint_path,
                 .action_sizes = std::move(action_sizes),
                 .visual_size = config.temporal_visual_size,
                 .projection_size = config.temporal_projection_size,
@@ -603,6 +605,8 @@ struct ReinforcementAgent::Implementation {
                 .initial_training_updates = training_updates,
                 .gamma = config.gamma,
                 .learning_rate = config.learning_rate,
+                .resnet_learning_rate =
+                    config.resnet_learning_rate,
                 .gradient_clip = config.gradient_clip,
                 .random_seed = config.random_seed,
                 .device_id = config.temporal_device_id,
@@ -610,6 +614,12 @@ struct ReinforcementAgent::Implementation {
                 .checkpoint_writes_enabled =
                     config.checkpoint_writes_enabled,
                 .resume = config.resume,
+                .trainable_resnet = config.trainable_resnet,
+                .resnet_batch_size = config.resnet_batch_size,
+                .resnet_update_interval =
+                    config.resnet_update_interval,
+                .resnet_replay_images =
+                    config.resnet_replay_images,
             }
         );
         const auto& recurrent_stats = recurrent_backend->stats();
@@ -663,6 +673,17 @@ struct ReinforcementAgent::Implementation {
             config.epsilon_decay_selections == 0 ||
             config.scripted_exploration_probability < 0.0f ||
             config.scripted_exploration_probability > 1.0f ||
+            (
+                config.trainable_resnet &&
+                (
+                    !config.trainable_lstm ||
+                    config.resnet50_checkpoint_path.empty() ||
+                    config.resnet_learning_rate <= 0.0f ||
+                    config.resnet_batch_size == 0 ||
+                    config.resnet_update_interval == 0 ||
+                    config.resnet_replay_images == 0
+                )
+            ) ||
             (
                 config.trainable_lstm &&
                 (
@@ -1495,8 +1516,15 @@ ReinforcementDecision ReinforcementAgent::step(
         !input.state.empty()
     ) {
         if (
-            input.temporal_visual_feature.size() !=
-                state.config.temporal_visual_size ||
+            (
+                !state.config.trainable_resnet &&
+                input.temporal_visual_feature.size() !=
+                    state.config.temporal_visual_size
+            ) ||
+            (
+                state.config.trainable_resnet &&
+                input.temporal_jpeg.empty()
+            ) ||
             input.temporal_controller_features.size() !=
                 state.config.temporal_controller_size
         ) {
@@ -1509,6 +1537,8 @@ ReinforcementDecision ReinforcementAgent::step(
             input.state.subspan(state.config.temporal_hidden_size);
         state.recurrent_backend->observe(
             input.temporal_visual_feature,
+            input.temporal_jpeg,
+            input.frame_id,
             input.temporal_controller_features,
             context,
             input.episode_started
@@ -1722,6 +1752,18 @@ ReinforcementAgentStats ReinforcementAgent::stats() const {
         .trainable_lstm = recurrent != nullptr,
         .recurrent_checkpoint_loaded =
             recurrent != nullptr && recurrent->checkpoint_loaded,
+        .trainable_resnet =
+            recurrent != nullptr && recurrent->trainable_resnet,
+        .resnet_checkpoint_loaded =
+            recurrent != nullptr && recurrent->resnet_checkpoint_loaded,
+        .resnet_training_updates =
+            recurrent != nullptr
+                ? recurrent->resnet_training_updates
+                : 0,
+        .resnet_parameter_checksum =
+            recurrent != nullptr
+                ? recurrent->resnet_parameter_checksum
+                : 0.0,
         .training_device =
             recurrent != nullptr ? recurrent->device : "cpu",
     };

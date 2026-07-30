@@ -119,7 +119,7 @@ std::array<std::uint8_t, 20> sha1(std::string_view input) {
     return digest;
 }
 
-std::string encode_base64(std::span<const std::uint8_t> bytes) {
+std::string encode_base64_impl(std::span<const std::uint8_t> bytes) {
     constexpr std::string_view alphabet =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string encoded;
@@ -140,6 +140,10 @@ std::string encode_base64(std::span<const std::uint8_t> bytes) {
 }
 
 }  // namespace
+
+std::string encode_base64(std::span<const std::uint8_t> bytes) {
+    return encode_base64_impl(bytes);
+}
 
 FrameEnvelope parse_binary_frame_envelope(std::span<const std::uint8_t> payload) {
     if (payload.size() < kFrameEnvelopeHeaderBytes) {

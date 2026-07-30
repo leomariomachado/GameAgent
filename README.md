@@ -17,7 +17,7 @@ Sub-Zero. All four profiles use the same architecture. Each character owns an
 independent epsilon schedule and action head, while all profiles train one
 shared strategy trunk, embedding tables, replay and latest checkpoint.
 
-## Frozen ResNet50 visual features
+## ResNet50 visual features
 
 `ResNet50FeatureExtractor` reconstructs the validated ImageNet-1000 ResNet50 in
 evaluation mode, loads all 320 model tensors from `resnet50_best.ckpt`, and
@@ -34,7 +34,7 @@ and before the ImageNet classifier:
 RGB frame
 → resize 224x224
 → ImageNet normalization
-→ frozen ResNet50 backbone
+→ ResNet50 backbone
 → global average pooling
 → 2048-dimensional FP16 device vector
 ```
@@ -71,15 +71,15 @@ image path, feature path, shape, inference time and numerical statistics.
 Records are ordered by the original client timestamp so later temporal windows
 can be formed without relying on lexicographic JPEG filenames.
 
-## Trainable temporal LSTM
+## Trainable ResNet50 and temporal LSTM
 
 The reinforcement path now trains the temporal model together with the
 Double-DQN on CUDA, without changing the WebSocket protocol:
 
 ```text
 new decoded frame
-→ frozen ResNet50 once
-→ cache FP16[2048] on the GPU
+→ ResNet50 once
+→ cache/project its 2048 visual values
 → fixed projection 2048 → 256
 → concatenate:
    - 10-value client-confirmed controller state
@@ -97,11 +97,19 @@ decision ring. The controller input comes from `action_ack`, so the temporal mod
 sees what the client actually applied rather than assuming every requested
 state succeeded.
 
-The ResNet50 and the dimensionality-reduction projection remain frozen.
+The character RL launcher also fine-tunes ResNet50 `layer4` by default. Earlier
+stages, every BatchNorm running statistic and the dimensionality-reduction
+projection stay frozen. One visual mini-batch is trained every 16 recurrent
+updates, using the compressed JPEG retained in the bounded in-memory replay.
+This prevents image persistence and repeated JPEG re-encoding from entering the
+decision path.
+
 Backpropagation through time updates the LSTM, shared strategy trunk,
 character/opponent embeddings and all four Q heads in GPU batches. The replay
 stores bounded sequences and never crosses an episode boundary. The older
 inference-only `.gat` path remains available when trainable RL is disabled.
+The generic server launcher keeps ResNet fine-tuning disabled unless
+`GAMEAGENT_RL_TRAINABLE_RESNET=1` is explicitly set.
 
 ## Uniform character curricula
 
@@ -122,11 +130,11 @@ different learning privileges.
 
 ## Online reinforcement learning
 
-Reinforcement mode uses the frozen ResNet50 and trainable temporal encoder
-as the state encoder for a shared recurrent semi-Markov Double DQN. It adds the
-controlled and opponent health fractions, health advantage, HUD confidence,
-the latest client-confirmed 10-button state and ACK-known flag to the 256-value
-LSTM hidden state.
+Reinforcement mode uses the optionally fine-tuned ResNet50 and trainable
+temporal encoder as the state encoder for a shared recurrent semi-Markov Double
+DQN. It adds the controlled and opponent health fractions, health advantage,
+HUD confidence, the latest client-confirmed 10-button state and ACK-known flag
+to the 256-value LSTM hidden state.
 
 The state is concatenated with learned 16-value embeddings for the controlled
 character and opponent. A shared hidden trunk learns spacing, defense, timing
@@ -181,9 +189,12 @@ once. `action_ack` remains the source of truth for commands actually applied.
 ### Checkpoints and resume
 
 The recurrent checkpoint stores online/target LSTM and Double-DQN parameters,
-AdamW state, update counters and a compact recent replay snapshot. A separate
-format-v4 metadata checkpoint preserves per-character epsilon/episode state.
-Both are written atomically at round end and connection shutdown:
+their AdamW state, the fine-tuned ResNet50 and its optimizer when enabled,
+update counters and a compact recent replay snapshot. Persisted replay omits
+JPEG bytes to keep checkpoints bounded; new frames refill visual replay after
+resume. A separate format-v4 metadata checkpoint preserves per-character
+epsilon/episode state. Both are written atomically at round end and connection
+shutdown:
 
 ```text
 /workspace/gameagent/rl_checkpoints/
@@ -297,6 +308,15 @@ It verifies the complete checkpoint, `512x448 → ResNet50 → LSTM`, use of the
    latest confirmed command, command sensitivity, an 8-decision circular
    sequence reusing one cached frame, checkpoint v1/v2 loading and deterministic
    reset.
+
+Validate the trainable visual path, exact BaseAI/PyTorch preprocessing parity
+and the production-shape GPU memory budget:
+
+```bash
+bash scripts/run_trainable_resnet_test.sh
+bash scripts/run_resnet_feature_parity_test.sh
+bash scripts/run_joint_training_memory_test.sh
+```
 
 ## Endpoints
 
@@ -572,14 +592,19 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_DEFAULT_FACING` | `right` | legacy/default Forward/Back mapping when the client omits `session_config` |
 | `GAMEAGENT_API_TOKEN` | unset | Bearer or X-API-Key credential |
 | `GAMEAGENT_RANDOM_SEED` | random | deterministic mock seed |
-| `GAMEAGENT_TEMPORAL_MODEL` | `0` | enable frozen ResNet50 plus GPU temporal feature path |
-| `GAMEAGENT_RESNET50_CHECKPOINT` | `/workspace/resnet50_best.ckpt` | frozen ImageNet ResNet50 checkpoint |
+| `GAMEAGENT_TEMPORAL_MODEL` | `0` | enable ResNet50 plus GPU temporal feature path |
+| `GAMEAGENT_RESNET50_CHECKPOINT` | `/workspace/resnet50_best.ckpt` | initial ImageNet ResNet50 checkpoint |
 | `GAMEAGENT_TEMPORAL_CHECKPOINT` | unset | trained `.gat` policy loaded in student-shadow mode |
 | `GAMEAGENT_DEVICE_ID` | `0` | CUDA device used by ResNet50 and LSTM |
 | `GAMEAGENT_LSTM_PROJECTION_SIZE` | `256` | ResNet50 feature projection width |
 | `GAMEAGENT_LSTM_HIDDEN_SIZE` | `256` | temporal hidden-state width |
 | `GAMEAGENT_REINFORCEMENT_LEARNING` | `0` | enable shared multi-character recurrent Double DQN |
 | `GAMEAGENT_RL_TRAINABLE_LSTM` | `1` | train the LSTM and Q network with BPTT on CUDA |
+| `GAMEAGENT_RL_TRAINABLE_RESNET` | `0` (`1` in character RL launcher) | fine-tune ResNet50 `layer4`; earlier stages and BatchNorm statistics stay frozen |
+| `GAMEAGENT_RL_RESNET_LEARNING_RATE` | `0.000001` | AdamW learning rate for ResNet50 `layer4` |
+| `GAMEAGENT_RL_RESNET_BATCH_SIZE` | `4` | JPEG observations in each visual update |
+| `GAMEAGENT_RL_RESNET_UPDATE_INTERVAL` | `16` | recurrent optimizer updates per visual update |
+| `GAMEAGENT_RL_RESNET_REPLAY_IMAGES` | `4096` | newest compressed JPEGs retained only in memory for visual training |
 | `GAMEAGENT_RL_RECURRENT_SERVICE` | `/tmp/GameAgent/scripts/recurrent_dqn_service.py` | persistent local PyTorch/CUDA recurrent backend |
 | `GAMEAGENT_RL_CHECKPOINT_DIR` | `/workspace/gameagent/rl_checkpoints` | shared latest policy/replay plus per-character best snapshots |
 | `GAMEAGENT_TRAINING_RESET_STATE` | `1` | request a client-side save-state load once after each `round_lost` |

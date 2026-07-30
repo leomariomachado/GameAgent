@@ -44,12 +44,18 @@ struct ReinforcementAgentConfig {
     // feed-forward DQN remains available for unit tests and checkpoint
     // migration, but production RL uses a trainable LSTM by default.
     bool trainable_lstm = false;
+    bool trainable_resnet = false;
     std::size_t temporal_visual_size = 2048;
     std::size_t temporal_projection_size = 256;
     std::size_t temporal_controller_size = 12;
     std::size_t temporal_hidden_size = 256;
     std::size_t temporal_sequence_capacity = 16;
     int temporal_device_id = 0;
+    std::filesystem::path resnet50_checkpoint_path;
+    float resnet_learning_rate = 1.0e-6f;
+    std::size_t resnet_batch_size = 4;
+    std::size_t resnet_update_interval = 16;
+    std::size_t resnet_replay_images = 4096;
     std::filesystem::path recurrent_service_script;
     std::filesystem::path recurrent_checkpoint_path;
     std::filesystem::path checkpoint_path;
@@ -59,6 +65,7 @@ struct ReinforcementAgentConfig {
 struct ReinforcementStepInput {
     std::span<const float> state;
     std::span<const float> temporal_visual_feature;
+    std::span<const std::uint8_t> temporal_jpeg;
     std::span<const float> temporal_controller_features;
     float reward = 0.0f;
     bool action_allowed = false;
@@ -102,6 +109,10 @@ struct ReinforcementAgentStats {
     bool checkpoint_loaded = false;
     bool trainable_lstm = false;
     bool recurrent_checkpoint_loaded = false;
+    bool trainable_resnet = false;
+    bool resnet_checkpoint_loaded = false;
+    std::uint64_t resnet_training_updates = 0;
+    double resnet_parameter_checksum = 0.0;
     std::string training_device = "cpu";
 };
 

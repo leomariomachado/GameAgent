@@ -57,6 +57,8 @@ std::vector<std::uint8_t> make_binary_frame_envelope(
     std::span<const std::uint8_t> jpeg
 );
 
+std::string encode_base64(std::span<const std::uint8_t> bytes);
+
 std::vector<std::uint8_t> decode_base64(std::string_view encoded);
 
 ClientTextMessage parse_client_text_message(std::string_view payload);
