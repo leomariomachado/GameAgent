@@ -30,6 +30,9 @@ struct ReinforcementAgentConfig {
     float epsilon_final = 0.05f;
     std::uint64_t epsilon_decay_selections = 100000;
     float scripted_exploration_probability = 0.50f;
+    // A deliberate no-op remains available for timing, but it has a small
+    // opportunity cost so the policy cannot prefer indefinite inactivity.
+    float neutral_option_penalty = 0.05f;
     std::uint32_t random_seed = 0x524c444eU;
     FighterCharacter character = FighterCharacter::subzero;
     OpponentCharacter opponent_character = OpponentCharacter::unknown;
@@ -91,6 +94,7 @@ struct ReinforcementDecision {
     float epsilon = 0.0f;
     float selected_q = 0.0f;
     float reward_consumed = 0.0f;
+    float neutral_penalty = 0.0f;
     float episode_return = 0.0f;
     float training_loss = 0.0f;
     std::size_t replay_size = 0;

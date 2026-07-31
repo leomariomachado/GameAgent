@@ -55,9 +55,13 @@ struct WebSocketServerOptions {
     std::size_t reinforcement_resnet_batch_size = 4;
     std::size_t reinforcement_resnet_update_interval = 16;
     std::size_t reinforcement_resnet_replay_images = 4096;
+    float reinforcement_damage_dealt_reward_scale = 15.0f;
+    float reinforcement_damage_taken_penalty_scale = 11.0f;
     float reinforcement_combo_reward_scale = 0.05f;
+    float reinforcement_defense_reward_per_second = 0.05f;
     float reinforcement_idle_penalty_per_second = 0.01f;
     float reinforcement_corner_penalty_per_second = 0.02f;
+    float reinforcement_neutral_option_penalty = 0.05f;
     float reinforcement_epsilon_start = 1.0f;
     float reinforcement_epsilon_final = 0.05f;
     float reinforcement_scripted_exploration_probability = 0.50f;

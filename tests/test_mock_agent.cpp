@@ -4,6 +4,7 @@
 #include <cmath>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -71,6 +72,10 @@ void require_mirrored_pair(
     );
 }
 
+bool is_disable_cloud(const std::string& name) {
+    return name.rfind("Nuvem de Desativação", 0) == 0;
+}
+
 }  // namespace
 
 int main() {
@@ -121,7 +126,7 @@ int main() {
         const auto right_facing = gameagent::make_sub_zero_mock_moves(
             gameagent::FighterFacing::right
         );
-        require(right_facing.size() == 6, "expected exactly six Sub-Zero moves");
+        require(right_facing.size() == 8, "expected eight Sub-Zero moves");
         require(
             find_move(right_facing, "Congelar").states ==
                 std::vector<std::vector<int>>{{7}, {9}, {2}, {}, {}},
@@ -156,6 +161,22 @@ int main() {
                 },
             "four-hit sequence is incorrect"
         );
+        require(
+            find_move(
+                right_facing,
+                "Salto para frente com chute alto"
+            ).states == std::vector<std::vector<int>>{
+                {6, 9}, {6, 9}, {9}, {9, 1}, {1}, {}, {}
+            },
+            "forward jump-kick sequence is incorrect"
+        );
+        require(
+            find_move(right_facing, "Uppercut agachado").states ==
+                std::vector<std::vector<int>>{
+                    {7}, {7}, {7, 0}, {7, 0}, {}, {}
+                },
+            "crouching uppercut sequence is incorrect"
+        );
 
         const auto left_facing = gameagent::make_sub_zero_mock_moves(
             gameagent::FighterFacing::left
@@ -172,13 +193,20 @@ int main() {
                     std::vector<int>{8, 3},
             "left-facing simultaneous directions were not mirrored"
         );
+        require(
+            find_move(
+                left_facing,
+                "Salto para frente com chute alto"
+            ).states.front() == std::vector<int>({6, 8}),
+            "left-facing jump-kick did not use Forward"
+        );
 
         const auto curriculum = gameagent::make_sub_zero_curriculum(
             gameagent::FighterFacing::right
         );
         require(
-            curriculum.size() == 9,
-            "Sub-Zero must use only its six base moves and three unique mirrors"
+            curriculum.size() == 12,
+            "Sub-Zero curriculum size is incorrect"
         );
         require(
             find_move(curriculum, "Congelar").states ==
@@ -191,6 +219,7 @@ int main() {
             "Chuva de Gelo (Frente)",
             "Chuva de Gelo (Perto)",
             "4 Golpes",
+            "Salto para frente com chute alto",
         };
         for (const auto& name : spatial_programs) {
             require_mirrored_pair(curriculum, name, 9, 8);
@@ -246,7 +275,7 @@ int main() {
             gameagent::FighterCharacter::noob_saibot,
             gameagent::FighterFacing::right
         );
-        require(noob.size() == 7, "Noob Saibot curriculum size is incorrect");
+        require(noob.size() == 10, "Noob Saibot curriculum size is incorrect");
         require(
             find_move(noob, "Arremesso de Sombra").states ==
                 std::vector<std::vector<int>>{
@@ -269,7 +298,7 @@ int main() {
             gameagent::FighterCharacter::scorpion,
             gameagent::FighterFacing::right
         );
-        require(scorpion.size() == 11, "Scorpion curriculum size is incorrect");
+        require(scorpion.size() == 14, "Scorpion curriculum size is incorrect");
         require(
             find_move(scorpion, "Arpão").states ==
                 std::vector<std::vector<int>>{
@@ -292,7 +321,7 @@ int main() {
             gameagent::FighterCharacter::sindel,
             gameagent::FighterFacing::right
         );
-        require(sindel.size() == 12, "Sindel curriculum size is incorrect");
+        require(sindel.size() == 15, "Sindel curriculum size is incorrect");
         require(
             find_move(sindel, "Bola de Fogo").states ==
                 std::vector<std::vector<int>>{
@@ -313,6 +342,19 @@ int main() {
 
         for (const auto* profile :
              {&curriculum, &noob, &scorpion, &sindel}) {
+            require(
+                find_move(*profile, "Uppercut agachado").states ==
+                    std::vector<std::vector<int>>{
+                        {7}, {7}, {7, 0}, {7, 0}, {}, {}
+                    },
+                "shared crouching uppercut is missing"
+            );
+            require_mirrored_pair(
+                *profile,
+                "Salto para frente com chute alto",
+                9,
+                8
+            );
             float weight = 0.0f;
             for (const auto& move : *profile) {
                 weight += move.curriculum_weight;
@@ -370,6 +412,39 @@ int main() {
         agent.reset_sequence();
         const auto reset = agent.infer(observation, history);
         require(reset.step_index == 1U, "connection reset did not restart the move");
+
+        gameagent::MockAgent noob_agent(
+            67890U,
+            gameagent::FighterFacing::right,
+            gameagent::FighterCharacter::noob_saibot
+        );
+        std::size_t selected_moves = 0;
+        std::size_t cloud_moves = 0;
+        std::optional<std::size_t> last_cloud_move;
+        for (std::size_t tick = 0;
+             tick < 10000 && selected_moves < 600;
+             ++tick) {
+            const auto cooldown_decision =
+                noob_agent.infer(observation, history);
+            if (cooldown_decision.step_index != 1U) {
+                continue;
+            }
+            if (is_disable_cloud(cooldown_decision.move_name)) {
+                if (last_cloud_move.has_value()) {
+                    require(
+                        selected_moves >= *last_cloud_move + 3U,
+                        "mock selected a disable cloud during cooldown"
+                    );
+                }
+                last_cloud_move = selected_moves;
+                ++cloud_moves;
+            }
+            ++selected_moves;
+        }
+        require(
+            selected_moves == 600 && cloud_moves > 10,
+            "mock cooldown test did not sample enough moves"
+        );
 
         std::cout
             << "[PASS] homogeneous multi-character mock curricula test passed\n";

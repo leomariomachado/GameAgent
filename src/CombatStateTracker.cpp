@@ -78,6 +78,7 @@ CombatStateTracker::CombatStateTracker(CombatStateConfig config)
         config_.maximum_reward_delta_ms <= 0 ||
         config_.time_feature_horizon_ms <= 0 ||
         config_.combo_reward_scale < 0.0f ||
+        config_.defense_reward_per_second < 0.0f ||
         config_.idle_penalty_per_second < 0.0f ||
         config_.corner_penalty_per_second < 0.0f
     ) {
@@ -482,12 +483,6 @@ CombatStateSnapshot CombatStateTracker::observe(
             config_.corner_penalty_per_second *
             static_cast<float>(delta_ms) / 1000.0f;
     }
-    pending_combo_reward_ += combo_reward;
-    pending_idle_penalty_ += idle_penalty;
-    pending_corner_penalty_ += corner_penalty;
-    pending_shaping_reward_ +=
-        combo_reward - idle_penalty - corner_penalty;
-
     const float spatial_confidence = 0.5f * (
         player_tracking_confidence_ +
         opponent_tracking_confidence_
@@ -525,6 +520,27 @@ CombatStateSnapshot CombatStateTracker::observe(
         opponent_defending ? clamp01(
             0.20f + opponent_track.confidence * 0.35f
         ) : 0.0f;
+    float defense_reward = 0.0f;
+    if (
+        fight.action_allowed &&
+        delta_ms > 0 &&
+        confirmed_block &&
+        opponent_attacking &&
+        opponent_action_confidence >= 0.50f &&
+        distance <= 0.42f &&
+        fight.damage_taken <= 0.0f
+    ) {
+        defense_reward =
+            config_.defense_reward_per_second *
+            static_cast<float>(delta_ms) / 1000.0f;
+    }
+    pending_combo_reward_ += combo_reward;
+    pending_defense_reward_ += defense_reward;
+    pending_idle_penalty_ += idle_penalty;
+    pending_corner_penalty_ += corner_penalty;
+    pending_shaping_reward_ +=
+        combo_reward + defense_reward -
+        idle_penalty - corner_penalty;
 
     latest_ = {
         .frame_id = frame.frame_id,
@@ -568,8 +584,10 @@ CombatStateSnapshot CombatStateTracker::observe(
             corner_ms, config_.time_feature_horizon_ms
         ),
         .shaping_reward =
-            combo_reward - idle_penalty - corner_penalty,
+            combo_reward + defense_reward -
+            idle_penalty - corner_penalty,
         .combo_reward = combo_reward,
+        .defense_reward = defense_reward,
         .idle_penalty = idle_penalty,
         .corner_penalty = corner_penalty,
     };
@@ -597,10 +615,12 @@ CombatStateSnapshot CombatStateTracker::consume(
     CombatStateSnapshot result = make_snapshot_locked(now_ms);
     result.shaping_reward = pending_shaping_reward_;
     result.combo_reward = pending_combo_reward_;
+    result.defense_reward = pending_defense_reward_;
     result.idle_penalty = pending_idle_penalty_;
     result.corner_penalty = pending_corner_penalty_;
     pending_shaping_reward_ = 0.0f;
     pending_combo_reward_ = 0.0f;
+    pending_defense_reward_ = 0.0f;
     pending_idle_penalty_ = 0.0f;
     pending_corner_penalty_ = 0.0f;
     return result;
@@ -613,6 +633,7 @@ CombatStateSnapshot CombatStateTracker::snapshot(
     CombatStateSnapshot result = make_snapshot_locked(now_ms);
     result.shaping_reward = 0.0f;
     result.combo_reward = 0.0f;
+    result.defense_reward = 0.0f;
     result.idle_penalty = 0.0f;
     result.corner_penalty = 0.0f;
     return result;
@@ -627,6 +648,7 @@ void CombatStateTracker::reset() {
     previous_timestamp_ms_ = 0;
     pending_shaping_reward_ = 0.0f;
     pending_combo_reward_ = 0.0f;
+    pending_defense_reward_ = 0.0f;
     pending_idle_penalty_ = 0.0f;
     pending_corner_penalty_ = 0.0f;
     reset_episode_locked(0);

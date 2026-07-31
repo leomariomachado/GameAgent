@@ -153,6 +153,12 @@ small action head so specials with different meanings never collide. The
 selected head chooses among high-level options:
 
 - bounded primitive holds such as move, block, jump, punch and kick;
+- a coordinated forward jump-kick (and its F/B mirror), shared by all
+  controlled characters;
+- a shared crouching uppercut that holds Down before pressing Down+Y;
+- a two-option cooldown after Noob Saibot's disable cloud; both F/B
+  variants are masked in mock exploration, DQN exploitation and Double-DQN
+  successor targets while the projectile can still turn against its owner;
 - that character's declared specials and combos;
 - the unique Forward/Back mirrors of those programs.
 
@@ -187,11 +193,14 @@ close the old episode and never count as healing reward.
 During active play:
 
 ```text
-health_reward = 12 * damage_dealt - 14 * damage_taken
+health_reward = 15 * damage_dealt - 11 * damage_taken
 combo_reward  = 0.05 * min(consecutive_hits - 1, 5)
+defense_reward = 0.05/second while a nearby attack is blocked without damage
 idle_penalty  = 0.01/second after 1.5 seconds without activity
 corner_penalty = 0.02/second after 1.0 second in a screen corner
-reward = health_reward + combo_reward - idle_penalty - corner_penalty
+neutral_option_penalty = 0.05 whenever the policy deliberately selects Neutro
+reward = health_reward + combo_reward + defense_reward
+         - idle_penalty - corner_penalty - neutral_option_penalty
 round win  = +5
 round loss = -5
 ```
@@ -199,8 +208,9 @@ round loss = -5
 Damage and episode flags accumulate until the RL decision loop consumes
 them, so one camera frame cannot be counted twice. Terminal bonuses are emitted
 once. Position, distance, grounded/attack/defense flags and timers are state
-features; they do not receive arbitrary direct rewards. `action_ack` remains
-the source of truth for commands actually applied.
+features. Only a contextually successful block receives direct defensive
+shaping; simply holding block is not rewarded. `action_ack` remains the source
+of truth for commands actually applied.
 
 ### Checkpoints and resume
 
@@ -632,7 +642,11 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_RL_RESNET_BATCH_SIZE` | `4` | JPEG observations in each visual update |
 | `GAMEAGENT_RL_RESNET_UPDATE_INTERVAL` | `16` | recurrent optimizer updates per visual update |
 | `GAMEAGENT_RL_RESNET_REPLAY_IMAGES` | `4096` | newest compressed JPEGs retained only in memory for visual training |
+| `GAMEAGENT_RL_DAMAGE_DEALT_REWARD_SCALE` | `15.0` | reward multiplier for normalized damage dealt |
+| `GAMEAGENT_RL_DAMAGE_TAKEN_PENALTY_SCALE` | `11.0` | penalty multiplier for normalized damage taken |
 | `GAMEAGENT_RL_COMBO_REWARD_SCALE` | `0.05` | incremental bonus for each consecutive hit after the first, capped at five extra hits |
+| `GAMEAGENT_RL_DEFENSE_REWARD_PER_SECOND` | `0.05` | reward rate for a confirmed nearby block that prevents damage |
+| `GAMEAGENT_RL_NEUTRAL_OPTION_PENALTY` | `0.05` | small opportunity cost applied when the policy deliberately selects `Neutro` |
 | `GAMEAGENT_RL_IDLE_PENALTY_PER_SECOND` | `0.01` | small penalty per second after 1.5 seconds without movement, commands or damage |
 | `GAMEAGENT_RL_CORNER_PENALTY_PER_SECOND` | `0.02` | small penalty per second after 1.0 second near a screen edge |
 | `GAMEAGENT_RL_RECURRENT_SERVICE` | `/tmp/GameAgent/scripts/recurrent_dqn_service.py` | persistent local PyTorch/CUDA recurrent backend |

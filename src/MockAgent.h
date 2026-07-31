@@ -129,6 +129,7 @@ private:
     std::vector<std::vector<int>> active_states_;
     std::vector<std::string> active_phases_;
     std::size_t active_step_ = 0;
+    std::size_t disable_cloud_cooldown_moves_remaining_ = 0;
 };
 
 }  // namespace gameagent

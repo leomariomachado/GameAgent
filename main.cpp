@@ -251,6 +251,27 @@ int main(int argc, char** argv) {
                 ),
                 "RL combo reward scale", 0.0f, 10.0f
             );
+        server_options.reinforcement_damage_dealt_reward_scale =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_DAMAGE_DEALT_REWARD_SCALE", "15.0"
+                ),
+                "RL damage dealt reward scale", 0.0f, 100.0f
+            );
+        server_options.reinforcement_damage_taken_penalty_scale =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_DAMAGE_TAKEN_PENALTY_SCALE", "11.0"
+                ),
+                "RL damage taken penalty scale", 0.0f, 100.0f
+            );
+        server_options.reinforcement_defense_reward_per_second =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_DEFENSE_REWARD_PER_SECOND", "0.05"
+                ),
+                "RL defense reward per second", 0.0f, 10.0f
+            );
         server_options.reinforcement_idle_penalty_per_second =
             parse_float_range(
                 environment_or(
@@ -264,6 +285,13 @@ int main(int argc, char** argv) {
                     "GAMEAGENT_RL_CORNER_PENALTY_PER_SECOND", "0.02"
                 ),
                 "RL corner penalty per second", 0.0f, 10.0f
+            );
+        server_options.reinforcement_neutral_option_penalty =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_NEUTRAL_OPTION_PENALTY", "0.05"
+                ),
+                "RL neutral option penalty", 0.0f, 10.0f
             );
         server_options.player_is_left = parse_player_is_left(
             environment_or("GAMEAGENT_PLAYER_SIDE", "left")

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <numeric>
 #include <random>
@@ -31,6 +32,7 @@ constexpr int kUp = 6;
 constexpr int kDown = 7;
 constexpr int kLeft = 8;
 constexpr int kRight = 9;
+constexpr std::size_t kDisableCloudCooldownOptions = 2;
 
 constexpr std::array<FighterCharacter, 4> kControlledCharacters{
     FighterCharacter::subzero,
@@ -69,13 +71,17 @@ struct OptionDefinition {
     bool scripted = false;
 };
 
+bool is_disable_cloud_option(const OptionDefinition& option) {
+    return option.name.rfind("Nuvem de Desativação", 0) == 0;
+}
+
 std::vector<OptionDefinition> make_options(FighterCharacter character) {
     // Checkpoint action programs are canonical. The complete program is
     // mirrored only when emitted by a left-facing session.
     constexpr int forward = kRight;
     constexpr int back = kLeft;
     std::vector<OptionDefinition> options{
-        {"Neutro", {{}, {}}, false},
+        {"Neutro", {{}}, false},
         {"Avançar", {{forward}, {forward}, {}}, false},
         {"Recuar", {{back}, {back}, {}}, false},
         {"Pular", {{kUp}, {kUp}, {}}, false},
@@ -674,6 +680,7 @@ struct ReinforcementAgent::Implementation {
             config.epsilon_decay_selections == 0 ||
             config.scripted_exploration_probability < 0.0f ||
             config.scripted_exploration_probability > 1.0f ||
+            config.neutral_option_penalty < 0.0f ||
             (
                 config.trainable_resnet &&
                 (
@@ -741,13 +748,30 @@ struct ReinforcementAgent::Implementation {
         std::uniform_real_distribution<float> probability(0.0f, 1.0f);
         std::size_t selected = 0;
         std::string source = "dqn_exploit";
+        const auto allowed = [&](std::size_t index) {
+            return disable_cloud_cooldown_options_remaining == 0 ||
+                !is_disable_cloud_option(options()[index]);
+        };
         if (probability(random_engine) < epsilon(config.character)) {
             const bool choose_scripted =
                 probability(random_engine) <
                     config.scripted_exploration_probability;
-            const auto& candidates = choose_scripted
+            const auto& unfiltered_candidates = choose_scripted
                 ? scripted_options
                 : primitive_options;
+            std::vector<std::size_t> candidates;
+            candidates.reserve(unfiltered_candidates.size());
+            std::copy_if(
+                unfiltered_candidates.begin(),
+                unfiltered_candidates.end(),
+                std::back_inserter(candidates),
+                allowed
+            );
+            if (candidates.empty()) {
+                throw std::runtime_error(
+                    "reinforcement action cooldown removed every candidate"
+                );
+            }
             std::uniform_int_distribution<std::size_t> distribution(
                 0, candidates.size() - 1U
             );
@@ -756,16 +780,49 @@ struct ReinforcementAgent::Implementation {
                 ? "epsilon_scripted"
                 : "epsilon_primitive";
         } else {
-            selected = static_cast<std::size_t>(std::distance(
-                values.begin(),
-                std::max_element(values.begin(), values.end())
-            ));
+            selected = options().size();
+            for (std::size_t index = 0; index < values.size(); ++index) {
+                if (
+                    allowed(index) &&
+                    (
+                        selected == options().size() ||
+                        values[index] > values[selected]
+                    )
+                ) {
+                    selected = index;
+                }
+            }
+            if (selected == options().size()) {
+                throw std::runtime_error(
+                    "reinforcement action cooldown removed every action"
+                );
+            }
         }
         selected_q = values[selected];
+        if (disable_cloud_cooldown_options_remaining > 0) {
+            --disable_cloud_cooldown_options_remaining;
+        }
+        if (is_disable_cloud_option(options()[selected])) {
+            disable_cloud_cooldown_options_remaining =
+                kDisableCloudCooldownOptions;
+        }
         ++character_action_selections[
             character_index(config.character)
         ];
         return {selected, std::move(source)};
+    }
+
+    std::vector<std::uint8_t> current_action_mask() const {
+        std::vector<std::uint8_t> mask(options().size(), 1U);
+        if (disable_cloud_cooldown_options_remaining == 0) {
+            return mask;
+        }
+        for (std::size_t index = 0; index < options().size(); ++index) {
+            if (is_disable_cloud_option(options()[index])) {
+                mask[index] = 0U;
+            }
+        }
+        return mask;
     }
 
     void append_replay(ReplayTransition transition) {
@@ -1112,11 +1169,14 @@ struct ReinforcementAgent::Implementation {
         }
         bool trained = false;
         if (recurrent_backend != nullptr) {
+            const std::vector<std::uint8_t> next_action_mask =
+                current_action_mask();
             const RecurrentPolicyCloseResult result =
                 recurrent_backend->close_transition(
                     std::max<std::size_t>(1U, option_elapsed_steps),
                     option_reward,
-                    terminal
+                    terminal,
+                    next_action_mask
                 );
             trained = result.training_performed;
             training_updates = result.stats.training_updates;
@@ -1461,6 +1521,7 @@ struct ReinforcementAgent::Implementation {
     float option_reward = 0.0f;
     float option_reward_discount = 1.0f;
     std::size_t option_elapsed_steps = 0;
+    std::size_t disable_cloud_cooldown_options_remaining = 0;
     std::string active_selection_source;
     float active_selected_q = 0.0f;
     std::array<
@@ -1557,6 +1618,7 @@ ReinforcementDecision ReinforcementAgent::step(
     ) {
         state.current_episode_id = input.episode_id;
         state.current_episode_return = 0.0f;
+        state.disable_cloud_cooldown_options_remaining = 0;
     }
     state.current_episode_return += input.reward;
     if (state.active_option.has_value()) {
@@ -1578,6 +1640,7 @@ ReinforcementDecision ReinforcementAgent::step(
     }
 
     if (input.episode_ended) {
+        state.disable_cloud_cooldown_options_remaining = 0;
         const std::size_t player =
             character_index(state.config.character);
         ++state.character_episodes_completed[player];
@@ -1637,6 +1700,19 @@ ReinforcementDecision ReinforcementAgent::step(
             state.option_elapsed_steps = 0;
             state.active_selection_source = std::move(source);
             state.active_selected_q = q;
+            if (
+                selected == 0U &&
+                state.config.neutral_option_penalty > 0.0f
+            ) {
+                state.option_reward -=
+                    state.config.neutral_option_penalty;
+                state.current_episode_return -=
+                    state.config.neutral_option_penalty;
+                decision.reward_consumed -=
+                    state.config.neutral_option_penalty;
+                decision.neutral_penalty =
+                    state.config.neutral_option_penalty;
+            }
             if (state.recurrent_backend != nullptr) {
                 state.recurrent_backend->begin_transition(
                     selected,
@@ -1692,6 +1768,7 @@ void ReinforcementAgent::reset_episode(bool save_checkpoint) {
     state.option_reward = 0.0f;
     state.option_reward_discount = 1.0f;
     state.option_elapsed_steps = 0;
+    state.disable_cloud_cooldown_options_remaining = 0;
     state.current_episode_return = 0.0f;
     state.current_episode_id = 0;
     if (state.recurrent_backend != nullptr) {

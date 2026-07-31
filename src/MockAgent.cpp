@@ -18,6 +18,11 @@ constexpr int kUp = 6;
 constexpr int kDown = 7;
 constexpr int kLeft = 8;
 constexpr int kRight = 9;
+constexpr std::size_t kDisableCloudCooldownMoves = 2;
+
+bool is_disable_cloud_move(std::string_view name) {
+    return name.rfind("Nuvem de Desativação", 0) == 0;
+}
 
 struct OpponentCharacterRecord {
     OpponentCharacter character;
@@ -170,6 +175,40 @@ MockMoveDefinition make_move(
         .states = std::move(states),
         .phases = std::move(phases),
     };
+}
+
+std::vector<MockMoveDefinition> with_shared_combat_moves(
+    std::vector<MockMoveDefinition> moves,
+    FighterFacing facing
+) {
+    const int forward =
+        facing == FighterFacing::right ? kRight : kLeft;
+    moves.push_back(make_move(
+        "Uppercut agachado",
+        {
+            {kDown},
+            {kDown},
+            {kDown, kYHighPunch},
+            {kDown, kYHighPunch},
+            {},
+            {},
+        },
+        "uppercut"
+    ));
+    moves.push_back(make_move(
+        "Salto para frente com chute alto",
+        {
+            {kUp, forward},
+            {kUp, forward},
+            {forward},
+            {forward, kXHighKick},
+            {kXHighKick},
+            {},
+            {},
+        },
+        "air_attack"
+    ));
+    return moves;
 }
 
 std::string normalized_character_slug(std::string_view value) {
@@ -442,7 +481,7 @@ std::vector<MockMoveDefinition> make_sub_zero_mock_moves(FighterFacing facing) {
     const int forward = facing == FighterFacing::right ? kRight : kLeft;
     const int back = facing == FighterFacing::right ? kLeft : kRight;
 
-    return {
+    return with_shared_combat_moves({
         {
             .name = "Congelar",
             .states = {{kDown}, {forward}, {kBLowPunch}, {}, {}},
@@ -505,7 +544,7 @@ std::vector<MockMoveDefinition> make_sub_zero_mock_moves(FighterFacing facing) {
                 "release", "combo", "release", "observe"
             },
         },
-    };
+    }, facing);
 }
 
 std::vector<MockMoveDefinition> make_character_mock_moves(
@@ -516,11 +555,17 @@ std::vector<MockMoveDefinition> make_character_mock_moves(
         case FighterCharacter::subzero:
             return make_sub_zero_mock_moves(facing);
         case FighterCharacter::scorpion:
-            return make_scorpion_moves(facing);
+            return with_shared_combat_moves(
+                make_scorpion_moves(facing), facing
+            );
         case FighterCharacter::noob_saibot:
-            return make_noob_saibot_moves(facing);
+            return with_shared_combat_moves(
+                make_noob_saibot_moves(facing), facing
+            );
         case FighterCharacter::sindel:
-            return make_sindel_moves(facing);
+            return with_shared_combat_moves(
+                make_sindel_moves(facing), facing
+            );
     }
     throw std::invalid_argument("unsupported fighter character");
 }
@@ -568,13 +613,25 @@ void MockAgent::select_next_move() {
     std::vector<double> weights;
     weights.reserve(moves_.size());
     for (const auto& move : moves_) {
-        weights.push_back(std::max(0.0f, move.curriculum_weight));
+        weights.push_back(
+            disable_cloud_cooldown_moves_remaining_ > 0 &&
+                    is_disable_cloud_move(move.name)
+                ? 0.0
+                : std::max(0.0f, move.curriculum_weight)
+        );
     }
     std::discrete_distribution<std::size_t> move_distribution(
         weights.begin(), weights.end()
     );
     active_move_ = move_distribution(random_engine_);
     const auto& move = moves_[*active_move_];
+    if (disable_cloud_cooldown_moves_remaining_ > 0) {
+        --disable_cloud_cooldown_moves_remaining_;
+    }
+    if (is_disable_cloud_move(move.name)) {
+        disable_cloud_cooldown_moves_remaining_ =
+            kDisableCloudCooldownMoves;
+    }
     active_states_ = move.states;
     active_phases_ = move.phases;
     active_step_ = 0;
@@ -623,6 +680,7 @@ void MockAgent::reset_sequence() {
     active_states_.clear();
     active_phases_.clear();
     active_step_ = 0;
+    disable_cloud_cooldown_moves_remaining_ = 0;
 }
 
 }  // namespace gameagent

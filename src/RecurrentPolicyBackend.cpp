@@ -457,7 +457,8 @@ void RecurrentPolicyBackend::begin_transition(
 RecurrentPolicyCloseResult RecurrentPolicyBackend::close_transition(
     std::size_t duration,
     float reward,
-    bool terminal
+    bool terminal,
+    std::span<const std::uint8_t> next_action_mask
 ) {
     auto& state = *implementation_;
     const nlohmann::json response = state.transact({
@@ -465,6 +466,9 @@ RecurrentPolicyCloseResult RecurrentPolicyBackend::close_transition(
         {"duration", duration},
         {"reward", reward},
         {"terminal", terminal},
+        {"next_action_mask", std::vector<std::uint8_t>(
+             next_action_mask.begin(), next_action_mask.end()
+         )},
     });
     return {
         .stats = state.stats,

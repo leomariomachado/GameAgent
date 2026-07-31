@@ -68,8 +68,8 @@ struct FightStateConfig {
     float health_increase_tolerance = 0.015f;
     float damage_noise_tolerance = 0.0075f;
     float terminal_health_threshold = 0.010f;
-    float damage_dealt_reward_scale = 12.0f;
-    float damage_taken_penalty_scale = 14.0f;
+    float damage_dealt_reward_scale = 15.0f;
+    float damage_taken_penalty_scale = 11.0f;
     float round_win_bonus = 5.0f;
     float round_loss_penalty = 5.0f;
 };

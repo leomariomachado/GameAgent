@@ -72,6 +72,10 @@ class Transition:
     # Compressed source frame for truncated end-to-end visual credit. Older
     # replay entries remain valid for LSTM/DQN learning when this is absent.
     state_jpeg: bytes | None = None
+    # Valid actions at the successor state. This lets deterministic gameplay
+    # cooldowns participate in the Double-DQN target without changing the
+    # neural-network architecture. Older replay entries allow every action.
+    next_action_mask: tuple[bool, ...] | None = None
 
 
 def read_baseai_resnet_tensors(path: Path) -> dict[str, np.ndarray]:
@@ -923,6 +927,30 @@ class Service:
             online_next = self.online.padded_q(
                 online_next_latent, next_characters
             )
+            next_allowed = torch.zeros_like(
+                online_next, dtype=torch.bool
+            )
+            for row, value in enumerate(transitions):
+                action_count = self.config.action_sizes[value.character]
+                stored_mask = getattr(value, "next_action_mask", None)
+                if stored_mask is None:
+                    next_allowed[row, :action_count] = True
+                else:
+                    if (
+                        len(stored_mask) != action_count
+                        or not any(stored_mask)
+                    ):
+                        raise ValueError(
+                            "invalid replay next-action mask"
+                        )
+                    next_allowed[row, :action_count] = torch.tensor(
+                        stored_mask,
+                        dtype=torch.bool,
+                        device=self.device,
+                    )
+            online_next = online_next.masked_fill(
+                ~next_allowed, -torch.inf
+            )
             best_actions = online_next.argmax(dim=1)
             target_next_latent, target_characters = self.latent_for(
                 self.target, transitions, True
@@ -1048,6 +1076,20 @@ class Service:
             reward = float(request["reward"])
             if not math.isfinite(reward):
                 raise ValueError("non-finite recurrent reward")
+            raw_next_action_mask = request.get("next_action_mask")
+            action_count = self.config.action_sizes[
+                self.active["character"]
+            ]
+            if (
+                not isinstance(raw_next_action_mask, list)
+                or len(raw_next_action_mask) != action_count
+            ):
+                raise ValueError("invalid next-action mask")
+            next_action_mask = tuple(
+                bool(value) for value in raw_next_action_mask
+            )
+            if not any(next_action_mask):
+                raise ValueError("next-action mask blocks every action")
             transition = Transition(
                 state_sequence=self.active["sequence"],
                 state_context=self.active["context"],
@@ -1060,6 +1102,7 @@ class Service:
                 character=self.active["character"],
                 opponent=self.active["opponent"],
                 state_jpeg=self.active.get("state_jpeg"),
+                next_action_mask=next_action_mask,
             )
             self.append_replay(transition)
             for _ in range(self.arguments.updates_per_transition):
@@ -1172,6 +1215,8 @@ class Service:
         for transition in checkpoint.get("replay", []):
             if not hasattr(transition, "state_jpeg"):
                 transition.state_jpeg = None
+            if not hasattr(transition, "next_action_mask"):
+                transition.next_action_mask = None
             self.append_replay(transition)
         self.checkpoint_loaded = True
         self.online.eval()

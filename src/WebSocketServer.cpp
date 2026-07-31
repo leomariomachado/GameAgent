@@ -943,6 +943,8 @@ void handle_websocket_connection(
                         .scripted_exploration_probability =
                             options
                                 .reinforcement_scripted_exploration_probability,
+                        .neutral_option_penalty =
+                            options.reinforcement_neutral_option_penalty,
                         .random_seed =
                             options.random_seed.value_or(0x524c444eU),
                         .character = player_character,
@@ -1098,10 +1100,25 @@ void handle_websocket_connection(
                  reinforcement_agent != nullptr
                      ? kReinforcementContextFeatureCount
                      : 0U},
+                {"damage_dealt_reward_scale",
+                 reinforcement_agent != nullptr
+                     ? options
+                           .reinforcement_damage_dealt_reward_scale
+                     : 0.0f},
+                {"damage_taken_penalty_scale",
+                 reinforcement_agent != nullptr
+                     ? options
+                           .reinforcement_damage_taken_penalty_scale
+                     : 0.0f},
                 {"combo_reward_scale",
                  reinforcement_agent != nullptr
                      ? options
                            .reinforcement_combo_reward_scale
+                     : 0.0f},
+                {"defense_reward_per_second",
+                 reinforcement_agent != nullptr
+                     ? options
+                           .reinforcement_defense_reward_per_second
                      : 0.0f},
                 {"idle_penalty_per_second",
                  reinforcement_agent != nullptr
@@ -1112,6 +1129,11 @@ void handle_websocket_connection(
                  reinforcement_agent != nullptr
                      ? options
                            .reinforcement_corner_penalty_per_second
+                     : 0.0f},
+                {"neutral_option_penalty",
+                 reinforcement_agent != nullptr
+                     ? options
+                           .reinforcement_neutral_option_penalty
                      : 0.0f},
                 {"rl_training_device",
                  reinforcement_agent != nullptr
@@ -1151,6 +1173,20 @@ void handle_websocket_connection(
              !options.reinforcement_training_enabled},
         {"rl_checkpoint_interval_episodes",
          options.reinforcement_checkpoint_interval_episodes},
+        {"damage_dealt_reward_scale",
+         options.reinforcement_damage_dealt_reward_scale},
+        {"damage_taken_penalty_scale",
+         options.reinforcement_damage_taken_penalty_scale},
+        {"combo_reward_scale",
+         options.reinforcement_combo_reward_scale},
+        {"defense_reward_per_second",
+         options.reinforcement_defense_reward_per_second},
+        {"idle_penalty_per_second",
+         options.reinforcement_idle_penalty_per_second},
+        {"corner_penalty_per_second",
+         options.reinforcement_corner_penalty_per_second},
+        {"neutral_option_penalty",
+         options.reinforcement_neutral_option_penalty},
         {"trainable_lstm",
          reinforcement_agent != nullptr &&
              reinforcement_agent->stats().trainable_lstm},
@@ -1218,6 +1254,10 @@ void handle_websocket_connection(
                     250,
                     options.decision_interval.count() * 3
                 ),
+            .damage_dealt_reward_scale =
+                options.reinforcement_damage_dealt_reward_scale,
+            .damage_taken_penalty_scale =
+                options.reinforcement_damage_taken_penalty_scale,
         });
         combat_tracker = std::make_unique<CombatStateTracker>(
             CombatStateConfig{
@@ -1226,6 +1266,9 @@ void handle_websocket_connection(
                     : PlayerSide::right,
                 .combo_reward_scale =
                     options.reinforcement_combo_reward_scale,
+                .defense_reward_per_second =
+                    options
+                        .reinforcement_defense_reward_per_second,
                 .idle_penalty_per_second =
                     options
                         .reinforcement_idle_penalty_per_second,
@@ -1407,8 +1450,10 @@ void handle_websocket_connection(
         float damage_taken_log_accumulator = 0.0f;
         float shaping_reward_log_accumulator = 0.0f;
         float combo_reward_log_accumulator = 0.0f;
+        float defense_reward_log_accumulator = 0.0f;
         float idle_penalty_log_accumulator = 0.0f;
         float corner_penalty_log_accumulator = 0.0f;
+        float neutral_penalty_log_accumulator = 0.0f;
         std::uint64_t reward_log_decisions = 0;
         std::uint64_t reward_log_active_decisions = 0;
         while (!thread_stop.stop_requested() && connected.load() && !stop_requested.load()) {
@@ -1531,8 +1576,9 @@ void handle_websocket_connection(
                     commands = mock_decision.commands;
                 }
                 if (reinforcement_agent != nullptr) {
-                    reward_log_accumulator +=
-                        fight.reward + combat.shaping_reward;
+                    reward_log_accumulator += reinforcement_step_ok
+                        ? reinforcement_decision.reward_consumed
+                        : fight.reward + combat.shaping_reward;
                     terminal_reward_log_accumulator +=
                         fight.terminal_reward;
                     damage_dealt_log_accumulator += fight.damage_dealt;
@@ -1541,10 +1587,14 @@ void handle_websocket_connection(
                         combat.shaping_reward;
                     combo_reward_log_accumulator +=
                         combat.combo_reward;
+                    defense_reward_log_accumulator +=
+                        combat.defense_reward;
                     idle_penalty_log_accumulator +=
                         combat.idle_penalty;
                     corner_penalty_log_accumulator +=
                         combat.corner_penalty;
+                    neutral_penalty_log_accumulator +=
+                        reinforcement_decision.neutral_penalty;
                     ++reward_log_decisions;
                     reward_log_active_decisions +=
                         fight.action_allowed ? 1U : 0U;
@@ -1583,10 +1633,14 @@ void handle_websocket_connection(
                             << shaping_reward_log_accumulator
                             << " combo_reward="
                             << combo_reward_log_accumulator
+                            << " defense_reward="
+                            << defense_reward_log_accumulator
                             << " idle_penalty="
                             << idle_penalty_log_accumulator
                             << " corner_penalty="
                             << corner_penalty_log_accumulator
+                            << " neutral_penalty="
+                            << neutral_penalty_log_accumulator
                             << " hp=" << fight.player_health << '/'
                             << fight.opponent_health
                             << " x=" << combat.player_x << '/'
@@ -1614,8 +1668,10 @@ void handle_websocket_connection(
                         damage_taken_log_accumulator = 0.0f;
                         shaping_reward_log_accumulator = 0.0f;
                         combo_reward_log_accumulator = 0.0f;
+                        defense_reward_log_accumulator = 0.0f;
                         idle_penalty_log_accumulator = 0.0f;
                         corner_penalty_log_accumulator = 0.0f;
+                        neutral_penalty_log_accumulator = 0.0f;
                         reward_log_decisions = 0;
                         reward_log_active_decisions = 0;
                         next_reward_log = reward_log_now +
@@ -1706,8 +1762,9 @@ void handle_websocket_connection(
                     response["terminal"] = fight.terminal;
                     response["player_health"] = fight.player_health;
                     response["opponent_health"] = fight.opponent_health;
-                    response["reward"] =
-                        fight.reward + combat.shaping_reward;
+                    response["reward"] = reinforcement_step_ok
+                        ? reinforcement_decision.reward_consumed
+                        : fight.reward + combat.shaping_reward;
                     response["terminal_reward"] =
                         fight.terminal_reward;
                     response["rl_option"] =
@@ -1734,10 +1791,14 @@ void handle_websocket_connection(
                         combat.shaping_reward;
                     response_metrics["combo_reward"] =
                         combat.combo_reward;
+                    response_metrics["defense_reward"] =
+                        combat.defense_reward;
                     response_metrics["idle_penalty"] =
                         combat.idle_penalty;
                     response_metrics["corner_penalty"] =
                         combat.corner_penalty;
+                    response_metrics["neutral_penalty"] =
+                        reinforcement_decision.neutral_penalty;
                     response_metrics["combat_state_version"] = 2U;
                     response_metrics["combat_spatial_valid"] =
                         combat.spatial_valid;
@@ -1961,7 +2022,13 @@ void handle_websocket_connection(
                             << " hp=" << fight.player_health << '/'
                             << fight.opponent_health
                             << " reward="
-                            << fight.reward + combat.shaping_reward
+                            << (
+                                reinforcement_step_ok
+                                    ? reinforcement_decision
+                                          .reward_consumed
+                                    : fight.reward +
+                                          combat.shaping_reward
+                            )
                             << " x=" << combat.player_x << '/'
                             << combat.opponent_x
                             << " distance=" << combat.distance
@@ -2088,6 +2155,7 @@ void handle_websocket_connection(
                         {"combat_shaping_reward",
                          combat.shaping_reward},
                         {"combo_reward", combat.combo_reward},
+                        {"defense_reward", combat.defense_reward},
                         {"idle_penalty", combat.idle_penalty},
                         {"corner_penalty", combat.corner_penalty},
                     });
@@ -2672,14 +2740,26 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                     {"combat_state_version", 2},
                     {"combat_context_features",
                      kReinforcementContextFeatureCount},
+                    {"damage_dealt_reward_scale",
+                     options_
+                         .reinforcement_damage_dealt_reward_scale},
+                    {"damage_taken_penalty_scale",
+                     options_
+                         .reinforcement_damage_taken_penalty_scale},
                     {"combo_reward_scale",
                      options_.reinforcement_combo_reward_scale},
+                    {"defense_reward_per_second",
+                     options_
+                         .reinforcement_defense_reward_per_second},
                     {"idle_penalty_per_second",
                      options_
                          .reinforcement_idle_penalty_per_second},
                     {"corner_penalty_per_second",
                      options_
                          .reinforcement_corner_penalty_per_second},
+                    {"neutral_option_penalty",
+                     options_
+                         .reinforcement_neutral_option_penalty},
                     {"training_reset_state_enabled",
                      options_.reinforcement_learning_enabled &&
                          options_.training_reset_state_enabled},

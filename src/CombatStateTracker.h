@@ -34,6 +34,7 @@ struct CombatStateConfig {
     std::int64_t maximum_reward_delta_ms = 250;
     std::int64_t time_feature_horizon_ms = 5000;
     float combo_reward_scale = 0.05f;
+    float defense_reward_per_second = 0.05f;
     float idle_penalty_per_second = 0.01f;
     float corner_penalty_per_second = 0.02f;
 };
@@ -59,6 +60,7 @@ struct CombatStateSnapshot {
     std::int64_t corner_time_ms = 0;
     float shaping_reward = 0.0f;
     float combo_reward = 0.0f;
+    float defense_reward = 0.0f;
     float idle_penalty = 0.0f;
     float corner_penalty = 0.0f;
 };
@@ -125,6 +127,7 @@ private:
     std::size_t consecutive_hits_ = 0;
     float pending_shaping_reward_ = 0.0f;
     float pending_combo_reward_ = 0.0f;
+    float pending_defense_reward_ = 0.0f;
     float pending_idle_penalty_ = 0.0f;
     float pending_corner_penalty_ = 0.0f;
 };

@@ -93,6 +93,7 @@ int main() {
             .idle_grace_ms = 100,
             .corner_grace_ms = 100,
             .combo_reward_scale = 0.05f,
+            .defense_reward_per_second = 1.0f,
             .idle_penalty_per_second = 1.0f,
             .corner_penalty_per_second = 1.0f,
         });
@@ -170,6 +171,19 @@ int main() {
             std::abs(tracker.consume(1420).shaping_reward) <
                 1.0e-6f,
             "combat shaping was consumed more than once"
+        );
+
+        state = tracker.observe(
+            make_frame(6, 1500, 160, 300, 320, 300),
+            fight(),
+            action({4})
+        );
+        const auto defended = tracker.consume(1510);
+        require(
+            state.player_defending && state.opponent_attacking &&
+                defended.defense_reward > 0.0f &&
+                defended.shaping_reward >= defended.defense_reward,
+            "successful contextual defense was not rewarded"
         );
 
         gameagent::CombatStateTracker penalties({

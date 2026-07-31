@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -100,6 +101,7 @@ int main() {
             .epsilon_final = 0.0f,
             .epsilon_decay_selections = 1,
             .scripted_exploration_probability = 0.5f,
+            .neutral_option_penalty = 0.0f,
             .random_seed = 12345,
             .character = gameagent::FighterCharacter::subzero,
             .opponent_character =
@@ -123,7 +125,7 @@ int main() {
 
         gameagent::ReinforcementAgent subzero(config);
         require(
-            subzero.option_names().size() == 20,
+            subzero.option_names().size() == 23,
             "Sub-Zero did not receive its action head"
         );
         const double initial_shared_checksum =
@@ -186,7 +188,7 @@ int main() {
         );
         require(
             inherited.action_selections == 0 &&
-                scorpion.option_names().size() == 22,
+                scorpion.option_names().size() == 25,
             "Scorpion exploration/head was not kept character-specific"
         );
 
@@ -238,10 +240,10 @@ int main() {
         const std::vector<
             std::pair<gameagent::FighterCharacter, std::size_t>
         > heads{
-            {gameagent::FighterCharacter::subzero, 20U},
-            {gameagent::FighterCharacter::noob_saibot, 18U},
-            {gameagent::FighterCharacter::scorpion, 22U},
-            {gameagent::FighterCharacter::sindel, 23U},
+            {gameagent::FighterCharacter::subzero, 23U},
+            {gameagent::FighterCharacter::noob_saibot, 21U},
+            {gameagent::FighterCharacter::scorpion, 25U},
+            {gameagent::FighterCharacter::sindel, 26U},
         };
         for (const auto& [character, expected_options] : heads) {
             auto head_config = config;
@@ -355,6 +357,97 @@ int main() {
             interval_decision.checkpoint_saved &&
                 std::filesystem::is_regular_file(interval_latest),
             "periodic checkpoint was not written at its interval"
+        );
+
+        auto neutral_config = config;
+        neutral_config.resume = false;
+        neutral_config.training_enabled = false;
+        neutral_config.checkpoint_writes_enabled = false;
+        neutral_config.epsilon_start = 1.0f;
+        neutral_config.epsilon_final = 1.0f;
+        neutral_config.scripted_exploration_probability = 0.0f;
+        neutral_config.neutral_option_penalty = 0.25f;
+        neutral_config.random_seed = 9917;
+        gameagent::ReinforcementAgent neutral_agent(neutral_config);
+        neutral_agent.reset_episode(false);
+        bool observed_neutral = false;
+        decision_id = 1000;
+        for (std::size_t attempt = 0;
+             attempt < 256 && !observed_neutral;
+             ++attempt) {
+            const auto neutral_decision = neutral_agent.step({
+                .state = state_a,
+                .action_allowed = true,
+                .episode_started = attempt == 0,
+                .episode_id = 40,
+                .frame_id = decision_id,
+                .decision_id = decision_id,
+            });
+            ++decision_id;
+            if (neutral_decision.option_name == "Neutro") {
+                observed_neutral = true;
+                require(
+                    std::abs(neutral_decision.neutral_penalty - 0.25f) <
+                            1.0e-6f &&
+                        std::abs(neutral_decision.reward_consumed + 0.25f) <
+                            1.0e-6f &&
+                        std::abs(neutral_decision.episode_return + 0.25f) <
+                            1.0e-6f,
+                    "neutral option did not receive its configured cost"
+                );
+            }
+        }
+        require(
+            observed_neutral,
+            "random exploration never selected the neutral option"
+        );
+
+        auto cooldown_config = neutral_config;
+        cooldown_config.character =
+            gameagent::FighterCharacter::noob_saibot;
+        cooldown_config.scripted_exploration_probability = 1.0f;
+        cooldown_config.neutral_option_penalty = 0.0f;
+        cooldown_config.random_seed = 88117;
+        gameagent::ReinforcementAgent cooldown_agent(cooldown_config);
+        std::size_t selected_options = 0;
+        std::size_t cloud_options = 0;
+        std::optional<std::size_t> last_cloud_option;
+        decision_id = 2000;
+        for (std::size_t tick = 0;
+             tick < 10000 && selected_options < 600;
+             ++tick) {
+            const auto cooldown_decision = cooldown_agent.step({
+                .state = state_a,
+                .action_allowed = true,
+                .episode_started = tick == 0,
+                .episode_id = 50,
+                .frame_id = decision_id,
+                .decision_id = decision_id,
+            });
+            ++decision_id;
+            if (cooldown_decision.option_step != 1U) {
+                continue;
+            }
+            const bool is_cloud =
+                cooldown_decision.option_name.rfind(
+                    "Nuvem de Desativação", 0
+                ) == 0;
+            if (is_cloud) {
+                if (last_cloud_option.has_value()) {
+                    require(
+                        selected_options >=
+                            *last_cloud_option + 3U,
+                        "DQN policy selected a disable cloud during cooldown"
+                    );
+                }
+                last_cloud_option = selected_options;
+                ++cloud_options;
+            }
+            ++selected_options;
+        }
+        require(
+            selected_options == 600 && cloud_options > 10,
+            "DQN cooldown test did not sample enough scripted options"
         );
 
         std::cout

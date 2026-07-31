@@ -100,7 +100,8 @@ public:
     RecurrentPolicyCloseResult close_transition(
         std::size_t duration,
         float reward,
-        bool terminal
+        bool terminal,
+        std::span<const std::uint8_t> next_action_mask
     );
     void reset();
     void save(
