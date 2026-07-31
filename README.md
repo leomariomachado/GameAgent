@@ -133,8 +133,18 @@ different learning privileges.
 Reinforcement mode uses the optionally fine-tuned ResNet50 and trainable
 temporal encoder as the state encoder for a shared recurrent semi-Markov Double
 DQN. It adds the controlled and opponent health fractions, health advantage,
-HUD confidence, the latest client-confirmed 10-button state and ACK-known flag
-to the 256-value LSTM hidden state.
+HUD confidence, the latest client-confirmed 10-button state, ACK-known flag and
+15 explicit combat-state values to the 256-value LSTM hidden state. The added
+values are player/opponent X, distance, grounded/defending/attacking flags,
+time since damage, consecutive hits, stationary/corner duration and confidence
+for the visual/action estimates.
+
+Player attack and defense come from `action_ack`, so they represent controls
+the client actually applied. Health and damage remain deterministic HUD
+measurements. Screen position and grounded state come from a bounded temporal
+motion tracker below the HUD. Opponent attack/defense are explicitly
+confidence-weighted estimates; uncertain estimates are not treated as hard
+ground truth.
 
 The state is concatenated with learned 16-value embeddings for the controlled
 character and opponent. A shared hidden trunk learns spacing, defense, timing
@@ -177,14 +187,20 @@ close the old episode and never count as healing reward.
 During active play:
 
 ```text
-reward = 15 * damage_dealt - 11 * damage_taken
+health_reward = 12 * damage_dealt - 14 * damage_taken
+combo_reward  = 0.05 * min(consecutive_hits - 1, 5)
+idle_penalty  = 0.01/second after 1.5 seconds without activity
+corner_penalty = 0.02/second after 1.0 second in a screen corner
+reward = health_reward + combo_reward - idle_penalty - corner_penalty
 round win  = +5
 round loss = -5
 ```
 
 Damage and episode flags accumulate until the RL decision loop consumes
 them, so one camera frame cannot be counted twice. Terminal bonuses are emitted
-once. `action_ack` remains the source of truth for commands actually applied.
+once. Position, distance, grounded/attack/defense flags and timers are state
+features; they do not receive arbitrary direct rewards. `action_ack` remains
+the source of truth for commands actually applied.
 
 ### Checkpoints and resume
 
@@ -203,6 +219,12 @@ shutdown:
 ├── shared_recurrent_metadata_best_<character>.garl
 └── shared_recurrent_metadata_best_<character>.garl.recurrent.pt
 ```
+
+Combat-state v2 expands the recurrent context from 15 to 30 values. A
+pre-v2 checkpoint is intentionally rejected instead of silently attaching old
+weights to different meanings. Start v2 in a new checkpoint directory with
+`GAMEAGENT_RL_RESUME=0`; subsequent runs of that directory use
+`GAMEAGENT_RL_RESUME=1`.
 
 The former `shared_policy_latest.garl` is not overwritten, so it remains an
 independent baseline for the inference-only DQN.
@@ -282,6 +304,10 @@ zero otherwise. `reward_gained` is the reward since the previous summary, while
 `reward_accumulated` is the complete episode return, including damage rewards,
 damage penalties and the terminal reward. A blank line follows each summary to
 make reward events easier to scan.
+
+The same line also reports `shaping`, `combo_reward`, `idle_penalty`,
+`corner_penalty`, player/opponent X, distance, combo length, stationary time
+and corner time.
 
 After `round_lost`, the server releases controls and emits one
 `training_reset_state` request with a connection-local `reset_id`. The client
@@ -590,6 +616,7 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_COLLECT_TRAINING_DATA` | `0` | enqueue accepted JPEGs and aligned ACK metadata for offline training without blocking reception |
 | `GAMEAGENT_TRAINING_CAPTURE_DIR` | `/workspace/gameagent/training_captures` | full-session training capture root |
 | `GAMEAGENT_DEFAULT_FACING` | `right` | legacy/default Forward/Back mapping when the client omits `session_config` |
+| `GAMEAGENT_RL_CHECKPOINT_INTERVAL_EPISODES` | `25` | completed episodes between full online-training checkpoints; graceful disconnect/shutdown still saves the latest state |
 | `GAMEAGENT_API_TOKEN` | unset | Bearer or X-API-Key credential |
 | `GAMEAGENT_RANDOM_SEED` | random | deterministic mock seed |
 | `GAMEAGENT_TEMPORAL_MODEL` | `0` | enable ResNet50 plus GPU temporal feature path |
@@ -605,6 +632,9 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_RL_RESNET_BATCH_SIZE` | `4` | JPEG observations in each visual update |
 | `GAMEAGENT_RL_RESNET_UPDATE_INTERVAL` | `16` | recurrent optimizer updates per visual update |
 | `GAMEAGENT_RL_RESNET_REPLAY_IMAGES` | `4096` | newest compressed JPEGs retained only in memory for visual training |
+| `GAMEAGENT_RL_COMBO_REWARD_SCALE` | `0.05` | incremental bonus for each consecutive hit after the first, capped at five extra hits |
+| `GAMEAGENT_RL_IDLE_PENALTY_PER_SECOND` | `0.01` | small penalty per second after 1.5 seconds without movement, commands or damage |
+| `GAMEAGENT_RL_CORNER_PENALTY_PER_SECOND` | `0.02` | small penalty per second after 1.0 second near a screen edge |
 | `GAMEAGENT_RL_RECURRENT_SERVICE` | `/tmp/GameAgent/scripts/recurrent_dqn_service.py` | persistent local PyTorch/CUDA recurrent backend |
 | `GAMEAGENT_RL_CHECKPOINT_DIR` | `/workspace/gameagent/rl_checkpoints` | shared latest policy/replay plus per-character best snapshots |
 | `GAMEAGENT_TRAINING_RESET_STATE` | `1` | request a client-side save-state load once after each `round_lost` |
@@ -629,6 +659,9 @@ the system CMake is older, it installs a compatible CMake in
 
 The build runs the old batch-protocol compatibility tests plus the new binary
 envelope, RFC 6455 handshake, WebSocket framing, and circular-buffer tests.
+`test_gameagent_combat_state_tracker` validates motion-based position,
+grounded/action state, damage timing, consecutive-hit reward and one-time
+idle/corner reward consumption.
 
 ## Start on RunPod
 

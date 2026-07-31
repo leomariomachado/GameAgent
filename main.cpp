@@ -244,6 +244,27 @@ int main(int argc, char** argv) {
                 environment_or("GAMEAGENT_RL_REWARD_LOG_INTERVAL_MS", "5000"),
                 "RL reward log interval"
             ));
+        server_options.reinforcement_combo_reward_scale =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_COMBO_REWARD_SCALE", "0.05"
+                ),
+                "RL combo reward scale", 0.0f, 10.0f
+            );
+        server_options.reinforcement_idle_penalty_per_second =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_IDLE_PENALTY_PER_SECOND", "0.01"
+                ),
+                "RL idle penalty per second", 0.0f, 10.0f
+            );
+        server_options.reinforcement_corner_penalty_per_second =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_CORNER_PENALTY_PER_SECOND", "0.02"
+                ),
+                "RL corner penalty per second", 0.0f, 10.0f
+            );
         server_options.player_is_left = parse_player_is_left(
             environment_or("GAMEAGENT_PLAYER_SIDE", "left")
         );
@@ -269,6 +290,13 @@ int main(int argc, char** argv) {
             "GAMEAGENT_RL_CHECKPOINT_DIR",
             "/workspace/gameagent/rl_checkpoints"
         );
+        server_options.reinforcement_checkpoint_interval_episodes =
+            parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_RL_CHECKPOINT_INTERVAL_EPISODES", "25"
+                ),
+                "RL checkpoint interval"
+            );
         server_options.recurrent_service_script = environment_or(
             "GAMEAGENT_RL_RECURRENT_SERVICE",
             "/tmp/GameAgent/scripts/recurrent_dqn_service.py"

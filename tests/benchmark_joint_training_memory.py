@@ -43,7 +43,7 @@ def main() -> int:
             projection_size=256,
             controller_size=12,
             temporal_hidden_size=256,
-            context_size=15,
+            context_size=30,
             strategy_hidden_size=128,
             sequence_capacity=16,
             character_embedding_size=16,
@@ -86,11 +86,11 @@ def main() -> int:
                 Transition(
                     state_sequence=state,
                     state_context=random.standard_normal(
-                        15, dtype=np.float32
+                        30, dtype=np.float32
                     ),
                     next_sequence=following,
                     next_context=random.standard_normal(
-                        15, dtype=np.float32
+                        30, dtype=np.float32
                     ),
                     action=0,
                     duration=3,

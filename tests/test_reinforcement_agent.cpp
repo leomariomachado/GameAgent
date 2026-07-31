@@ -314,6 +314,49 @@ int main() {
             "read-only evaluation modified a checkpoint"
         );
 
+        const auto interval_latest =
+            directory / "interval_latest.garl";
+        const auto interval_best =
+            directory / "interval_best.garl";
+        auto interval_config = config;
+        interval_config.resume = false;
+        interval_config.checkpoint_interval_episodes = 2;
+        interval_config.checkpoint_path = interval_latest;
+        interval_config.best_checkpoint_path = interval_best;
+        gameagent::ReinforcementAgent interval_agent(interval_config);
+        auto interval_decision = interval_agent.step({
+            .state = state_a,
+            .reward = -1.0f,
+            .action_allowed = false,
+            .episode_started = true,
+            .episode_ended = true,
+            .terminal = true,
+            .episode_id = 30,
+            .frame_id = 30,
+            .decision_id = 30,
+        });
+        require(
+            !interval_decision.checkpoint_saved &&
+                !std::filesystem::exists(interval_latest),
+            "periodic checkpoint was written before its interval"
+        );
+        interval_decision = interval_agent.step({
+            .state = state_a,
+            .reward = -2.0f,
+            .action_allowed = false,
+            .episode_started = true,
+            .episode_ended = true,
+            .terminal = true,
+            .episode_id = 31,
+            .frame_id = 31,
+            .decision_id = 31,
+        });
+        require(
+            interval_decision.checkpoint_saved &&
+                std::filesystem::is_regular_file(interval_latest),
+            "periodic checkpoint was not written at its interval"
+        );
+
         std::cout
             << "[INFO] shared_updates="
             << transferred_back.training_updates

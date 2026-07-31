@@ -28,6 +28,7 @@ struct WebSocketServerOptions {
     bool reinforcement_learning_enabled = false;
     bool reinforcement_training_enabled = true;
     bool reinforcement_resume = true;
+    std::size_t reinforcement_checkpoint_interval_episodes = 25;
     bool reinforcement_trainable_lstm = true;
     bool reinforcement_trainable_resnet = false;
     bool training_reset_state_enabled = true;
@@ -54,6 +55,9 @@ struct WebSocketServerOptions {
     std::size_t reinforcement_resnet_batch_size = 4;
     std::size_t reinforcement_resnet_update_interval = 16;
     std::size_t reinforcement_resnet_replay_images = 4096;
+    float reinforcement_combo_reward_scale = 0.05f;
+    float reinforcement_idle_penalty_per_second = 0.01f;
+    float reinforcement_corner_penalty_per_second = 0.02f;
     float reinforcement_epsilon_start = 1.0f;
     float reinforcement_epsilon_final = 0.05f;
     float reinforcement_scripted_exploration_probability = 0.50f;

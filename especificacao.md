@@ -239,6 +239,21 @@ combinação personagem/oponente e nunca atravessa o limite entre duas lutas.
 Epsilon, contadores de seleção e melhor retorno continuam independentes por
 personagem.
 
+O `session_config_ack` da versão atual também informa
+`combat_state_version: 2` e `combat_context_features: 30`. O cliente não deve
+calcular nem reenviar esses valores. O servidor acrescenta internamente à
+política: vida, posição X dos dois lutadores, distância, estado no chão,
+ataque/defesa, tempo desde o último dano, golpes consecutivos, tempo parado e
+tempo no canto. Ataque/defesa do jogador vêm do `action_ack`; estados do
+oponente e posições visuais incluem confiança explícita.
+
+A recompensa principal continua sendo dano e resultado da luta. O shaping
+adiciona somente bônus pequeno de combo e penalidades graduais por inatividade
+prolongada e permanência no canto. As métricas da ação expõem separadamente
+`health_reward`, `combat_shaping_reward`, `combo_reward`, `idle_penalty` e
+`corner_penalty`. Campos adicionais de diagnóstico são opcionais para o
+cliente, e `commands` continua sendo a única ação autoritativa.
+
 O modelo retomável é
 `/workspace/gameagent/rl_checkpoints/shared_recurrent_latest.pt`; ele inclui
 ResNet50, LSTM/DQN, estados dos otimizadores e replay compacto. O estado de

@@ -656,6 +656,7 @@ struct ReinforcementAgent::Implementation {
             config.minimum_replay_size == 0 ||
             config.training_updates_per_transition == 0 ||
             config.target_update_interval == 0 ||
+            config.checkpoint_interval_episodes == 0 ||
             config.gamma <= 0.0f ||
             config.gamma > 1.0f ||
             config.learning_rate <= 0.0f ||
@@ -1587,8 +1588,18 @@ ReinforcementDecision ReinforcementAgent::step(
             state.character_best_episode_return[player] =
                 state.current_episode_return;
         }
+        const std::uint64_t completed_episodes = std::accumulate(
+            state.character_episodes_completed.begin(),
+            state.character_episodes_completed.end(),
+            std::uint64_t{0}
+        );
+        const bool periodic_checkpoint_due =
+            completed_episodes %
+                state.config.checkpoint_interval_episodes ==
+            0U;
         if (
             state.config.checkpoint_writes_enabled &&
+            periodic_checkpoint_due &&
             !state.config.checkpoint_path.empty()
         ) {
             state.write_checkpoint(state.config.checkpoint_path);

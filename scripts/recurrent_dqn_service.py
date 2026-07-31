@@ -468,7 +468,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--projection-size", type=int, default=256)
     parser.add_argument("--controller-size", type=int, default=12)
     parser.add_argument("--temporal-hidden-size", type=int, default=256)
-    parser.add_argument("--context-size", type=int, default=15)
+    parser.add_argument("--context-size", type=int, default=30)
     parser.add_argument("--strategy-hidden-size", type=int, default=128)
     parser.add_argument("--sequence-capacity", type=int, default=16)
     parser.add_argument("--character-embedding-size", type=int, default=16)

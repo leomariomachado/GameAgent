@@ -38,6 +38,7 @@ fi
   test_gameagent_resnet50_feature_extractor \
   test_gameagent_temporal_agent \
   test_gameagent_health_bar_detector \
+  test_gameagent_combat_state_tracker \
   test_gameagent_reinforcement_agent \
   -j"${BUILD_JOBS}"
 

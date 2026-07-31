@@ -64,6 +64,11 @@ The server answers before accepting gameplay frames:
   "recurrent_checkpoint_loaded": false,
   "trainable_resnet": true,
   "resnet_checkpoint_loaded": false,
+  "combat_state_version": 2,
+  "combat_context_features": 30,
+  "combo_reward_scale": 0.05,
+  "idle_penalty_per_second": 0.01,
+  "corner_penalty_per_second": 0.02,
   "rl_training_device": "cuda:0",
   "rl_checkpoint": "/workspace/gameagent/rl_checkpoints/shared_recurrent_metadata_latest.garl"
 }
@@ -215,7 +220,29 @@ When reinforcement mode is enabled, an action may also contain:
     "rl_trainable_resnet": true,
     "rl_resnet_checkpoint_loaded": true,
     "rl_resnet_training_updates": 42,
-    "rl_resnet_parameter_checksum": 123456.789
+    "rl_resnet_parameter_checksum": 123456.789,
+    "combat_state_version": 2,
+    "combat_spatial_valid": true,
+    "combat_spatial_confidence": 0.74,
+    "combat_opponent_action_confidence": 1.0,
+    "player_x": 0.28,
+    "opponent_x": 0.71,
+    "fighter_distance": 0.43,
+    "player_on_ground": true,
+    "opponent_on_ground": true,
+    "player_defending": false,
+    "opponent_defending": false,
+    "player_attacking": true,
+    "opponent_attacking": false,
+    "time_since_last_damage_ms": 320,
+    "consecutive_hits": 2,
+    "stationary_time_ms": 0,
+    "corner_time_ms": 0,
+    "health_reward": 0.24,
+    "combat_shaping_reward": 0.05,
+    "combo_reward": 0.05,
+    "idle_penalty": 0.0,
+    "corner_penalty": 0.0
   }
 }
 ```
@@ -225,6 +252,13 @@ visual fine-tuning is enabled, `rl_resnet_training_updates` advances only on
 scheduled visual mini-batches, not on every decision. The checksum is a
 diagnostic value for observing parameter changes; the resumable checkpoint is
 the source of truth.
+
+Combat-state metrics are diagnostics for the client; the server already feeds
+their normalized values to the recurrent policy. The client must not derive or
+echo them. Player attack/defense uses confirmed controls. Opponent action and
+screen-space tracking are estimates, so consumers must check their associated
+confidence. Reward shaping is deliberately limited to consecutive hits,
+extended inactivity and extended corner occupancy.
 
 When
 `control_enabled` is false, the server sends `commands: []` and

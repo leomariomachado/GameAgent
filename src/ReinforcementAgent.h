@@ -13,7 +13,7 @@
 namespace gameagent {
 
 struct ReinforcementAgentConfig {
-    std::size_t input_size = 271;
+    std::size_t input_size = 286;
     std::size_t network_hidden_size = 128;
     std::size_t replay_capacity = 20000;
     std::size_t minimum_replay_size = 256;
@@ -38,6 +38,10 @@ struct ReinforcementAgentConfig {
     std::size_t opponent_embedding_size = 16;
     bool training_enabled = true;
     bool checkpoint_writes_enabled = true;
+    // Production servers can checkpoint less often to keep large recurrent
+    // snapshots off the latency-sensitive decision path. A value of 1 keeps
+    // the original save-on-every-episode behavior.
+    std::size_t checkpoint_interval_episodes = 1;
     bool resume = true;
     bool save_replay = true;
     // Enables the CUDA/PyTorch recurrent Double-DQN backend. The legacy

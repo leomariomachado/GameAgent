@@ -28,6 +28,7 @@ add_subdirectory(
 add_library(
         GameAgentMockCore
         src/ActionHistory.cpp
+        src/CombatStateTracker.cpp
         src/FrameBuffer.cpp
         src/HealthBarDetector.cpp
         src/HttpServer.cpp
@@ -192,6 +193,19 @@ if (BUILD_TESTING)
     add_test(
             NAME gameagent_health_bar_detector
             COMMAND test_gameagent_health_bar_detector
+    )
+
+    add_executable(
+            test_gameagent_combat_state_tracker
+            tests/test_combat_state_tracker.cpp
+    )
+    target_link_libraries(
+            test_gameagent_combat_state_tracker
+            PRIVATE GameAgentMockCore
+    )
+    add_test(
+            NAME gameagent_combat_state_tracker
+            COMMAND test_gameagent_combat_state_tracker
     )
 
     add_executable(

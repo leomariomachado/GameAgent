@@ -19,7 +19,7 @@ struct RecurrentPolicyBackendConfig {
     std::size_t projection_size = 256;
     std::size_t controller_size = 12;
     std::size_t temporal_hidden_size = 256;
-    std::size_t context_size = 15;
+    std::size_t context_size = 30;
     std::size_t strategy_hidden_size = 128;
     std::size_t sequence_capacity = 16;
     std::size_t character_embedding_size = 16;
