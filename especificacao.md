@@ -152,7 +152,10 @@ O cliente deve aguardar a confirmação antes de iniciar o envio dos frames:
   "mock_move_count": 11,
   "agent_mode": "mock_teacher",
   "training_reset_state_enabled": false,
-  "training_reset_trigger": "round_lost",
+  "training_reset_non_fight_timeout_ms": 5000,
+  "repeated_frame_pause_ms": 2000,
+  "repeated_frame_reset_ms": 3000,
+  "training_reset_trigger": "round_lost_or_non_fight_timeout",
   "training_reset_ack_type": "training_reset_ack",
   "checkpoint_loaded": false,
   "trainable_lstm": false,
@@ -572,10 +575,10 @@ interface. Valores possíveis: `no_hud`, `acquiring`, `round_intro`,
 
 ### Reset automático depois de derrota
 
-No modo de aprendizado por reforço, um round perdido representa uma tentativa
-de treino encerrada. O servidor primeiro envia a ação normal com
-`commands: []` para soltar os controles e, logo depois, envia uma única
-solicitação para aquele episódio:
+No treinamento por reforço, um round perdido encerra uma tentativa. Na
+avaliação somente leitura, tanto derrota quanto vitória encerram o teste e
+solicitam um estado limpo. O servidor primeiro envia a ação normal com
+`commands: []` e então envia uma operação lógica de reset:
 
 ```json
 {
@@ -591,7 +594,9 @@ solicitação para aquele episódio:
   "opponent_character": "subzero",
   "release_controls": true,
   "cancel_pending_sequence": true,
-  "ack_required": true
+  "ack_required": true,
+  "attempt": 1,
+  "retry": false
 }
 ```
 
@@ -614,12 +619,42 @@ antigos. Quando terminar, deve responder:
 `message` é opcional. Em caso de erro, responder `success: false` com uma
 mensagem curta e manter os controles liberados. O `reset_id` cresce dentro da
 conexão e torna a operação idempotente: o cliente nunca deve carregar o mesmo
-reset duas vezes.
+reset duas vezes. Enquanto não chegar o ACK, o servidor mantém os controles
+liberados e reenvia a mesma solicitação a cada 500 ms. O reenvio mantém o mesmo
+`reset_id`, incrementa `attempt` e usa `retry: true`; o cliente deve confirmar
+novamente, mas não deve recarregar um ID que já tenha concluído.
+Enquanto houver reset pendente, o servidor suspende mensagens `action` e envia
+somente `training_reset_state`, evitando que um cliente orientado a uma
+resposta por frame descarte a solicitação atrás de uma ação comum.
 
 O servidor não controla diretamente o emulador; ele solicita a operação ao
 cliente. Até chegarem novos frames válidos depois do carregamento, o gate da
-luta continua enviando ações vazias. Somente `round_lost` dispara o reset:
-`round_won`, `double_ko`, menus e transições normais não disparam. O campo
+luta continua enviando ações vazias. No treino, somente `round_lost` dispara o
+reset terminal imediato. Na avaliação, `round_lost` e `round_won` disparam.
+Nos dois modos, o watchdog também envia `training_reset_state` com
+causa interna `non_fight_timeout` se a fase ficar diferente de `active_fight` por
+`training_reset_non_fight_timeout_ms` milissegundos contínuos (5000 por padrão).
+Um frame de luta ativa zera o cronômetro. Depois de um ACK bem-sucedido, se a
+tela continuar fora da luta, é preciso transcorrer outra janela completa antes
+de surgir um novo `reset_id`. Assim, `double_ko`, menus e transições comuns não
+causam reset terminal imediato, mas uma tela inválida persistente é recuperada.
+Para manter compatibilidade com clientes que validam o contrato anterior, o
+watchdog transmite `reason: "round_lost"` e um `episode_id` de no mínimo 1. A
+métrica JSONL do servidor conserva a causa real em
+`detected_reason: "non_fight_timeout"`. O cliente deve tratar e confirmar a
+solicitação exatamente como qualquer outro reset, sem criar um novo fluxo.
+
+Nas sessões de reforço, o servidor também compara todos os bytes RGB
+decodificados de frames consecutivos; apenas incrementar `frame_id` não conta
+como mudança visual. Se nenhum pixel mudar por `repeated_frame_pause_ms`
+(2000 ms), ele envia estado vazio, cancela a sequência atual e impede novas
+transições, escritas no replay, updates do otimizador e consumo do epsilon. Se
+a mesma repetição chegar a `repeated_frame_reset_ms` (3000 ms), o servidor
+solicita um único reset. O JSON enviado mantém o formato legado e a métrica do
+servidor registra `detected_reason: "repeated_frame_timeout"`. Depois do ACK,
+o mesmo congelamento não gera novos IDs. O aprendizado só é liberado quando
+chega um frame RGB diferente e o gate normal reconhece uma luta válida.
+O campo
 `training_reset_state_enabled` no `session_config_ack` informa se a extensão
 está ativa.
 

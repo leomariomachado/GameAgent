@@ -412,10 +412,19 @@ int main() {
                 !session_ack.value(
                     "training_reset_state_enabled", true
                 ) &&
+                session_ack.value(
+                    "training_reset_non_fight_timeout_ms", 0
+                ) == 5000 &&
+                session_ack.value(
+                    "repeated_frame_pause_ms", 0
+                ) == 2000 &&
+                session_ack.value(
+                    "repeated_frame_reset_ms", 0
+                ) == 3000 &&
                 session_ack.value("training_reset_trigger", "") ==
-                    "round_lost" &&
+                    "round_lost_or_non_fight_timeout" &&
                 session_ack.value("agent_mode", "") == "mock_teacher" &&
-                session_ack.value("mock_move_count", 0U) == 11U,
+                session_ack.value("mock_move_count", 0U) == 14U,
             "Scorpion versus Shao Kahn session was not acknowledged"
         );
         const nlohmann::json second_action = send_one_frame_and_receive_action(second_client, 1U);

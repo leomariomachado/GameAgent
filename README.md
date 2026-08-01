@@ -159,6 +159,11 @@ selected head chooses among high-level options:
 - a two-option cooldown after Noob Saibot's disable cloud; both F/B
   variants are masked in mock exploration, DQN exploitation and Double-DQN
   successor targets while the projectile can still turn against its owner;
+- close combos masked when normalized fighter distance exceeds `0.22`;
+- projectile-first scripted exploration at distance `0.28` or greater, plus
+  a bounded Q-value preference for a competitive projectile in DQN mode;
+- `Neutro` masked during spatially valid active fights, while remaining in the
+  action head for checkpoint compatibility and uncertain fallback states;
 - that character's declared specials and combos;
 - the unique Forward/Back mirrors of those programs.
 
@@ -166,7 +171,9 @@ An option emits one complete protocol-v2 controller state every 100 ms. Its
 discounted reward is accumulated until the option ends, and replay stores its
 actual duration. Double-DQN targets therefore use `gamma^duration`, assigning
 delayed game damage to the complete move instead of an arbitrary controller
-tick.
+tick. Projectile and teleport transitions also retain two released controller
+steps before closing, extending their reward-credit window by roughly 300 ms
+at the default 10 decisions per second without changing checkpoint topology.
 
 Exploration is hierarchical. Epsilon first decides exploration versus DQN
 exploitation. During exploration, `GAMEAGENT_RL_SCRIPTED_EXPLORATION` chooses
@@ -198,7 +205,7 @@ combo_reward  = 0.05 * min(consecutive_hits - 1, 5)
 defense_reward = 0.05/second while a nearby attack is blocked without damage
 idle_penalty  = 0.01/second after 1.5 seconds without activity
 corner_penalty = 0.02/second after 1.0 second in a screen corner
-neutral_option_penalty = 0.05 whenever the policy deliberately selects Neutro
+neutral_option_penalty = 0.20 whenever fallback policy selects Neutro
 reward = health_reward + combo_reward + defense_reward
          - idle_penalty - corner_penalty - neutral_option_penalty
 round win  = +5
@@ -236,6 +243,13 @@ weights to different meanings. Start v2 in a new checkpoint directory with
 `GAMEAGENT_RL_RESUME=0`; subsequent runs of that directory use
 `GAMEAGENT_RL_RESUME=1`.
 
+Once either latest checkpoint exists, WebSocket reconnections always resume
+it even if the long-lived server was originally launched with
+`GAMEAGENT_RL_RESUME=0`. A deliberately fresh experiment must therefore use a
+new checkpoint directory. If recurrent weights contain more updates than the
+metadata selection counters, the server reconstructs a conservative counter
+floor so epsilon cannot silently jump back to one.
+
 The former `shared_policy_latest.garl` is not overwritten, so it remains an
 independent baseline for the inference-only DQN.
 
@@ -253,6 +267,21 @@ cd /tmp/GameAgent
 export GAMEAGENT_API_TOKEN="$(< /workspace/gameagent/api_token)"
 GAMEAGENT_RL_RESUME=1 bash scripts/run_character_rl.sh
 ```
+
+To start the corrected v8 policy without overwriting v7, use:
+
+```bash
+cd /tmp/GameAgent
+export GAMEAGENT_API_TOKEN="$(< /workspace/gameagent/api_token)"
+bash scripts/run_character_rl_v8.sh
+```
+
+On its first run, the launcher reads
+`rl_combat_state_v7_calibrated/shared_recurrent_latest.pt`, imports the
+ResNet50 stage 4, projection, LSTM, embeddings and strategy representation,
+then initializes two fresh independent value heads. New checkpoints and replay
+are written only under `/workspace/gameagent/rl_combat_state_v8`. Subsequent
+runs resume that v8 checkpoint normally.
 
 The client then selects the character and opponent in `session_config`. A
 different character loads the same shared latest checkpoint and selects its own
@@ -305,7 +334,7 @@ The server prints one accumulated learning summary every five seconds without
 running an extra inference or synchronizing the GPU again:
 
 ```text
-[RL_REWARD] reward_gained=0.42 reward_accumulated=1.87 reward_terminal=0 result=ongoing connection=1 episode=4 phase=active_fight damage_dealt=0.08 damage_taken=0.03 hp=0.71/0.54 epsilon=0.93 replay=418 updates=162 loss=0.021
+[RL_REWARD] reward_gained=0.42 reward_accumulated=1.87 reward_terminal=0 result=ongoing connection=1 episode=4 phase=active_fight damage_dealt=0.08 damage_taken=0.03 hp=0.71/0.54 epsilon=0.93 replay=418 updates=162 loss=0.021 q_pred=1.84 td_target=1.77 q_gap=0.07 abs_td=0.31 bootstrap=1.72 target_clipped=0 terminal_batch=0.06 terminal_q_pred=-3.8 terminal_target=-5
 ```
 
 An episode ending forces an immediate summary instead of waiting for the next
@@ -315,15 +344,52 @@ zero otherwise. `reward_gained` is the reward since the previous summary, while
 damage penalties and the terminal reward. A blank line follows each summary to
 make reward events easier to scan.
 
+`q_pred` is the replay batch's mean predicted Q value, `td_target` is its mean
+clipped Double-DQN target, and `q_gap=q_pred-td_target`. A persistently positive
+gap is direct evidence of current overestimation. `abs_td` is the mean absolute
+TD error, `bootstrap` is the conservative successor estimate and
+`target_clipped` is the fraction constrained by the configured value bound.
+`terminal_batch` is the terminal fraction of that replay batch; for those
+samples `terminal_target` contains only the observed terminal transition and
+never a successor bootstrap, while `terminal_q_pred` shows its calibration.
+
 The same line also reports `shaping`, `combo_reward`, `idle_penalty`,
 `corner_penalty`, player/opponent X, distance, combo length, stationary time
 and corner time.
 
-After `round_lost`, the server releases controls and emits one
+During training, after `round_lost`, the server releases controls and emits one
 `training_reset_state` request with a connection-local `reset_id`. The client
 loads its configured training save state and returns `training_reset_ack`.
-Wins and double KOs do not trigger this request. This behavior is enabled by
+Wins and double KOs do not trigger this request. Read-only evaluation instead
+requests one clean save-state load after either round result, allowing
+repeatable pure-DQN trials. This behavior is enabled by
 default and can be disabled with `GAMEAGENT_TRAINING_RESET_STATE=0`.
+Independently of a detected result, a recovery watchdog requests the same reset
+when the detector remains outside `active_fight` for five continuous seconds.
+An active-fight frame clears the watchdog. If the client acknowledges a reset
+but the screen is still outside a fight, a new request may be issued only after
+another complete timeout window. Set the window with
+`GAMEAGENT_TRAINING_RESET_NON_FIGHT_TIMEOUT_MS`.
+For compatibility with existing clients, this recovery request keeps the
+legacy wire values `reason: "round_lost"` and a positive `episode_id`. The
+server-side JSONL metric records the actual cause as
+`detected_reason: "non_fight_timeout"`; no client change is required.
+
+RL sessions also compare the decoded RGB bytes of consecutive frames, rather
+than trusting an increasing `frame_id`. After 2000 ms of an exactly unchanged
+image, the server releases controls and calls the agent with actions disabled,
+which prevents replay writes, optimizer updates and epsilon decay while the
+emulator is frozen. At 3000 ms it emits one idempotent
+`training_reset_state`; its server metric uses
+`detected_reason: "repeated_frame_timeout"` while the wire message retains the
+legacy `reason: "round_lost"`. Repeated reset requests are not created for the
+same frozen streak. Processing resumes only after decoded RGB pixels change;
+the temporal sequence is cleared on pause and recovery.
+Until acknowledged, one logical reset remains pending, blocks new actions and
+is retransmitted every 500 ms with the same id. This keeps the operation
+idempotent and prevents a delayed acknowledgement from being displaced by a
+new reset id. Ordinary action responses are suspended until that acknowledgement
+so clients cannot hide the reset behind one-action-per-frame processing.
 
 Change only the reporting cadence, in milliseconds, with:
 
@@ -638,6 +704,13 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_REINFORCEMENT_LEARNING` | `0` | enable shared multi-character recurrent Double DQN |
 | `GAMEAGENT_RL_TRAINABLE_LSTM` | `1` | train the LSTM and Q network with BPTT on CUDA |
 | `GAMEAGENT_RL_TRAINABLE_RESNET` | `0` (`1` in character RL launcher) | fine-tune ResNet50 `layer4`; earlier stages and BatchNorm statistics stay frozen |
+| `GAMEAGENT_RL_GAMMA` | `0.995` | discount per 100 ms decision, giving an approximately 20-second value horizon |
+| `GAMEAGENT_RL_CONSERVATIVE_BOOTSTRAP` | `1` | use the lower value from two independent recurrent critics |
+| `GAMEAGENT_RL_Q_VALUE_LIMIT` | `25.0` | symmetric TD-target bound based on the attainable combat reward range |
+| `GAMEAGENT_RL_TERMINAL_REPLAY_FRACTION` | `0.25` | fraction of every recurrent replay batch reserved for matchup-balanced terminal transitions |
+| `GAMEAGENT_RL_HARD_NEGATIVE_REPLAY_FRACTION` | `0.25` | minimum batch fraction reserved for positive-Q options whose n-step return became negative |
+| `GAMEAGENT_RL_HARD_NEGATIVE_Q_THRESHOLD` | `1.0` | Q threshold used to classify hard-negative transitions |
+| `GAMEAGENT_RL_N_STEP_OPTIONS` | `3` | consecutive semi-Markov options combined into each recurrent TD target |
 | `GAMEAGENT_RL_RESNET_LEARNING_RATE` | `0.000001` | AdamW learning rate for ResNet50 `layer4` |
 | `GAMEAGENT_RL_RESNET_BATCH_SIZE` | `4` | JPEG observations in each visual update |
 | `GAMEAGENT_RL_RESNET_UPDATE_INTERVAL` | `16` | recurrent optimizer updates per visual update |
@@ -646,12 +719,31 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_RL_DAMAGE_TAKEN_PENALTY_SCALE` | `11.0` | penalty multiplier for normalized damage taken |
 | `GAMEAGENT_RL_COMBO_REWARD_SCALE` | `0.05` | incremental bonus for each consecutive hit after the first, capped at five extra hits |
 | `GAMEAGENT_RL_DEFENSE_REWARD_PER_SECOND` | `0.05` | reward rate for a confirmed nearby block that prevents damage |
-| `GAMEAGENT_RL_NEUTRAL_OPTION_PENALTY` | `0.05` | small opportunity cost applied when the policy deliberately selects `Neutro` |
+| `GAMEAGENT_RL_NEUTRAL_OPTION_PENALTY` | `0.20` | fallback opportunity cost when `Neutro` is available under uncertain spatial state |
+| `GAMEAGENT_RL_SUPPRESS_NEUTRAL` | `1` | mask `Neutro` during spatially valid active fights without changing the action head |
+| `GAMEAGENT_RL_COMBO_MAX_DISTANCE` | `0.22` | maximum normalized fighter distance at which close scripted combos are legal |
+| `GAMEAGENT_RL_CLOSE_ATTACK_MAX_DISTANCE` | `0.24` | maximum distance for primitive punches, kicks and uppercuts |
+| `GAMEAGENT_RL_PROJECTILE_MIN_DISTANCE` | `0.28` | minimum distance for ordinary projectiles and distance at which they are preferred |
+| `GAMEAGENT_RL_PROJECTILE_Q_MARGIN` | `1.0` | maximum Q disadvantage accepted when preferring a projectile at distance; halved under an observed attack |
+| `GAMEAGENT_RL_DISABLE_CLOUD_MIN_DISTANCE` / `MAX_DISTANCE` | `0.12` / `0.55` | empirically useful range for Noob Saibot's disable cloud |
+| `GAMEAGENT_RL_ADVANCE_MIN_DISTANCE` | `0.18` | prevents advancing again after already reaching close range |
+| `GAMEAGENT_RL_DEFENSE_MAX_DISTANCE` | `0.32` | prevents distant blocking with no immediate threat |
+| `GAMEAGENT_RL_DYNAMIC_FACING` | `1` | derives Forward/Back from live fighter X positions and masks explicit mirrored duplicates |
+| `GAMEAGENT_RL_DISABLE_CLOUD_COOLDOWN_OPTIONS` | `2` | complete alternative options required before another Noob Saibot disable cloud; teleports remain unrestricted |
+| `GAMEAGENT_RL_MELEE_CREDIT_STEPS` | `2` | post-program steps retained for melee/combo damage credit |
+| `GAMEAGENT_RL_TELEPORT_CREDIT_STEPS` | `4` | post-program steps retained for teleport impact credit |
+| `GAMEAGENT_RL_PROJECTILE_CREDIT_MIN_STEPS` / `MAX_STEPS` | `4` / `8` | distance-scaled post-program projectile credit window |
+| `GAMEAGENT_RL_GREEDY_EPISODE_INTERVAL` | `10` | train one near-greedy episode after every ten episodes |
+| `GAMEAGENT_RL_GREEDY_EPISODE_EPSILON` | `0.05` | epsilon used by the near-greedy training episode |
+| `GAMEAGENT_RL_MIGRATION_CHECKPOINT` | unset | optional v7 recurrent checkpoint used only to initialize v8 perception and temporal representation |
 | `GAMEAGENT_RL_IDLE_PENALTY_PER_SECOND` | `0.01` | small penalty per second after 1.5 seconds without movement, commands or damage |
 | `GAMEAGENT_RL_CORNER_PENALTY_PER_SECOND` | `0.02` | small penalty per second after 1.0 second near a screen edge |
 | `GAMEAGENT_RL_RECURRENT_SERVICE` | `/tmp/GameAgent/scripts/recurrent_dqn_service.py` | persistent local PyTorch/CUDA recurrent backend |
 | `GAMEAGENT_RL_CHECKPOINT_DIR` | `/workspace/gameagent/rl_checkpoints` | shared latest policy/replay plus per-character best snapshots |
 | `GAMEAGENT_TRAINING_RESET_STATE` | `1` | request a client-side save-state load once after each `round_lost` |
+| `GAMEAGENT_TRAINING_RESET_NON_FIGHT_TIMEOUT_MS` | `5000` | request recovery after this many continuous milliseconds outside `active_fight` |
+| `GAMEAGENT_REPEATED_FRAME_PAUSE_MS` | `2000` | release controls and suspend RL when decoded RGB pixels remain identical |
+| `GAMEAGENT_REPEATED_FRAME_RESET_MS` | `3000` | request one client state reset for the same unchanged-frame streak |
 | `GAMEAGENT_EVALUATION_ROOT` | `/workspace/gameagent/evaluations` | isolated snapshots, logs and metrics produced by the pure-DQN evaluator |
 
 `GAMEAGENT_OBSERVATION_FRAMES` cannot exceed the buffer capacity.

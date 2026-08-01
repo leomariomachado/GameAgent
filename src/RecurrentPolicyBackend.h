@@ -13,6 +13,7 @@ namespace gameagent {
 struct RecurrentPolicyBackendConfig {
     std::filesystem::path service_script;
     std::filesystem::path checkpoint_path;
+    std::filesystem::path migration_checkpoint_path;
     std::filesystem::path resnet50_checkpoint_path;
     std::vector<std::size_t> action_sizes;
     std::size_t visual_size = 2048;
@@ -31,7 +32,12 @@ struct RecurrentPolicyBackendConfig {
     std::size_t training_updates_per_transition = 1;
     std::uint64_t target_update_interval = 500;
     std::uint64_t initial_training_updates = 0;
-    float gamma = 0.99f;
+    float gamma = 0.995f;
+    float q_value_limit = 25.0f;
+    float terminal_replay_fraction = 0.25f;
+    float hard_negative_replay_fraction = 0.25f;
+    float hard_negative_q_threshold = 1.0f;
+    std::size_t n_step_options = 3;
     float learning_rate = 1.0e-4f;
     float resnet_learning_rate = 1.0e-6f;
     float gradient_clip = 5.0f;
@@ -40,6 +46,7 @@ struct RecurrentPolicyBackendConfig {
     bool training_enabled = true;
     bool checkpoint_writes_enabled = true;
     bool resume = true;
+    bool conservative_bootstrap = true;
     bool trainable_resnet = false;
     std::size_t resnet_batch_size = 4;
     std::size_t resnet_update_interval = 16;
@@ -52,10 +59,22 @@ struct RecurrentPolicyBackendStats {
     std::size_t matchup_count = 0;
     std::size_t sequence_size = 0;
     float last_loss = 0.0f;
+    float last_predicted_q_mean = 0.0f;
+    float last_td_target_mean = 0.0f;
+    float last_bootstrap_mean = 0.0f;
+    float last_q_target_gap = 0.0f;
+    float last_abs_td_error = 0.0f;
+    float last_q_target_clipped_fraction = 0.0f;
+    float last_terminal_sample_fraction = 0.0f;
+    float last_terminal_predicted_q_mean = 0.0f;
+    float last_terminal_td_target_mean = 0.0f;
+    float last_critic_disagreement = 0.0f;
+    float last_hard_negative_sample_fraction = 0.0f;
     double parameter_checksum = 0.0;
     double resnet_parameter_checksum = 0.0;
     std::uint64_t resnet_training_updates = 0;
     bool checkpoint_loaded = false;
+    bool checkpoint_migrated = false;
     bool resnet_checkpoint_loaded = false;
     bool trainable_resnet = false;
     std::string device;
@@ -95,7 +114,8 @@ public:
     void begin_transition(
         std::size_t action,
         std::size_t character,
-        std::size_t opponent
+        std::size_t opponent,
+        float selected_q
     );
     RecurrentPolicyCloseResult close_transition(
         std::size_t duration,

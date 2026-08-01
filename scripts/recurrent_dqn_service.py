@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Persistent GPU recurrent Double-DQN service for GameAgent.
+"""Persistent GPU recurrent clipped twin Double-DQN service for GameAgent.
 
 The C++ server keeps ownership of controller timing and option programs. This
 process owns the trainable temporal encoder and Q network:
 
     frozen ResNet50 feature -> frozen projection -> trainable LSTM
       + fight/controller context + character/opponent embeddings
-      -> shared strategy trunk -> character action head
+      -> independent strategy critics -> character action heads
 
 One JSON request and response are exchanged per line on stdin/stdout. Human
 readable diagnostics are written only to stderr so they cannot corrupt the
@@ -39,7 +39,8 @@ from torch.nn.utils.rnn import pack_padded_sequence
 from torchvision.models import resnet50
 
 
-SERVICE_VERSION = 1
+SERVICE_VERSION = 2
+LEGACY_SERVICE_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,9 @@ class Transition:
     terminal: bool
     character: int
     opponent: int
+    # Conservative Q reported when the option was selected. A positive value
+    # followed by a negative n-step return is replayed as a hard negative.
+    selected_q: float = 0.0
     # Compressed source frame for truncated end-to-end visual credit. Older
     # replay entries remain valid for LSTM/DQN learning when this is absent.
     state_jpeg: bytes | None = None
@@ -464,6 +468,7 @@ class RecurrentQNetwork(nn.Module):
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--migration-checkpoint", type=Path, default=Path())
     parser.add_argument("--device-id", type=int, default=0)
     parser.add_argument("--training", type=int, choices=(0, 1), default=1)
     parser.add_argument("--checkpoint-writes", type=int, choices=(0, 1), default=1)
@@ -484,7 +489,19 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--target-update", type=int, default=500)
     parser.add_argument("--updates-per-transition", type=int, default=1)
-    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--gamma", type=float, default=0.995)
+    parser.add_argument(
+        "--conservative-bootstrap", type=int, choices=(0, 1), default=1
+    )
+    parser.add_argument("--q-value-limit", type=float, default=25.0)
+    parser.add_argument("--terminal-replay-fraction", type=float, default=0.25)
+    parser.add_argument(
+        "--hard-negative-replay-fraction", type=float, default=0.25
+    )
+    parser.add_argument(
+        "--hard-negative-q-threshold", type=float, default=1.0
+    )
+    parser.add_argument("--n-step-options", type=int, default=3)
     parser.add_argument("--learning-rate", type=float, default=1.0e-4)
     parser.add_argument(
         "--trainable-resnet", type=int, choices=(0, 1), default=0
@@ -519,6 +536,14 @@ class Service:
             or arguments.sequence_capacity <= 0
             or arguments.minimum_replay_size <= 0
             or arguments.batch_size <= 0
+            or not 0.0 < arguments.gamma <= 1.0
+            or arguments.q_value_limit <= 0.0
+            or not 0.0 <= arguments.terminal_replay_fraction <= 1.0
+            or not 0.0 <= arguments.hard_negative_replay_fraction <= 1.0
+            or arguments.terminal_replay_fraction
+                + arguments.hard_negative_replay_fraction > 1.0
+            or arguments.hard_negative_q_threshold < 0.0
+            or arguments.n_step_options <= 0
             or (
                 arguments.trainable_resnet
                 and (
@@ -602,12 +627,17 @@ class Service:
                 self.resnet_optimizer.zero_grad(set_to_none=True)
                 torch.cuda.synchronize(arguments.device_id)
 
-        self.online = RecurrentQNetwork(self.config).to(self.device)
-        self.target = copy.deepcopy(self.online).to(self.device)
-        self.target.requires_grad_(False)
-        self.target.eval()
+        self.online_a = RecurrentQNetwork(self.config).to(self.device)
+        self.online_b = RecurrentQNetwork(self.config).to(self.device)
+        self.target_a = copy.deepcopy(self.online_a).to(self.device)
+        self.target_b = copy.deepcopy(self.online_b).to(self.device)
+        self.target_a.requires_grad_(False)
+        self.target_b.requires_grad_(False)
+        self.target_a.eval()
+        self.target_b.eval()
         self.optimizer = torch.optim.AdamW(
-            self.online.parameters(),
+            list(self.online_a.parameters()) +
+            list(self.online_b.parameters()),
             lr=arguments.learning_rate,
             weight_decay=1.0e-5,
         )
@@ -628,22 +658,47 @@ class Service:
         self.cached_frame_id = 0
         self.cached_projected_visual: torch.Tensor | None = None
         self.active: dict[str, Any] | None = None
+        self.pending_n_step: collections.deque[Transition] = (
+            collections.deque()
+        )
         self.training_updates = int(arguments.initial_updates)
         self.last_loss = 0.0
+        self.last_predicted_q_mean = 0.0
+        self.last_td_target_mean = 0.0
+        self.last_bootstrap_mean = 0.0
+        self.last_q_target_gap = 0.0
+        self.last_abs_td_error = 0.0
+        self.last_q_target_clipped_fraction = 0.0
+        self.last_terminal_sample_fraction = 0.0
+        self.last_terminal_predicted_q_mean = 0.0
+        self.last_terminal_td_target_mean = 0.0
+        self.last_critic_disagreement = 0.0
+        self.last_hard_negative_sample_fraction = 0.0
         self.checkpoint_loaded = False
+        self.checkpoint_migrated = False
         self.resnet_checkpoint_loaded = False
         self.resnet_training_updates = 0
         self.parameter_checksum = 0.0
         self.resnet_parameter_checksum = 0.0
         if arguments.resume and arguments.checkpoint.is_file():
             self.load(arguments.checkpoint)
+        elif (
+            arguments.resume and
+            arguments.migration_checkpoint.is_file()
+        ):
+            self.load_legacy_representation(
+                arguments.migration_checkpoint
+            )
         self.refresh_checksum()
         self.refresh_resnet_checksum()
 
     def refresh_checksum(self) -> None:
         total = torch.zeros((), dtype=torch.float64, device=self.device)
         with torch.no_grad():
-            for index, parameter in enumerate(self.online.parameters(), 1):
+            parameters = list(self.online_a.parameters()) + list(
+                self.online_b.parameters()
+            )
+            for index, parameter in enumerate(parameters, 1):
                 total += parameter.to(dtype=torch.float64).sum() * index
         self.parameter_checksum = float(total.cpu())
 
@@ -700,6 +755,7 @@ class Service:
         if bool(request.get("episode_started", False)):
             self.current_sequence.clear()
             self.active = None
+            self.pending_n_step.clear()
             self.current_jpeg = None
             self.current_frame_id = 0
         context = np.asarray(request["context"], dtype=np.float32)
@@ -826,19 +882,83 @@ class Service:
             characters,
         )
 
-    def balanced_sample(self) -> list[Transition]:
+    @staticmethod
+    def balanced_sample_from(
+        transitions: list[Transition], count: int
+    ) -> list[Transition]:
+        if count <= 0:
+            return []
         buckets: dict[tuple[int, int], list[Transition]] = (
             collections.defaultdict(list)
         )
-        for transition in self.replay:
+        for transition in transitions:
             buckets[(transition.character, transition.opponent)].append(
                 transition
             )
         active = tuple(buckets.values())
         return [
             random.choice(random.choice(active))
-            for _ in range(self.arguments.batch_size)
+            for _ in range(count)
         ]
+
+    def balanced_sample(self) -> list[Transition]:
+        replay = list(self.replay)
+        terminal = [value for value in replay if value.terminal]
+        nonterminal = [value for value in replay if not value.terminal]
+        hard_negative = [
+            value for value in nonterminal
+            if value.selected_q >=
+                self.arguments.hard_negative_q_threshold
+            and value.reward < 0.0
+        ]
+        requested_terminal = (
+            max(1, int(round(
+                self.arguments.batch_size
+                * self.arguments.terminal_replay_fraction
+            )))
+            if self.arguments.terminal_replay_fraction > 0.0
+            else 0
+        )
+        terminal_count = (
+            min(self.arguments.batch_size, requested_terminal)
+            if terminal
+            else 0
+        )
+        requested_hard_negative = int(round(
+            self.arguments.batch_size
+            * self.arguments.hard_negative_replay_fraction
+        ))
+        hard_negative_count = (
+            min(
+                self.arguments.batch_size - terminal_count,
+                requested_hard_negative,
+            )
+            if hard_negative else 0
+        )
+        remaining = (
+            self.arguments.batch_size - terminal_count -
+            hard_negative_count
+        )
+        result = self.balanced_sample_from(terminal, terminal_count)
+        result.extend(self.balanced_sample_from(
+            hard_negative, hard_negative_count
+        ))
+        result.extend(self.balanced_sample_from(
+            nonterminal if nonterminal else replay,
+            remaining,
+        ))
+        random.shuffle(result)
+        self.last_hard_negative_sample_fraction = (
+            sum(
+                not value.terminal and
+                value.selected_q >=
+                    self.arguments.hard_negative_q_threshold and
+                value.reward < 0.0
+                for value in result
+            ) / len(result)
+            if result else 0.0
+        )
+        return result
 
     def append_replay(self, transition: Transition) -> None:
         if len(self.replay) == self.replay.maxlen:
@@ -859,6 +979,54 @@ class Service:
                 with_images += 1
                 if with_images > self.arguments.resnet_replay_images:
                     value.state_jpeg = None
+
+    def combine_n_step(self, count: int) -> Transition:
+        values = list(self.pending_n_step)[:count]
+        if not values:
+            raise ValueError("cannot combine an empty n-step transition")
+        first = values[0]
+        last = values[-1]
+        reward = 0.0
+        elapsed = 0
+        for value in values:
+            reward += (self.arguments.gamma ** elapsed) * value.reward
+            elapsed += value.duration
+            if value.terminal:
+                break
+        return Transition(
+            state_sequence=first.state_sequence,
+            state_context=first.state_context,
+            next_sequence=last.next_sequence,
+            next_context=last.next_context,
+            action=first.action,
+            duration=max(1, elapsed),
+            reward=reward,
+            terminal=last.terminal,
+            character=first.character,
+            opponent=first.opponent,
+            selected_q=first.selected_q,
+            state_jpeg=first.state_jpeg,
+            next_action_mask=last.next_action_mask,
+        )
+
+    def append_n_step(self, transition: Transition) -> int:
+        self.pending_n_step.append(transition)
+        appended = 0
+        if transition.terminal:
+            while self.pending_n_step:
+                self.append_replay(
+                    self.combine_n_step(len(self.pending_n_step))
+                )
+                self.pending_n_step.popleft()
+                appended += 1
+            return appended
+        if len(self.pending_n_step) >= self.arguments.n_step_options:
+            self.append_replay(
+                self.combine_n_step(self.arguments.n_step_options)
+            )
+            self.pending_n_step.popleft()
+            appended += 1
+        return appended
 
     def resnet_training_sample(
         self, transitions: list[Transition]
@@ -905,30 +1073,54 @@ class Service:
         transitions, replacement_visual = self.resnet_training_sample(
             transitions
         )
-        self.online.train()
-        current_latent, characters = self.latent_for(
-            self.online,
+        self.online_a.train()
+        self.online_b.train()
+        current_latent_a, characters = self.latent_for(
+            self.online_a,
             transitions,
             False,
             replacement_visual,
         )
-        current_q = self.online.padded_q(current_latent, characters)
+        current_latent_b, _ = self.latent_for(
+            self.online_b,
+            transitions,
+            False,
+            replacement_visual,
+        )
+        current_q_a = self.online_a.padded_q(
+            current_latent_a, characters
+        )
+        current_q_b = self.online_b.padded_q(
+            current_latent_b, characters
+        )
         actions = torch.tensor(
             [value.action for value in transitions],
             dtype=torch.int64,
             device=self.device,
         )
-        predicted = current_q.gather(1, actions[:, None]).squeeze(1)
+        predicted_a = current_q_a.gather(
+            1, actions[:, None]
+        ).squeeze(1)
+        predicted_b = current_q_b.gather(
+            1, actions[:, None]
+        ).squeeze(1)
+        predicted = 0.5 * (predicted_a + predicted_b)
 
         with torch.no_grad():
-            online_next_latent, next_characters = self.latent_for(
-                self.online, transitions, True
+            online_next_latent_a, next_characters = self.latent_for(
+                self.online_a, transitions, True
             )
-            online_next = self.online.padded_q(
-                online_next_latent, next_characters
+            online_next_latent_b, _ = self.latent_for(
+                self.online_b, transitions, True
+            )
+            online_next_a = self.online_a.padded_q(
+                online_next_latent_a, next_characters
+            )
+            online_next_b = self.online_b.padded_q(
+                online_next_latent_b, next_characters
             )
             next_allowed = torch.zeros_like(
-                online_next, dtype=torch.bool
+                online_next_a, dtype=torch.bool
             )
             for row, value in enumerate(transitions):
                 action_count = self.config.action_sizes[value.character]
@@ -948,19 +1140,42 @@ class Service:
                         dtype=torch.bool,
                         device=self.device,
                     )
-            online_next = online_next.masked_fill(
+            online_next_a = online_next_a.masked_fill(
                 ~next_allowed, -torch.inf
             )
-            best_actions = online_next.argmax(dim=1)
-            target_next_latent, target_characters = self.latent_for(
-                self.target, transitions, True
+            online_next_b = online_next_b.masked_fill(
+                ~next_allowed, -torch.inf
             )
-            target_next = self.target.padded_q(
-                target_next_latent, target_characters
+            conservative_online = torch.minimum(
+                online_next_a, online_next_b
             )
-            bootstrap = target_next.gather(
+            best_actions = conservative_online.argmax(dim=1)
+            target_next_latent_a, target_characters = self.latent_for(
+                self.target_a, transitions, True
+            )
+            target_next_latent_b, _ = self.latent_for(
+                self.target_b, transitions, True
+            )
+            target_next_a = self.target_a.padded_q(
+                target_next_latent_a, target_characters
+            )
+            target_next_b = self.target_b.padded_q(
+                target_next_latent_b, target_characters
+            )
+            target_bootstrap_a = target_next_a.gather(
                 1, best_actions[:, None]
             ).squeeze(1)
+            target_bootstrap_b = target_next_b.gather(
+                1, best_actions[:, None]
+            ).squeeze(1)
+            # The two critics have independent recurrent/value parameters.
+            # Their minimum is a clipped Double-Q target and therefore does
+            # not inherit the shared online/target optimism of v7.
+            bootstrap = (
+                torch.minimum(target_bootstrap_a, target_bootstrap_b)
+                if self.arguments.conservative_bootstrap
+                else 0.5 * (target_bootstrap_a + target_bootstrap_b)
+            )
             rewards = torch.tensor(
                 [value.reward for value in transitions],
                 dtype=torch.float32,
@@ -979,15 +1194,55 @@ class Service:
             discount = torch.pow(
                 torch.full_like(durations, self.arguments.gamma), durations
             )
-            expected = rewards + nonterminal * discount * bootstrap
+            raw_expected = rewards + nonterminal * discount * bootstrap
+            expected = torch.clamp(
+                raw_expected,
+                -self.arguments.q_value_limit,
+                self.arguments.q_value_limit,
+            )
 
-        loss = torch.nn.functional.smooth_l1_loss(predicted, expected)
+        td_error = predicted.detach() - expected
+        self.last_critic_disagreement = float(
+            (predicted_a.detach() - predicted_b.detach()).abs().mean().cpu()
+        )
+        self.last_predicted_q_mean = float(predicted.detach().mean().cpu())
+        self.last_td_target_mean = float(expected.mean().cpu())
+        self.last_bootstrap_mean = float(bootstrap.mean().cpu())
+        self.last_q_target_gap = float(td_error.mean().cpu())
+        self.last_abs_td_error = float(td_error.abs().mean().cpu())
+        self.last_q_target_clipped_fraction = float(
+            (raw_expected != expected).float().mean().cpu()
+        )
+        terminal_mask = nonterminal == 0.0
+        self.last_terminal_sample_fraction = float(
+            terminal_mask.float().mean().cpu()
+        )
+        if bool(terminal_mask.any()):
+            self.last_terminal_predicted_q_mean = float(
+                predicted.detach()[terminal_mask].mean().cpu()
+            )
+            self.last_terminal_td_target_mean = float(
+                expected[terminal_mask].mean().cpu()
+            )
+        else:
+            self.last_terminal_predicted_q_mean = 0.0
+            self.last_terminal_td_target_mean = 0.0
+
+        loss_a = torch.nn.functional.smooth_l1_loss(
+            predicted_a, expected
+        )
+        loss_b = torch.nn.functional.smooth_l1_loss(
+            predicted_b, expected
+        )
+        loss = 0.5 * (loss_a + loss_b)
         self.optimizer.zero_grad(set_to_none=True)
         if self.resnet_optimizer is not None:
             self.resnet_optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
-            self.online.parameters(), self.arguments.gradient_clip
+            list(self.online_a.parameters()) +
+            list(self.online_b.parameters()),
+            self.arguments.gradient_clip,
         )
         self.optimizer.step()
         if (
@@ -1008,8 +1263,10 @@ class Service:
         self.training_updates += 1
         self.last_loss = float(loss.detach().cpu())
         if self.training_updates % self.arguments.target_update == 0:
-            self.target.load_state_dict(self.online.state_dict())
-        self.online.eval()
+            self.target_a.load_state_dict(self.online_a.state_dict())
+            self.target_b.load_state_dict(self.online_b.state_dict())
+        self.online_a.eval()
+        self.online_b.eval()
         self.refresh_checksum()
         return True
 
@@ -1038,33 +1295,49 @@ class Service:
             character=character,
             opponent=opponent,
         )
-        self.online.eval()
+        self.online_a.eval()
+        self.online_b.eval()
         with torch.inference_mode():
-            latent, characters = self.latent_for(
-                self.online, [synthetic], False
+            latent_a, characters = self.latent_for(
+                self.online_a, [synthetic], False
             )
-            values = self.online.padded_q(
-                latent, characters
+            latent_b, _ = self.latent_for(
+                self.online_b, [synthetic], False
+            )
+            values_a = self.online_a.padded_q(
+                latent_a, characters
             )[0, :action_count]
+            values_b = self.online_b.padded_q(
+                latent_b, characters
+            )[0, :action_count]
+            values = torch.minimum(values_a, values_b)
+            disagreement = (values_a - values_b).abs().mean()
         response = self.stats()
         response["q_values"] = values.cpu().tolist()
+        response["q_value_disagreement"] = float(
+            disagreement.cpu()
+        )
         return response
 
     def begin(self, request: dict[str, Any]) -> dict[str, Any]:
         action = int(request["action"])
         character = int(request["character"])
         opponent = int(request["opponent"])
+        selected_q = float(request.get("selected_q", 0.0))
         if (
             action < 0
             or action >= self.config.action_sizes[character]
         ):
             raise ValueError("invalid recurrent transition action")
+        if not math.isfinite(selected_q):
+            raise ValueError("non-finite selected Q")
         self.active = {
             "sequence": self.snapshot(),
             "context": self.current_context.copy(),
             "action": action,
             "character": character,
             "opponent": opponent,
+            "selected_q": selected_q,
             "state_jpeg": self.current_jpeg,
         }
         return self.stats()
@@ -1101,11 +1374,14 @@ class Service:
                 terminal=bool(request["terminal"]),
                 character=self.active["character"],
                 opponent=self.active["opponent"],
+                selected_q=self.active.get("selected_q", 0.0),
                 state_jpeg=self.active.get("state_jpeg"),
                 next_action_mask=next_action_mask,
             )
-            self.append_replay(transition)
-            for _ in range(self.arguments.updates_per_transition):
+            appended = self.append_n_step(transition)
+            for _ in range(
+                self.arguments.updates_per_transition * appended
+            ):
                 trained = self.train_once() or trained
         self.active = None
         response = self.stats()
@@ -1118,6 +1394,7 @@ class Service:
         self.active = None
         self.current_jpeg = None
         self.current_frame_id = 0
+        self.pending_n_step.clear()
         self.cached_projected_visual = None
         self.cached_frame_id = 0
         return self.stats()
@@ -1137,12 +1414,32 @@ class Service:
             "service_version": SERVICE_VERSION,
             "config": asdict(self.config),
             "projection": self.projection.state_dict(),
-            "online": self.online.state_dict(),
-            "target": self.target.state_dict(),
+            "online_a": self.online_a.state_dict(),
+            "online_b": self.online_b.state_dict(),
+            "target_a": self.target_a.state_dict(),
+            "target_b": self.target_b.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "training_updates": self.training_updates,
             "last_loss": self.last_loss,
+            "last_predicted_q_mean": self.last_predicted_q_mean,
+            "last_td_target_mean": self.last_td_target_mean,
+            "last_bootstrap_mean": self.last_bootstrap_mean,
+            "last_q_target_gap": self.last_q_target_gap,
+            "last_abs_td_error": self.last_abs_td_error,
+            "last_q_target_clipped_fraction":
+                self.last_q_target_clipped_fraction,
+            "last_terminal_sample_fraction":
+                self.last_terminal_sample_fraction,
+            "last_terminal_predicted_q_mean":
+                self.last_terminal_predicted_q_mean,
+            "last_terminal_td_target_mean":
+                self.last_terminal_td_target_mean,
+            "last_critic_disagreement":
+                self.last_critic_disagreement,
+            "last_hard_negative_sample_fraction":
+                self.last_hard_negative_sample_fraction,
             "parameter_checksum": self.parameter_checksum,
+            "checkpoint_migrated": self.checkpoint_migrated,
             "replay": replay,
         }
         if self.visual_encoder is not None:
@@ -1183,17 +1480,64 @@ class Service:
         checkpoint = torch.load(
             path, map_location=self.device, weights_only=False
         )
+        version = int(checkpoint.get("service_version", 0))
+        if version == LEGACY_SERVICE_VERSION:
+            if self.arguments.training:
+                raise RuntimeError(
+                    "v7 checkpoint requires --migration-checkpoint for "
+                    "v8 training"
+                )
+            self.load_legacy_evaluation(checkpoint)
+            return
         if (
-            int(checkpoint.get("service_version", 0)) != SERVICE_VERSION
+            version != SERVICE_VERSION
             or checkpoint.get("config") != asdict(self.config)
         ):
             raise RuntimeError("recurrent checkpoint architecture mismatch")
         self.projection.load_state_dict(checkpoint["projection"])
-        self.online.load_state_dict(checkpoint["online"])
-        self.target.load_state_dict(checkpoint["target"])
+        self.online_a.load_state_dict(checkpoint["online_a"])
+        self.online_b.load_state_dict(checkpoint["online_b"])
+        self.target_a.load_state_dict(checkpoint["target_a"])
+        self.target_b.load_state_dict(checkpoint["target_b"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.training_updates = int(checkpoint["training_updates"])
         self.last_loss = float(checkpoint.get("last_loss", 0.0))
+        self.last_predicted_q_mean = float(
+            checkpoint.get("last_predicted_q_mean", 0.0)
+        )
+        self.last_td_target_mean = float(
+            checkpoint.get("last_td_target_mean", 0.0)
+        )
+        self.last_bootstrap_mean = float(
+            checkpoint.get("last_bootstrap_mean", 0.0)
+        )
+        self.last_q_target_gap = float(
+            checkpoint.get("last_q_target_gap", 0.0)
+        )
+        self.last_abs_td_error = float(
+            checkpoint.get("last_abs_td_error", 0.0)
+        )
+        self.last_q_target_clipped_fraction = float(
+            checkpoint.get("last_q_target_clipped_fraction", 0.0)
+        )
+        self.last_terminal_sample_fraction = float(
+            checkpoint.get("last_terminal_sample_fraction", 0.0)
+        )
+        self.last_terminal_predicted_q_mean = float(
+            checkpoint.get("last_terminal_predicted_q_mean", 0.0)
+        )
+        self.last_terminal_td_target_mean = float(
+            checkpoint.get("last_terminal_td_target_mean", 0.0)
+        )
+        self.last_critic_disagreement = float(
+            checkpoint.get("last_critic_disagreement", 0.0)
+        )
+        self.last_hard_negative_sample_fraction = float(
+            checkpoint.get("last_hard_negative_sample_fraction", 0.0)
+        )
+        self.checkpoint_migrated = bool(
+            checkpoint.get("checkpoint_migrated", False)
+        )
         if (
             self.visual_encoder is not None
             and "resnet" in checkpoint
@@ -1217,10 +1561,91 @@ class Service:
                 transition.state_jpeg = None
             if not hasattr(transition, "next_action_mask"):
                 transition.next_action_mask = None
+            if not hasattr(transition, "selected_q"):
+                transition.selected_q = 0.0
             self.append_replay(transition)
         self.checkpoint_loaded = True
-        self.online.eval()
-        self.target.eval()
+        self.online_a.eval()
+        self.online_b.eval()
+        self.target_a.eval()
+        self.target_b.eval()
+
+    def load_legacy_evaluation(self, checkpoint: dict[str, Any]) -> None:
+        """Keep read-only v7 evaluations byte-compatible after the upgrade."""
+        if checkpoint.get("config") != asdict(self.config):
+            raise RuntimeError("legacy recurrent checkpoint mismatch")
+        self.projection.load_state_dict(checkpoint["projection"])
+        self.online_a.load_state_dict(checkpoint["online"])
+        self.online_b.load_state_dict(checkpoint["online"])
+        self.target_a.load_state_dict(checkpoint["target"])
+        self.target_b.load_state_dict(checkpoint["target"])
+        self.training_updates = int(checkpoint.get("training_updates", 0))
+        if self.visual_encoder is not None and "resnet" in checkpoint:
+            self.visual_encoder.model.load_state_dict(
+                checkpoint["resnet"], strict=True
+            )
+            self.resnet_training_updates = int(
+                checkpoint.get("resnet_training_updates", 0)
+            )
+            self.resnet_checkpoint_loaded = True
+        for transition in checkpoint.get("replay", []):
+            if not hasattr(transition, "state_jpeg"):
+                transition.state_jpeg = None
+            if not hasattr(transition, "next_action_mask"):
+                transition.next_action_mask = None
+            if not hasattr(transition, "selected_q"):
+                transition.selected_q = 0.0
+            self.append_replay(transition)
+        self.checkpoint_loaded = True
+        self.online_a.eval()
+        self.online_b.eval()
+        self.target_a.eval()
+        self.target_b.eval()
+
+    def load_legacy_representation(self, path: Path) -> None:
+        """Migrate v7 perception/temporal features but reset optimistic Q."""
+        checkpoint = torch.load(
+            path, map_location=self.device, weights_only=False
+        )
+        if (
+            int(checkpoint.get("service_version", 0)) !=
+                LEGACY_SERVICE_VERSION
+            or checkpoint.get("config") != asdict(self.config)
+        ):
+            raise RuntimeError(
+                "legacy recurrent checkpoint architecture mismatch"
+            )
+        self.projection.load_state_dict(checkpoint["projection"])
+        source = checkpoint["online"]
+        for network in (self.online_a, self.online_b):
+            destination = network.state_dict()
+            transferable = {
+                name: value for name, value in source.items()
+                if not name.startswith("heads.") and
+                name in destination and
+                destination[name].shape == value.shape
+            }
+            destination.update(transferable)
+            network.load_state_dict(destination, strict=True)
+        self.target_a.load_state_dict(self.online_a.state_dict())
+        self.target_b.load_state_dict(self.online_b.state_dict())
+        if self.visual_encoder is not None and "resnet" in checkpoint:
+            self.visual_encoder.model.load_state_dict(
+                checkpoint["resnet"], strict=True
+            )
+            self.resnet_training_updates = int(
+                checkpoint.get("resnet_training_updates", 0)
+            )
+            self.resnet_checkpoint_loaded = True
+        # Replay, optimizer moments and Q heads intentionally start clean.
+        # Their old targets were produced by the v7 value scale/masks.
+        self.training_updates = 0
+        self.checkpoint_loaded = True
+        self.checkpoint_migrated = True
+        self.online_a.eval()
+        self.online_b.eval()
+        self.target_a.eval()
+        self.target_b.eval()
 
     def stats(self) -> dict[str, Any]:
         return {
@@ -1229,6 +1654,23 @@ class Service:
             "replay_size": len(self.replay),
             "matchup_count": len(self.matchup_counts),
             "last_loss": self.last_loss,
+            "last_predicted_q_mean": self.last_predicted_q_mean,
+            "last_td_target_mean": self.last_td_target_mean,
+            "last_bootstrap_mean": self.last_bootstrap_mean,
+            "last_q_target_gap": self.last_q_target_gap,
+            "last_abs_td_error": self.last_abs_td_error,
+            "last_q_target_clipped_fraction":
+                self.last_q_target_clipped_fraction,
+            "last_terminal_sample_fraction":
+                self.last_terminal_sample_fraction,
+            "last_terminal_predicted_q_mean":
+                self.last_terminal_predicted_q_mean,
+            "last_terminal_td_target_mean":
+                self.last_terminal_td_target_mean,
+            "last_critic_disagreement":
+                self.last_critic_disagreement,
+            "last_hard_negative_sample_fraction":
+                self.last_hard_negative_sample_fraction,
             "parameter_checksum": self.parameter_checksum,
             "trainable_resnet": self.visual_encoder is not None,
             "resnet_training_updates": self.resnet_training_updates,
@@ -1237,6 +1679,8 @@ class Service:
             "resnet_checkpoint_loaded":
                 self.resnet_checkpoint_loaded,
             "checkpoint_loaded": self.checkpoint_loaded,
+            "checkpoint_migrated": self.checkpoint_migrated,
+            "n_step_pending": len(self.pending_n_step),
             "sequence_size": len(self.current_sequence),
         }
 

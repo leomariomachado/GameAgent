@@ -20,7 +20,13 @@ struct ReinforcementAgentConfig {
     std::size_t batch_size = 64;
     std::size_t training_updates_per_transition = 1;
     std::uint64_t target_update_interval = 500;
-    float gamma = 0.99f;
+    float gamma = 0.995f;
+    float q_value_limit = 25.0f;
+    float terminal_replay_fraction = 0.25f;
+    float hard_negative_replay_fraction = 0.25f;
+    float hard_negative_q_threshold = 1.0f;
+    std::size_t n_step_options = 3;
+    bool conservative_bootstrap = true;
     float learning_rate = 1.0e-4f;
     float adam_beta1 = 0.9f;
     float adam_beta2 = 0.999f;
@@ -30,9 +36,32 @@ struct ReinforcementAgentConfig {
     float epsilon_final = 0.05f;
     std::uint64_t epsilon_decay_selections = 100000;
     float scripted_exploration_probability = 0.50f;
-    // A deliberate no-op remains available for timing, but it has a small
-    // opportunity cost so the policy cannot prefer indefinite inactivity.
-    float neutral_option_penalty = 0.05f;
+    // Neutral remains in the action head for checkpoint compatibility, but is
+    // masked during a spatially valid fight. The penalty still protects
+    // uncertain/fallback observations from learning a no-op shortcut.
+    float neutral_option_penalty = 0.20f;
+    bool suppress_neutral_during_fight = true;
+    float combo_max_distance = 0.22f;
+    float close_attack_max_distance = 0.24f;
+    float projectile_preferred_min_distance = 0.28f;
+    float projectile_q_preference_margin = 1.0f;
+    float disable_cloud_min_distance = 0.12f;
+    float disable_cloud_max_distance = 0.55f;
+    float advance_min_distance = 0.18f;
+    float defense_max_distance = 0.32f;
+    bool dynamic_facing = true;
+    std::size_t disable_cloud_cooldown_options = 2;
+    // Damage arrives at different delays for melee, teleport and projectile
+    // options. These post-program settle windows keep the option responsible
+    // for the corresponding health change.
+    std::size_t melee_impact_credit_steps = 2;
+    std::size_t teleport_impact_credit_steps = 4;
+    std::size_t projectile_impact_credit_min_steps = 4;
+    std::size_t projectile_impact_credit_max_steps = 8;
+    // Every Nth training episode runs nearly greedily while still writing its
+    // failures to replay. This closes the train/evaluation distribution gap.
+    std::size_t greedy_training_episode_interval = 10;
+    float greedy_training_epsilon = 0.05f;
     std::uint32_t random_seed = 0x524c444eU;
     FighterCharacter character = FighterCharacter::subzero;
     OpponentCharacter opponent_character = OpponentCharacter::unknown;
@@ -65,6 +94,7 @@ struct ReinforcementAgentConfig {
     std::size_t resnet_replay_images = 4096;
     std::filesystem::path recurrent_service_script;
     std::filesystem::path recurrent_checkpoint_path;
+    std::filesystem::path recurrent_migration_checkpoint_path;
     std::filesystem::path checkpoint_path;
     std::filesystem::path best_checkpoint_path;
 };
@@ -82,6 +112,11 @@ struct ReinforcementStepInput {
     std::uint64_t episode_id = 0;
     std::uint64_t frame_id = 0;
     std::uint64_t decision_id = 0;
+    float fighter_distance = 0.40f;
+    float player_x = 0.25f;
+    float opponent_x = 0.75f;
+    bool spatial_valid = false;
+    bool opponent_attacking = false;
 };
 
 struct ReinforcementDecision {
@@ -95,8 +130,25 @@ struct ReinforcementDecision {
     float selected_q = 0.0f;
     float reward_consumed = 0.0f;
     float neutral_penalty = 0.0f;
+    std::size_t allowed_options = 0;
+    std::size_t impact_credit_step = 0;
+    std::size_t impact_credit_steps = 0;
+    std::size_t disable_cloud_cooldown_remaining = 0;
+    bool commands_mirrored = false;
+    bool greedy_training_episode = false;
     float episode_return = 0.0f;
     float training_loss = 0.0f;
+    float predicted_q_mean = 0.0f;
+    float td_target_mean = 0.0f;
+    float bootstrap_mean = 0.0f;
+    float q_target_gap = 0.0f;
+    float abs_td_error = 0.0f;
+    float q_target_clipped_fraction = 0.0f;
+    float terminal_sample_fraction = 0.0f;
+    float terminal_predicted_q_mean = 0.0f;
+    float terminal_td_target_mean = 0.0f;
+    float critic_disagreement = 0.0f;
+    float hard_negative_sample_fraction = 0.0f;
     std::size_t replay_size = 0;
     std::uint64_t training_updates = 0;
     bool training_performed = false;
@@ -110,6 +162,17 @@ struct ReinforcementAgentStats {
     std::size_t replay_size = 0;
     float epsilon = 0.0f;
     float last_training_loss = 0.0f;
+    float last_predicted_q_mean = 0.0f;
+    float last_td_target_mean = 0.0f;
+    float last_bootstrap_mean = 0.0f;
+    float last_q_target_gap = 0.0f;
+    float last_abs_td_error = 0.0f;
+    float last_q_target_clipped_fraction = 0.0f;
+    float last_terminal_sample_fraction = 0.0f;
+    float last_terminal_predicted_q_mean = 0.0f;
+    float last_terminal_td_target_mean = 0.0f;
+    float last_critic_disagreement = 0.0f;
+    float last_hard_negative_sample_fraction = 0.0f;
     float current_episode_return = 0.0f;
     float best_episode_return = 0.0f;
     double shared_parameter_checksum = 0.0;
@@ -117,6 +180,7 @@ struct ReinforcementAgentStats {
     bool checkpoint_loaded = false;
     bool trainable_lstm = false;
     bool recurrent_checkpoint_loaded = false;
+    bool recurrent_checkpoint_migrated = false;
     bool trainable_resnet = false;
     bool resnet_checkpoint_loaded = false;
     std::uint64_t resnet_training_updates = 0;
@@ -140,6 +204,9 @@ public:
     ReinforcementAgent& operator=(ReinforcementAgent&&) noexcept;
 
     ReinforcementDecision step(const ReinforcementStepInput& input);
+    // Cancels the in-flight option without creating a replay transition or
+    // changing episode return/epsilon. Used when the visual stream freezes.
+    void suspend();
     void reset_episode(bool save_checkpoint);
     void save_checkpoint(const std::filesystem::path& path = {});
     void load_checkpoint(const std::filesystem::path& path);

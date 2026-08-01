@@ -493,28 +493,67 @@ void FightStateTracker::reset() {
     pending_transition_reason_.clear();
 }
 
+TrainingResetTracker::TrainingResetTracker(
+    bool reset_after_round_win,
+    std::int64_t non_fight_timeout_ms
+) : reset_after_round_win_(reset_after_round_win),
+    non_fight_timeout_ms_(non_fight_timeout_ms) {
+    if (non_fight_timeout_ms_ <= 0) {
+        throw std::invalid_argument(
+            "non-fight reset timeout must be positive"
+        );
+    }
+}
+
 std::optional<TrainingResetTrigger> TrainingResetTracker::observe(
-    const FightControlSnapshot& fight
+    const FightControlSnapshot& fight,
+    std::int64_t now_ms
 ) {
+    const bool reset_boundary =
+        fight.transition_reason == "round_lost" ||
+        (
+            reset_after_round_win_ &&
+            fight.transition_reason == "round_won"
+        );
     if (
-        !fight.episode_ended ||
-        !fight.terminal ||
-        fight.episode_id == 0 ||
-        fight.transition_reason != "round_lost" ||
-        fight.episode_id == last_reset_episode_id_
+        fight.episode_ended && fight.terminal &&
+        fight.episode_id != 0 && reset_boundary &&
+        fight.episode_id != last_reset_episode_id_
     ) {
+        last_reset_episode_id_ = fight.episode_id;
+        non_fight_since_ms_ = now_ms;
+        return TrainingResetTrigger{
+            .episode_id = fight.episode_id,
+            .frame_id = fight.frame_id,
+            .reason = fight.transition_reason,
+        };
+    }
+
+    if (fight.phase == FightPhase::active_fight) {
+        non_fight_since_ms_.reset();
         return std::nullopt;
     }
-    last_reset_episode_id_ = fight.episode_id;
+    if (
+        !non_fight_since_ms_.has_value() ||
+        now_ms < *non_fight_since_ms_
+    ) {
+        non_fight_since_ms_ = now_ms;
+        return std::nullopt;
+    }
+    if (now_ms - *non_fight_since_ms_ < non_fight_timeout_ms_) {
+        return std::nullopt;
+    }
+    non_fight_since_ms_ = now_ms;
     return TrainingResetTrigger{
         .episode_id = fight.episode_id,
         .frame_id = fight.frame_id,
-        .reason = "round_lost",
+        .reason = "non_fight_timeout",
     };
 }
 
 void TrainingResetTracker::reset() {
     last_reset_episode_id_ = 0;
+    non_fight_since_ms_.reset();
 }
 
 }  // namespace gameagent

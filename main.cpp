@@ -147,6 +147,9 @@ void print_help(const char* executable) {
         << "  --rl-reward-log-ms MS   Accumulated RL reward log interval (default: 5000)\n"
         << "  --rl-no-resume          Start RL weights/replay from scratch\n"
         << "  --no-training-reset     Disable training_reset_state after a lost round\n"
+        << "  --training-reset-non-fight-ms MS  Reset after this long outside an active fight (default: 5000)\n"
+        << "  --repeated-frame-pause-ms MS  Pause RL after identical RGB frames (default: 2000)\n"
+        << "  --repeated-frame-reset-ms MS  Request reset after identical RGB frames (default: 3000)\n"
         << "  --player-side SIDE      Controlled HUD side: left/P1 or right/P2\n"
         << "  --resnet50-checkpoint P ImageNet ResNet50 checkpoint path\n"
         << "  --temporal-checkpoint P Trained LSTM/action-head checkpoint\n"
@@ -239,6 +242,28 @@ int main(int argc, char** argv) {
             environment_or("GAMEAGENT_TRAINING_RESET_STATE", "1"),
             "training-reset-state flag"
         );
+        server_options.training_reset_non_fight_timeout =
+            std::chrono::milliseconds(parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_TRAINING_RESET_NON_FIGHT_TIMEOUT_MS",
+                    "5000"
+                ),
+                "training reset non-fight timeout"
+            ));
+        server_options.repeated_frame_pause_timeout =
+            std::chrono::milliseconds(parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_REPEATED_FRAME_PAUSE_MS", "2000"
+                ),
+                "repeated frame pause timeout"
+            ));
+        server_options.repeated_frame_reset_timeout =
+            std::chrono::milliseconds(parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_REPEATED_FRAME_RESET_MS", "3000"
+                ),
+                "repeated frame reset timeout"
+            ));
         server_options.reinforcement_reward_log_interval =
             std::chrono::milliseconds(parse_positive_size(
                 environment_or("GAMEAGENT_RL_REWARD_LOG_INTERVAL_MS", "5000"),
@@ -289,9 +314,125 @@ int main(int argc, char** argv) {
         server_options.reinforcement_neutral_option_penalty =
             parse_float_range(
                 environment_or(
-                    "GAMEAGENT_RL_NEUTRAL_OPTION_PENALTY", "0.05"
+                    "GAMEAGENT_RL_NEUTRAL_OPTION_PENALTY", "0.20"
                 ),
                 "RL neutral option penalty", 0.0f, 10.0f
+            );
+        server_options.reinforcement_suppress_neutral_during_fight =
+            parse_boolean(
+                environment_or(
+                    "GAMEAGENT_RL_SUPPRESS_NEUTRAL", "1"
+                ),
+                "RL suppress-neutral flag"
+            );
+        server_options.reinforcement_combo_max_distance =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_COMBO_MAX_DISTANCE", "0.22"
+                ),
+                "RL combo maximum distance", 0.01f, 1.0f
+            );
+        server_options.reinforcement_close_attack_max_distance =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_CLOSE_ATTACK_MAX_DISTANCE", "0.24"
+                ),
+                "RL close-attack maximum distance", 0.01f, 1.0f
+            );
+        server_options.reinforcement_projectile_preferred_min_distance =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_PROJECTILE_MIN_DISTANCE", "0.28"
+                ),
+                "RL projectile preferred distance", 0.01f, 1.0f
+            );
+        server_options.reinforcement_projectile_q_preference_margin =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_PROJECTILE_Q_MARGIN", "1.0"
+                ),
+                "RL projectile Q preference margin", 0.0f, 100.0f
+            );
+        server_options.reinforcement_disable_cloud_min_distance =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_DISABLE_CLOUD_MIN_DISTANCE", "0.12"
+                ),
+                "RL disable-cloud minimum distance", 0.0f, 1.0f
+            );
+        server_options.reinforcement_disable_cloud_max_distance =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_DISABLE_CLOUD_MAX_DISTANCE", "0.55"
+                ),
+                "RL disable-cloud maximum distance", 0.01f, 1.0f
+            );
+        server_options.reinforcement_advance_min_distance =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_ADVANCE_MIN_DISTANCE", "0.18"
+                ),
+                "RL advance minimum distance", 0.0f, 1.0f
+            );
+        server_options.reinforcement_defense_max_distance =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_DEFENSE_MAX_DISTANCE", "0.32"
+                ),
+                "RL defense maximum distance", 0.01f, 1.0f
+            );
+        server_options.reinforcement_dynamic_facing = parse_boolean(
+            environment_or("GAMEAGENT_RL_DYNAMIC_FACING", "1"),
+            "RL dynamic-facing flag"
+        );
+        server_options.reinforcement_disable_cloud_cooldown_options =
+            parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_RL_DISABLE_CLOUD_COOLDOWN_OPTIONS", "2"
+                ),
+                "RL disable-cloud cooldown options"
+            );
+        server_options.reinforcement_melee_impact_credit_steps =
+            parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_RL_MELEE_CREDIT_STEPS", "2"
+                ),
+                "RL melee impact credit steps"
+            );
+        server_options.reinforcement_teleport_impact_credit_steps =
+            parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_RL_TELEPORT_CREDIT_STEPS", "4"
+                ),
+                "RL teleport impact credit steps"
+            );
+        server_options.reinforcement_projectile_impact_credit_min_steps =
+            parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_RL_PROJECTILE_CREDIT_MIN_STEPS", "4"
+                ),
+                "RL projectile minimum impact credit steps"
+            );
+        server_options.reinforcement_projectile_impact_credit_max_steps =
+            parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_RL_PROJECTILE_CREDIT_MAX_STEPS", "8"
+                ),
+                "RL projectile maximum impact credit steps"
+            );
+        server_options.reinforcement_greedy_training_episode_interval =
+            parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_RL_GREEDY_EPISODE_INTERVAL", "10"
+                ),
+                "RL greedy training episode interval"
+            );
+        server_options.reinforcement_greedy_training_epsilon =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_GREEDY_EPISODE_EPSILON", "0.05"
+                ),
+                "RL greedy training epsilon", 0.0f, 1.0f
             );
         server_options.player_is_left = parse_player_is_left(
             environment_or("GAMEAGENT_PLAYER_SIDE", "left")
@@ -302,6 +443,9 @@ int main(int argc, char** argv) {
         );
         server_options.temporal_policy_checkpoint = environment_or(
             "GAMEAGENT_TEMPORAL_CHECKPOINT", ""
+        );
+        server_options.reinforcement_migration_checkpoint = environment_or(
+            "GAMEAGENT_RL_MIGRATION_CHECKPOINT", ""
         );
         server_options.temporal_device_id = parse_non_negative_int(
             environment_or("GAMEAGENT_DEVICE_ID", "0"), "CUDA device"
@@ -346,7 +490,7 @@ int main(int argc, char** argv) {
             "RL batch size"
         );
         server_options.reinforcement_target_update_interval = parse_positive_size(
-            environment_or("GAMEAGENT_RL_TARGET_UPDATE", "500"),
+            environment_or("GAMEAGENT_RL_TARGET_UPDATE", "1000"),
             "RL target update interval"
         );
         server_options.reinforcement_epsilon_decay_selections = parse_positive_size(
@@ -354,9 +498,45 @@ int main(int argc, char** argv) {
             "RL epsilon decay"
         );
         server_options.reinforcement_gamma = parse_float_range(
-            environment_or("GAMEAGENT_RL_GAMMA", "0.99"),
+            environment_or("GAMEAGENT_RL_GAMMA", "0.995"),
             "RL gamma", 0.01f, 1.0f
         );
+        server_options.reinforcement_q_value_limit = parse_float_range(
+            environment_or("GAMEAGENT_RL_Q_VALUE_LIMIT", "25.0"),
+            "RL Q-value limit", 0.1f, 1000.0f
+        );
+        server_options.reinforcement_terminal_replay_fraction =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_TERMINAL_REPLAY_FRACTION", "0.25"
+                ),
+                "RL terminal replay fraction", 0.0f, 1.0f
+            );
+        server_options.reinforcement_hard_negative_replay_fraction =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_HARD_NEGATIVE_REPLAY_FRACTION", "0.25"
+                ),
+                "RL hard-negative replay fraction", 0.0f, 1.0f
+            );
+        server_options.reinforcement_hard_negative_q_threshold =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_HARD_NEGATIVE_Q_THRESHOLD", "1.0"
+                ),
+                "RL hard-negative Q threshold", 0.0f, 1000.0f
+            );
+        server_options.reinforcement_n_step_options = parse_positive_size(
+            environment_or("GAMEAGENT_RL_N_STEP_OPTIONS", "3"),
+            "RL n-step option count"
+        );
+        server_options.reinforcement_conservative_bootstrap =
+            parse_boolean(
+                environment_or(
+                    "GAMEAGENT_RL_CONSERVATIVE_BOOTSTRAP", "1"
+                ),
+                "RL conservative-bootstrap flag"
+            );
         server_options.reinforcement_learning_rate = parse_float_range(
             environment_or("GAMEAGENT_RL_LEARNING_RATE", "0.0001"),
             "RL learning rate", 1.0e-7f, 1.0f
@@ -491,6 +671,24 @@ int main(int argc, char** argv) {
                 server_options.reinforcement_resume = false;
             } else if (argument == "--no-training-reset") {
                 server_options.training_reset_state_enabled = false;
+            } else if (argument == "--training-reset-non-fight-ms") {
+                server_options.training_reset_non_fight_timeout =
+                    std::chrono::milliseconds(parse_positive_size(
+                        require_value(argument),
+                        "training reset non-fight timeout"
+                    ));
+            } else if (argument == "--repeated-frame-pause-ms") {
+                server_options.repeated_frame_pause_timeout =
+                    std::chrono::milliseconds(parse_positive_size(
+                        require_value(argument),
+                        "repeated frame pause timeout"
+                    ));
+            } else if (argument == "--repeated-frame-reset-ms") {
+                server_options.repeated_frame_reset_timeout =
+                    std::chrono::milliseconds(parse_positive_size(
+                        require_value(argument),
+                        "repeated frame reset timeout"
+                    ));
             } else if (argument == "--player-side") {
                 server_options.player_is_left = parse_player_is_left(
                     require_value(argument)

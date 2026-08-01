@@ -197,7 +197,7 @@ int main() {
             .terminal = true,
             .transition_reason = "round_lost",
         };
-        const auto reset_trigger = reset_tracker.observe(lost_round);
+        const auto reset_trigger = reset_tracker.observe(lost_round, 2000);
         require(
             reset_trigger.has_value() &&
                 reset_trigger->episode_id == 9 &&
@@ -206,15 +206,60 @@ int main() {
             "lost round did not request a training-state reset"
         );
         require(
-            !reset_tracker.observe(lost_round).has_value(),
+            !reset_tracker.observe(lost_round, 2100).has_value(),
             "lost round generated more than one reset request"
         );
         auto won_round = lost_round;
         won_round.episode_id = 10;
         won_round.transition_reason = "round_won";
         require(
-            !reset_tracker.observe(won_round).has_value(),
+            !reset_tracker.observe(won_round, 2200).has_value(),
             "won round incorrectly requested a training-state reset"
+        );
+        gameagent::TrainingResetTracker evaluation_reset_tracker(true);
+        const auto evaluation_win_reset =
+            evaluation_reset_tracker.observe(won_round, 2300);
+        require(
+            evaluation_win_reset.has_value() &&
+                evaluation_win_reset->episode_id == 10 &&
+                evaluation_win_reset->reason == "round_won",
+            "evaluation did not reset after a completed winning round"
+        );
+
+        gameagent::TrainingResetTracker watchdog(false, 5000);
+        gameagent::FightControlSnapshot non_fight{
+            .frame_id = 80,
+            .episode_id = 11,
+            .phase = gameagent::FightPhase::no_hud,
+        };
+        require(
+            !watchdog.observe(non_fight, 10000).has_value() &&
+                !watchdog.observe(non_fight, 14999).has_value(),
+            "non-fight watchdog fired before five seconds"
+        );
+        const auto watchdog_trigger = watchdog.observe(non_fight, 15000);
+        require(
+            watchdog_trigger.has_value() &&
+                watchdog_trigger->episode_id == 11 &&
+                watchdog_trigger->frame_id == 80 &&
+                watchdog_trigger->reason == "non_fight_timeout",
+            "non-fight watchdog did not request reset after five seconds"
+        );
+        require(
+            !watchdog.observe(non_fight, 19999).has_value() &&
+                watchdog.observe(non_fight, 20000).has_value(),
+            "persistent non-fight watchdog did not restart its timeout"
+        );
+        non_fight.phase = gameagent::FightPhase::active_fight;
+        require(
+            !watchdog.observe(non_fight, 20100).has_value(),
+            "active fight incorrectly triggered the non-fight watchdog"
+        );
+        non_fight.phase = gameagent::FightPhase::round_intro;
+        require(
+            !watchdog.observe(non_fight, 25100).has_value() &&
+                watchdog.observe(non_fight, 30100).has_value(),
+            "active fight did not reset the non-fight watchdog window"
         );
 
         tracker.observe(make_frame(21, 1600, 0.0f, 0.0f, false));

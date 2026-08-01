@@ -32,6 +32,9 @@ struct WebSocketServerOptions {
     bool reinforcement_trainable_lstm = true;
     bool reinforcement_trainable_resnet = false;
     bool training_reset_state_enabled = true;
+    std::chrono::milliseconds training_reset_non_fight_timeout{5000};
+    std::chrono::milliseconds repeated_frame_pause_timeout{2000};
+    std::chrono::milliseconds repeated_frame_reset_timeout{3000};
     bool player_is_left = true;
     std::filesystem::path resnet50_checkpoint =
         "/workspace/resnet50_best.ckpt";
@@ -49,7 +52,15 @@ struct WebSocketServerOptions {
     std::size_t reinforcement_batch_size = 64;
     std::uint64_t reinforcement_target_update_interval = 500;
     std::uint64_t reinforcement_epsilon_decay_selections = 100000;
-    float reinforcement_gamma = 0.99f;
+    // Decisions run at 10 Hz. 0.995 keeps a roughly 20-second value horizon
+    // and limits long bootstrap chains that previously inflated greedy Q.
+    float reinforcement_gamma = 0.995f;
+    float reinforcement_q_value_limit = 25.0f;
+    float reinforcement_terminal_replay_fraction = 0.25f;
+    float reinforcement_hard_negative_replay_fraction = 0.25f;
+    float reinforcement_hard_negative_q_threshold = 1.0f;
+    std::size_t reinforcement_n_step_options = 3;
+    bool reinforcement_conservative_bootstrap = true;
     float reinforcement_learning_rate = 1.0e-4f;
     float reinforcement_resnet_learning_rate = 1.0e-6f;
     std::size_t reinforcement_resnet_batch_size = 4;
@@ -61,11 +72,29 @@ struct WebSocketServerOptions {
     float reinforcement_defense_reward_per_second = 0.05f;
     float reinforcement_idle_penalty_per_second = 0.01f;
     float reinforcement_corner_penalty_per_second = 0.02f;
-    float reinforcement_neutral_option_penalty = 0.05f;
+    float reinforcement_neutral_option_penalty = 0.20f;
+    bool reinforcement_suppress_neutral_during_fight = true;
+    float reinforcement_combo_max_distance = 0.22f;
+    float reinforcement_close_attack_max_distance = 0.24f;
+    float reinforcement_projectile_preferred_min_distance = 0.28f;
+    float reinforcement_projectile_q_preference_margin = 1.0f;
+    float reinforcement_disable_cloud_min_distance = 0.12f;
+    float reinforcement_disable_cloud_max_distance = 0.55f;
+    float reinforcement_advance_min_distance = 0.18f;
+    float reinforcement_defense_max_distance = 0.32f;
+    bool reinforcement_dynamic_facing = true;
+    std::size_t reinforcement_disable_cloud_cooldown_options = 2;
+    std::size_t reinforcement_melee_impact_credit_steps = 2;
+    std::size_t reinforcement_teleport_impact_credit_steps = 4;
+    std::size_t reinforcement_projectile_impact_credit_min_steps = 4;
+    std::size_t reinforcement_projectile_impact_credit_max_steps = 8;
+    std::size_t reinforcement_greedy_training_episode_interval = 10;
+    float reinforcement_greedy_training_epsilon = 0.05f;
     float reinforcement_epsilon_start = 1.0f;
     float reinforcement_epsilon_final = 0.05f;
     float reinforcement_scripted_exploration_probability = 0.50f;
     std::filesystem::path metrics_path = "metrics.jsonl";
+    std::filesystem::path reinforcement_migration_checkpoint;
     std::filesystem::path capture_directory = "captures";
     std::filesystem::path training_capture_directory =
         "/workspace/gameagent/training_captures";

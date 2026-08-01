@@ -20,7 +20,12 @@ SERVICE = ROOT / "scripts" / "recurrent_dqn_service.py"
 
 class Client:
     def __init__(
-        self, checkpoint: Path, training: bool, writes: bool, resume: bool
+        self,
+        checkpoint: Path,
+        training: bool,
+        writes: bool,
+        resume: bool,
+        n_step_options: int = 1,
     ) -> None:
         command = [
             sys.executable,
@@ -64,6 +69,10 @@ class Client:
             "2",
             "--target-update",
             "2",
+            "--n-step-options",
+            str(n_step_options),
+            "--hard-negative-replay-fraction",
+            "0.25",
             "--learning-rate",
             "0.001",
             "--seed",
@@ -127,15 +136,21 @@ def observation(client: Client, seed: int, episode_started: bool) -> None:
     )
 
 
-def add_transition(client: Client, seed: int, terminal: bool) -> dict:
-    observation(client, seed, True)
+def add_transition(
+    client: Client,
+    seed: int,
+    terminal: bool,
+    episode_started: bool = True,
+) -> dict:
+    observation(client, seed, episode_started)
     observation(client, seed + 1, False)
+    action_count = (3, 4, 2, 5)[seed % 4]
     q = client.request(
         {
             "op": "q_values",
             "character": seed % 4,
             "opponent": seed % 6,
-            "action_count": (3, 4, 2, 5)[seed % 4],
+            "action_count": action_count,
         }
     )
     action = max(
@@ -148,6 +163,7 @@ def add_transition(client: Client, seed: int, terminal: bool) -> dict:
             "action": action,
             "character": seed % 4,
             "opponent": seed % 6,
+            "selected_q": float(q["q_values"][action]),
         }
     )
     observation(client, seed + 2, False)
@@ -157,6 +173,7 @@ def add_transition(client: Client, seed: int, terminal: bool) -> dict:
             "duration": 3,
             "reward": 0.5 if seed % 2 else -0.25,
             "terminal": terminal,
+            "next_action_mask": [True] * action_count,
         }
     )
 
@@ -177,10 +194,42 @@ def main() -> int:
             result["training_updates"] != 1
             or not result["training_performed"]
             or not math.isfinite(float(result["last_loss"]))
+            or not all(
+                math.isfinite(float(result[name]))
+                for name in (
+                    "last_predicted_q_mean",
+                    "last_td_target_mean",
+                    "last_bootstrap_mean",
+                    "last_q_target_gap",
+                    "last_abs_td_error",
+                    "last_q_target_clipped_fraction",
+                    "last_terminal_sample_fraction",
+                    "last_terminal_predicted_q_mean",
+                    "last_terminal_td_target_mean",
+                    "last_critic_disagreement",
+                    "last_hard_negative_sample_fraction",
+                )
+            )
+            or not 0.0
+            <= float(result["last_q_target_clipped_fraction"])
+            <= 1.0
             or float(result["parameter_checksum"]) == initial_checksum
+            or float(result["last_critic_disagreement"]) <= 0.0
         ):
             raise RuntimeError("BPTT did not update recurrent parameters")
-        add_transition(client, 3, True)
+        terminal_result = add_transition(client, 3, True)
+        if (
+            float(terminal_result["last_terminal_sample_fraction"])
+            <= 0.0
+            or not math.isclose(
+                float(terminal_result["last_terminal_td_target_mean"]),
+                0.5,
+                abs_tol=1.0e-6,
+            )
+        ):
+            raise RuntimeError(
+                "terminal replay did not use the unbootstrapped reward"
+            )
         client.request(
             {
                 "op": "save",
@@ -226,6 +275,28 @@ def main() -> int:
             raise RuntimeError(
                 "read-only recurrent evaluation changed policy state"
             )
+
+        n_step_checkpoint = directory / "n_step.pt"
+        n_step = Client(
+            n_step_checkpoint,
+            training=True,
+            writes=False,
+            resume=False,
+            n_step_options=3,
+        )
+        first = add_transition(n_step, 20, False, True)
+        second = add_transition(n_step, 20, False, False)
+        third = add_transition(n_step, 20, False, False)
+        terminal = add_transition(n_step, 20, True, False)
+        n_step.shutdown()
+        if (
+            first["replay_size"] != 0
+            or second["replay_size"] != 0
+            or third["replay_size"] != 1
+            or terminal["replay_size"] != 4
+            or terminal["training_updates"] <= 0
+        ):
+            raise RuntimeError("three-option n-step replay is inconsistent")
         print(
             "[INFO] "
             f"device={client.ready['device']} "

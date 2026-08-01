@@ -6,6 +6,7 @@
 #include "HealthBarDetector.h"
 #include "MockAgent.h"
 #include "ReinforcementAgent.h"
+#include "RepeatedFrameDetector.h"
 #include "StreamProtocol.h"
 #include "TemporalAgent.h"
 
@@ -911,6 +912,17 @@ void handle_websocket_connection(
                     : "shared_policy_best_" +
                           character_slug + ".garl"
             );
+        const auto recurrent_checkpoint =
+            options.reinforcement_checkpoint_directory /
+            "shared_recurrent_latest.pt";
+        // A no-resume launch is fresh only while the directory has no
+        // checkpoint. Once the first connection has persisted progress, every
+        // reconnect resumes it automatically instead of silently resetting
+        // epsilon, replay and neural weights.
+        const bool effective_resume =
+            options.reinforcement_resume ||
+            std::filesystem::is_regular_file(latest_checkpoint) ||
+            std::filesystem::is_regular_file(recurrent_checkpoint);
         try {
             reinforcement_agent_storage =
                 std::make_unique<ReinforcementAgent>(
@@ -931,6 +943,21 @@ void handle_websocket_connection(
                             options
                                 .reinforcement_target_update_interval,
                         .gamma = options.reinforcement_gamma,
+                        .q_value_limit =
+                            options.reinforcement_q_value_limit,
+                        .terminal_replay_fraction =
+                            options
+                                .reinforcement_terminal_replay_fraction,
+                        .hard_negative_replay_fraction =
+                            options
+                                .reinforcement_hard_negative_replay_fraction,
+                        .hard_negative_q_threshold =
+                            options
+                                .reinforcement_hard_negative_q_threshold,
+                        .n_step_options =
+                            options.reinforcement_n_step_options,
+                        .conservative_bootstrap =
+                            options.reinforcement_conservative_bootstrap,
                         .learning_rate =
                             options.reinforcement_learning_rate,
                         .epsilon_start =
@@ -945,6 +972,47 @@ void handle_websocket_connection(
                                 .reinforcement_scripted_exploration_probability,
                         .neutral_option_penalty =
                             options.reinforcement_neutral_option_penalty,
+                        .suppress_neutral_during_fight =
+                            options
+                                .reinforcement_suppress_neutral_during_fight,
+                        .combo_max_distance =
+                            options.reinforcement_combo_max_distance,
+                        .close_attack_max_distance =
+                            options.reinforcement_close_attack_max_distance,
+                        .projectile_preferred_min_distance =
+                            options
+                                .reinforcement_projectile_preferred_min_distance,
+                        .projectile_q_preference_margin =
+                            options
+                                .reinforcement_projectile_q_preference_margin,
+                        .disable_cloud_min_distance =
+                            options.reinforcement_disable_cloud_min_distance,
+                        .disable_cloud_max_distance =
+                            options.reinforcement_disable_cloud_max_distance,
+                        .advance_min_distance =
+                            options.reinforcement_advance_min_distance,
+                        .defense_max_distance =
+                            options.reinforcement_defense_max_distance,
+                        .dynamic_facing =
+                            options.reinforcement_dynamic_facing,
+                        .disable_cloud_cooldown_options =
+                            options
+                                .reinforcement_disable_cloud_cooldown_options,
+                        .melee_impact_credit_steps =
+                            options.reinforcement_melee_impact_credit_steps,
+                        .teleport_impact_credit_steps =
+                            options.reinforcement_teleport_impact_credit_steps,
+                        .projectile_impact_credit_min_steps =
+                            options
+                                .reinforcement_projectile_impact_credit_min_steps,
+                        .projectile_impact_credit_max_steps =
+                            options
+                                .reinforcement_projectile_impact_credit_max_steps,
+                        .greedy_training_episode_interval =
+                            options
+                                .reinforcement_greedy_training_episode_interval,
+                        .greedy_training_epsilon =
+                            options.reinforcement_greedy_training_epsilon,
                         .random_seed =
                             options.random_seed.value_or(0x524c444eU),
                         .character = player_character,
@@ -957,7 +1025,7 @@ void handle_websocket_connection(
                         .checkpoint_interval_episodes =
                             options
                                 .reinforcement_checkpoint_interval_episodes,
-                        .resume = options.reinforcement_resume,
+                        .resume = effective_resume,
                         .save_replay = true,
                         .trainable_lstm =
                             options.reinforcement_trainable_lstm,
@@ -993,9 +1061,9 @@ void handle_websocket_connection(
                         .recurrent_service_script =
                             options.recurrent_service_script,
                         .recurrent_checkpoint_path =
-                            options
-                                .reinforcement_checkpoint_directory /
-                            "shared_recurrent_latest.pt",
+                            recurrent_checkpoint,
+                        .recurrent_migration_checkpoint_path =
+                            options.reinforcement_migration_checkpoint,
                         .checkpoint_path = latest_checkpoint,
                         .best_checkpoint_path = best_checkpoint,
                     }
@@ -1067,13 +1135,34 @@ void handle_websocket_connection(
                  options.reinforcement_epsilon_start},
                 {"rl_epsilon_final",
                  options.reinforcement_epsilon_final},
+                {"rl_gamma", options.reinforcement_gamma},
+                {"rl_q_value_limit",
+                 options.reinforcement_q_value_limit},
+                {"rl_terminal_replay_fraction",
+                 options.reinforcement_terminal_replay_fraction},
+                {"rl_hard_negative_replay_fraction",
+                 options.reinforcement_hard_negative_replay_fraction},
+                {"rl_n_step_options",
+                 options.reinforcement_n_step_options},
+                {"rl_conservative_bootstrap",
+                 options.reinforcement_conservative_bootstrap},
+                {"rl_twin_critics", true},
                 {"rl_checkpoint_interval_episodes",
                  options
                      .reinforcement_checkpoint_interval_episodes},
                 {"training_reset_state_enabled",
                  reinforcement_agent != nullptr &&
                      options.training_reset_state_enabled},
-                {"training_reset_trigger", "round_lost"},
+                {"training_reset_non_fight_timeout_ms",
+                 options.training_reset_non_fight_timeout.count()},
+                {"repeated_frame_pause_ms",
+                 options.repeated_frame_pause_timeout.count()},
+                {"repeated_frame_reset_ms",
+                 options.repeated_frame_reset_timeout.count()},
+                {"training_reset_trigger",
+                 options.reinforcement_training_enabled
+                     ? "round_lost_or_non_fight_timeout"
+                     : "round_terminal_or_non_fight_timeout"},
                 {"training_reset_ack_type", "training_reset_ack"},
                 {"checkpoint_loaded",
                  reinforcement_agent != nullptr &&
@@ -1187,6 +1276,39 @@ void handle_websocket_connection(
          options.reinforcement_corner_penalty_per_second},
         {"neutral_option_penalty",
          options.reinforcement_neutral_option_penalty},
+        {"neutral_suppressed_during_fight",
+         options.reinforcement_suppress_neutral_during_fight},
+        {"combo_max_distance",
+         options.reinforcement_combo_max_distance},
+        {"close_attack_max_distance",
+         options.reinforcement_close_attack_max_distance},
+        {"projectile_preferred_min_distance",
+         options.reinforcement_projectile_preferred_min_distance},
+        {"projectile_q_preference_margin",
+         options.reinforcement_projectile_q_preference_margin},
+        {"disable_cloud_min_distance",
+         options.reinforcement_disable_cloud_min_distance},
+        {"disable_cloud_max_distance",
+         options.reinforcement_disable_cloud_max_distance},
+        {"advance_min_distance",
+         options.reinforcement_advance_min_distance},
+        {"defense_max_distance",
+         options.reinforcement_defense_max_distance},
+        {"dynamic_facing", options.reinforcement_dynamic_facing},
+        {"disable_cloud_cooldown_options",
+         options.reinforcement_disable_cloud_cooldown_options},
+        {"melee_impact_credit_steps",
+         options.reinforcement_melee_impact_credit_steps},
+        {"teleport_impact_credit_steps",
+         options.reinforcement_teleport_impact_credit_steps},
+        {"projectile_impact_credit_min_steps",
+         options.reinforcement_projectile_impact_credit_min_steps},
+        {"projectile_impact_credit_max_steps",
+         options.reinforcement_projectile_impact_credit_max_steps},
+        {"greedy_training_episode_interval",
+         options.reinforcement_greedy_training_episode_interval},
+        {"greedy_training_epsilon",
+         options.reinforcement_greedy_training_epsilon},
         {"trainable_lstm",
          reinforcement_agent != nullptr &&
              reinforcement_agent->stats().trainable_lstm},
@@ -1200,6 +1322,12 @@ void handle_websocket_connection(
         {"training_reset_state_enabled",
          reinforcement_agent != nullptr &&
              options.training_reset_state_enabled},
+        {"training_reset_non_fight_timeout_ms",
+         options.training_reset_non_fight_timeout.count()},
+        {"repeated_frame_pause_ms",
+         options.repeated_frame_pause_timeout.count()},
+        {"repeated_frame_reset_ms",
+         options.repeated_frame_reset_timeout.count()},
         {"rl_checkpoint",
          reinforcement_agent != nullptr
              ? reinforcement_agent->config().checkpoint_path.string()
@@ -1241,10 +1369,20 @@ void handle_websocket_connection(
         << '\n';
 
     CircularFrameBuffer buffer(options.frame_buffer_capacity);
+    std::unique_ptr<RepeatedFrameDetector> repeated_frame_detector;
     std::unique_ptr<FightStateTracker> fight_tracker;
     std::unique_ptr<CombatStateTracker> combat_tracker;
     std::unique_ptr<TrainingResetTracker> training_reset_tracker;
     if (reinforcement_agent != nullptr) {
+        repeated_frame_detector =
+            std::make_unique<RepeatedFrameDetector>(
+                RepeatedFrameDetectorConfig{
+                    .pause_after =
+                        options.repeated_frame_pause_timeout,
+                    .reset_after =
+                        options.repeated_frame_reset_timeout,
+                }
+            );
         fight_tracker = std::make_unique<FightStateTracker>(FightStateConfig{
             .player_side = player_is_left
                 ? PlayerSide::left
@@ -1279,7 +1417,10 @@ void handle_websocket_connection(
         );
         if (options.training_reset_state_enabled) {
             training_reset_tracker =
-                std::make_unique<TrainingResetTracker>();
+                std::make_unique<TrainingResetTracker>(
+                    !options.reinforcement_training_enabled,
+                    options.training_reset_non_fight_timeout.count()
+                );
         }
         reinforcement_agent->reset_episode(false);
     }
@@ -1295,6 +1436,7 @@ void handle_websocket_connection(
     std::atomic<std::uint64_t> acknowledgements_received{0};
     std::atomic<std::uint64_t> acknowledgements_rejected{0};
     std::atomic<std::uint64_t> training_reset_requests{0};
+    std::atomic<std::uint64_t> training_reset_retries{0};
     std::atomic<std::uint64_t> training_reset_acknowledgements{0};
     std::atomic<std::uint64_t>
         training_reset_acknowledgements_rejected{0};
@@ -1308,6 +1450,11 @@ void handle_websocket_connection(
     std::atomic<std::uint64_t> persistence_frames_dropped{0};
     std::atomic<std::uint64_t> persistence_frames_saved{0};
     std::atomic<std::uint64_t> persistence_errors{0};
+    std::atomic_bool repeated_frame_training_paused{false};
+    std::atomic<std::int64_t> repeated_frame_duration_ms{0};
+    std::atomic<std::uint64_t> repeated_frame_count{0};
+    std::atomic<std::uint64_t> repeated_frame_reset_generation{0};
+    std::atomic<std::uint64_t> repeated_frame_reset_frame_id{0};
     Clock::time_point next_debug_capture = Clock::time_point::min();
     std::atomic_bool workers_stopping{false};
 
@@ -1442,6 +1589,15 @@ void handle_websocket_connection(
     std::jthread inference_thread([&](std::stop_token thread_stop) {
         std::uint64_t decision_id = 0;
         auto next_decision = Clock::now() + options.decision_interval;
+        std::optional<nlohmann::json> pending_training_reset_request;
+        std::optional<std::string>
+            pending_training_reset_detected_reason;
+        std::size_t pending_training_reset_attempt = 0;
+        std::uint64_t handled_repeated_frame_reset_generation = 0;
+        bool inference_repeated_frame_paused = false;
+        auto next_training_reset_retry = Clock::time_point::min();
+        const auto training_reset_retry_interval =
+            std::chrono::milliseconds(500);
         auto next_reward_log =
             Clock::now() + options.reinforcement_reward_log_interval;
         float reward_log_accumulator = 0.0f;
@@ -1485,15 +1641,75 @@ void handle_websocket_connection(
                     }
                     if (training_reset_tracker != nullptr) {
                         training_reset_trigger =
-                            training_reset_tracker->observe(fight);
+                            training_reset_tracker->observe(
+                                fight,
+                                decision_tick_ms
+                            );
                     }
                     if (fight.episode_ended && temporal_agent != nullptr) {
                         temporal_agent->reset();
                     }
                 }
+                const bool repeated_frame_paused =
+                    repeated_frame_training_paused.load();
+                if (
+                    repeated_frame_paused !=
+                        inference_repeated_frame_paused
+                ) {
+                    inference_repeated_frame_paused =
+                        repeated_frame_paused;
+                    if (
+                        repeated_frame_paused &&
+                        reinforcement_agent != nullptr
+                    ) {
+                        reinforcement_agent->suspend();
+                    }
+                    if (temporal_agent != nullptr) {
+                        temporal_agent->reset();
+                    }
+                }
+                const std::uint64_t repeated_reset_generation =
+                    repeated_frame_reset_generation.load();
+                if (
+                    repeated_reset_generation >
+                        handled_repeated_frame_reset_generation
+                ) {
+                    handled_repeated_frame_reset_generation =
+                        repeated_reset_generation;
+                    if (
+                        training_reset_tracker != nullptr &&
+                        !training_reset_trigger.has_value()
+                    ) {
+                        training_reset_trigger = TrainingResetTrigger{
+                            .episode_id = fight.episode_id,
+                            .frame_id =
+                                repeated_frame_reset_frame_id.load(),
+                            .reason = "repeated_frame_timeout",
+                        };
+                    }
+                }
+                if (
+                    pending_training_reset_request.has_value() &&
+                    last_training_reset_ack_id.load() >=
+                        pending_training_reset_request
+                            ->at("reset_id")
+                            .get<std::uint64_t>()
+                ) {
+                    pending_training_reset_request.reset();
+                    pending_training_reset_detected_reason.reset();
+                    pending_training_reset_attempt = 0;
+                }
+                const bool training_reset_pending =
+                    pending_training_reset_request.has_value() ||
+                    last_training_reset_id.load() >
+                        last_training_reset_ack_id.load();
                 std::optional<TemporalAgentOutput> temporal_output;
                 const bool temporal_control_allowed =
-                    reinforcement_agent == nullptr || fight.action_allowed;
+                    (
+                        reinforcement_agent == nullptr ||
+                        fight.action_allowed
+                    ) && !training_reset_pending &&
+                    !repeated_frame_paused;
                 if (temporal_agent != nullptr && temporal_control_allowed &&
                     temporal_agent->ready()) {
                     try {
@@ -1552,13 +1768,21 @@ void handle_websocket_connection(
                             .reward = total_reward,
                             .action_allowed =
                                 fight.action_allowed &&
-                                temporal_output.has_value(),
+                                temporal_output.has_value() &&
+                                !training_reset_pending &&
+                                !repeated_frame_paused,
                             .episode_started = fight.episode_started,
                             .episode_ended = fight.episode_ended,
                             .terminal = fight.terminal,
                             .episode_id = fight.episode_id,
                             .frame_id = fight.frame_id,
                             .decision_id = current_decision_id,
+                            .fighter_distance = combat.distance,
+                            .player_x = combat.player_x,
+                            .opponent_x = combat.opponent_x,
+                            .spatial_valid = combat.spatial_valid,
+                            .opponent_attacking =
+                                combat.opponent_attacking,
                         });
                         commands = reinforcement_decision.commands;
                     } catch (const std::exception& error) {
@@ -1570,6 +1794,9 @@ void handle_websocket_connection(
                             << " decision=" << current_decision_id
                             << " failed; controls released: "
                             << error.what() << '\n';
+                    }
+                    if (repeated_frame_paused) {
+                        commands.clear();
                     }
                 } else {
                     mock_decision = agent.infer(observation, applied_actions);
@@ -1597,7 +1824,9 @@ void handle_websocket_connection(
                         reinforcement_decision.neutral_penalty;
                     ++reward_log_decisions;
                     reward_log_active_decisions +=
-                        fight.action_allowed ? 1U : 0U;
+                        fight.action_allowed && !repeated_frame_paused
+                            ? 1U
+                            : 0U;
                     const auto reward_log_now = Clock::now();
                     if (reward_log_now >= next_reward_log ||
                         fight.episode_ended) {
@@ -1659,6 +1888,31 @@ void handle_websocket_connection(
                             << stats.shared_replay_matchups
                             << " updates=" << stats.training_updates
                             << " loss=" << stats.last_training_loss
+                            << " q_pred="
+                            << stats.last_predicted_q_mean
+                            << " td_target="
+                            << stats.last_td_target_mean
+                            << " q_gap="
+                            << stats.last_q_target_gap
+                            << " abs_td="
+                            << stats.last_abs_td_error
+                            << " bootstrap="
+                            << stats.last_bootstrap_mean
+                            << " target_clipped="
+                            << stats.last_q_target_clipped_fraction
+                            << " terminal_batch="
+                            << stats.last_terminal_sample_fraction
+                            << " terminal_q_pred="
+                            << stats.last_terminal_predicted_q_mean
+                            << " terminal_target="
+                            << stats.last_terminal_td_target_mean
+                            << " critic_disagreement="
+                            << stats.last_critic_disagreement
+                            << " hard_negative_batch="
+                            << stats.last_hard_negative_sample_fraction
+                            << " greedy_episode="
+                            << reinforcement_decision
+                                   .greedy_training_episode
                             << " option=\""
                             << reinforcement_decision.option_name << '"'
                             << "\n\n" << std::flush;
@@ -1753,9 +2007,11 @@ void handle_websocket_connection(
                     response["agent_mode"] = "reinforcement_learning";
                     response["control_enabled"] =
                         fight.action_allowed && temporal_output.has_value() &&
-                        reinforcement_step_ok;
+                        reinforcement_step_ok && !training_reset_pending &&
+                        !repeated_frame_paused;
                     response["cancel_pending_sequence"] =
-                        !fight.action_allowed || !reinforcement_step_ok;
+                        !fight.action_allowed || !reinforcement_step_ok ||
+                        training_reset_pending || repeated_frame_paused;
                     response["fight_phase"] = fight_phase_name(fight.phase);
                     response["episode_id"] = fight.episode_id;
                     response["episode_ended"] = fight.episode_ended;
@@ -1777,6 +2033,10 @@ void handle_websocket_connection(
                         reinforcement_decision.option_steps;
                     response["rl_selection_source"] =
                         reinforcement_decision.selection_source;
+                    response["rl_commands_mirrored"] =
+                        reinforcement_decision.commands_mirrored;
+                    response["rl_greedy_training_episode"] =
+                        reinforcement_decision.greedy_training_episode;
                     auto& response_metrics = response["metrics"];
                     response_metrics["hud_valid"] = fight.hud_valid;
                     response_metrics["hud_confidence"] =
@@ -1799,6 +2059,15 @@ void handle_websocket_connection(
                         combat.corner_penalty;
                     response_metrics["neutral_penalty"] =
                         reinforcement_decision.neutral_penalty;
+                    response_metrics["rl_allowed_options"] =
+                        reinforcement_decision.allowed_options;
+                    response_metrics["rl_impact_credit_step"] =
+                        reinforcement_decision.impact_credit_step;
+                    response_metrics["rl_impact_credit_steps"] =
+                        reinforcement_decision.impact_credit_steps;
+                    response_metrics["rl_disable_cloud_cooldown_remaining"] =
+                        reinforcement_decision
+                            .disable_cloud_cooldown_remaining;
                     response_metrics["combat_state_version"] = 2U;
                     response_metrics["combat_spatial_valid"] =
                         combat.spatial_valid;
@@ -1847,6 +2116,32 @@ void handle_websocket_connection(
                         reinforcement_decision.training_updates;
                     response_metrics["rl_training_loss"] =
                         reinforcement_decision.training_loss;
+                    response_metrics["rl_predicted_q_mean"] =
+                        reinforcement_decision.predicted_q_mean;
+                    response_metrics["rl_td_target_mean"] =
+                        reinforcement_decision.td_target_mean;
+                    response_metrics["rl_bootstrap_mean"] =
+                        reinforcement_decision.bootstrap_mean;
+                    response_metrics["rl_q_target_gap"] =
+                        reinforcement_decision.q_target_gap;
+                    response_metrics["rl_abs_td_error"] =
+                        reinforcement_decision.abs_td_error;
+                    response_metrics["rl_q_target_clipped_fraction"] =
+                        reinforcement_decision
+                            .q_target_clipped_fraction;
+                    response_metrics["rl_terminal_sample_fraction"] =
+                        reinforcement_decision.terminal_sample_fraction;
+                    response_metrics["rl_terminal_predicted_q_mean"] =
+                        reinforcement_decision
+                            .terminal_predicted_q_mean;
+                    response_metrics["rl_terminal_td_target_mean"] =
+                        reinforcement_decision.terminal_td_target_mean;
+                    response_metrics["rl_critic_disagreement"] =
+                        reinforcement_decision.critic_disagreement;
+                    response_metrics[
+                        "rl_hard_negative_sample_fraction"
+                    ] = reinforcement_decision
+                        .hard_negative_sample_fraction;
                     response_metrics["rl_training_performed"] =
                         reinforcement_decision.training_performed;
                     response_metrics["rl_checkpoint_saved"] =
@@ -1855,6 +2150,8 @@ void handle_websocket_connection(
                         rl_stats.trainable_lstm;
                     response_metrics["rl_recurrent_checkpoint_loaded"] =
                         rl_stats.recurrent_checkpoint_loaded;
+                    response_metrics["rl_recurrent_checkpoint_migrated"] =
+                        rl_stats.recurrent_checkpoint_migrated;
                     response_metrics["rl_trainable_resnet"] =
                         rl_stats.trainable_resnet;
                     response_metrics["rl_resnet_checkpoint_loaded"] =
@@ -1867,6 +2164,22 @@ void handle_websocket_connection(
                         rl_stats.training_device;
                     response_metrics["rl_errors"] =
                         reinforcement_errors.load();
+                    response_metrics["training_reset_pending"] =
+                        training_reset_pending;
+                    response_metrics["training_reset_pending_id"] =
+                        pending_training_reset_request.has_value()
+                            ? pending_training_reset_request
+                                  ->at("reset_id")
+                                  .get<std::uint64_t>()
+                            : 0U;
+                    response_metrics["training_reset_retries"] =
+                        training_reset_retries.load();
+                    response_metrics["repeated_frame_training_paused"] =
+                        repeated_frame_paused;
+                    response_metrics["repeated_frame_duration_ms"] =
+                        repeated_frame_duration_ms.load();
+                    response_metrics["repeated_frame_count"] =
+                        repeated_frame_count.load();
                 } else {
                     response["agent_mode"] =
                         std::string(
@@ -1927,36 +2240,64 @@ void handle_websocket_connection(
                         response_metrics["student_shadow_enabled"] = false;
                     }
                 }
-                action_history.record_sent(
-                    current_decision_id,
-                    latest->frame_id,
-                    commands,
-                    now_ms
-                );
-                if (!writer.send_json(response)) {
-                    connected.store(false);
-                    shutdown(socket, SHUT_RDWR);
-                    break;
-                }
-
                 nlohmann::json metric_record = response;
-                metric_record["event"] = "decision";
                 metric_record["connection_id"] = connection_id;
+                if (!training_reset_pending) {
+                    action_history.record_sent(
+                        current_decision_id,
+                        latest->frame_id,
+                        commands,
+                        now_ms
+                    );
+                    if (!writer.send_json(response)) {
+                        connected.store(false);
+                        shutdown(socket, SHUT_RDWR);
+                        break;
+                    }
+                    metric_record["event"] = "decision";
+                } else {
+                    // A reset is an exclusive protocol operation. Sending an
+                    // action first can hide the reset from clients that read
+                    // one response for each submitted frame.
+                    metric_record["event"] =
+                        "decision_suppressed_for_training_reset";
+                }
                 metrics.write(metric_record);
-                if (training_reset_trigger.has_value()) {
+                bool created_training_reset = false;
+                if (
+                    training_reset_trigger.has_value() &&
+                    !pending_training_reset_request.has_value()
+                ) {
                     const std::uint64_t reset_id =
                         last_training_reset_id.fetch_add(1U) + 1U;
                     const std::int64_t requested_at_ms =
                         epoch_milliseconds();
-                    const nlohmann::json reset_request{
+                    const bool compatibility_recovery =
+                        training_reset_trigger->reason ==
+                            "non_fight_timeout" ||
+                        training_reset_trigger->reason ==
+                            "repeated_frame_timeout";
+                    // Preserve the original wire contract for clients that
+                    // validate the legacy terminal-reset schema. The reset ID
+                    // remains the idempotency key; episode_id is metadata and
+                    // must be positive even before the first detected round.
+                    const std::uint64_t compatible_episode_id =
+                        std::max<std::uint64_t>(
+                            1U,
+                            training_reset_trigger->episode_id
+                        );
+                    const std::string compatible_reason =
+                        compatibility_recovery
+                            ? "round_lost"
+                            : training_reset_trigger->reason;
+                    pending_training_reset_request = nlohmann::json{
                         {"protocol_version", kActionProtocolVersion},
                         {"type", "training_reset_state"},
                         {"reset_id", reset_id},
-                        {"episode_id",
-                         training_reset_trigger->episode_id},
+                        {"episode_id", compatible_episode_id},
                         {"frame_id", training_reset_trigger->frame_id},
                         {"timestamp_ms", requested_at_ms},
-                        {"reason", training_reset_trigger->reason},
+                        {"reason", compatible_reason},
                         {"requested_operation",
                          "load_training_state"},
                         {"player_character",
@@ -1967,27 +2308,68 @@ void handle_websocket_connection(
                         {"cancel_pending_sequence", true},
                         {"ack_required", true},
                     };
+                    pending_training_reset_detected_reason =
+                        training_reset_trigger->reason;
+                    pending_training_reset_attempt = 0;
+                    next_training_reset_retry = Clock::time_point::min();
+                    created_training_reset = true;
+                }
+                const auto reset_send_now = Clock::now();
+                if (
+                    pending_training_reset_request.has_value() &&
+                    (
+                        created_training_reset ||
+                        reset_send_now >= next_training_reset_retry
+                    )
+                ) {
+                    nlohmann::json reset_request =
+                        *pending_training_reset_request;
+                    ++pending_training_reset_attempt;
+                    const bool retry =
+                        pending_training_reset_attempt > 1U;
+                    reset_request["attempt"] =
+                        pending_training_reset_attempt;
+                    reset_request["retry"] = retry;
                     if (!writer.send_json(reset_request)) {
                         connected.store(false);
                         shutdown(socket, SHUT_RDWR);
                         break;
                     }
-                    training_reset_requests.fetch_add(1U);
+                    next_training_reset_retry =
+                        reset_send_now + training_reset_retry_interval;
+                    if (retry) {
+                        training_reset_retries.fetch_add(1U);
+                    } else {
+                        training_reset_requests.fetch_add(1U);
+                    }
                     nlohmann::json reset_metric = reset_request;
+                    reset_metric["detected_reason"] =
+                        pending_training_reset_detected_reason.value_or(
+                            reset_request.at("reason").get<std::string>()
+                        );
                     reset_metric["event"] =
-                        "training_reset_state_requested";
+                        retry
+                            ? "training_reset_state_retried"
+                            : "training_reset_state_requested";
                     reset_metric["connection_id"] = connection_id;
                     metrics.write(reset_metric);
                     std::cout
-                        << "\n[TRAINING_RESET] request reset_id="
-                        << reset_id
+                        << "\n[TRAINING_RESET] "
+                        << (retry ? "retry" : "request")
+                        << " reset_id="
+                        << reset_request.at("reset_id").get<std::uint64_t>()
                         << " connection=" << connection_id
                         << " episode="
-                        << training_reset_trigger->episode_id
+                        << reset_request.at("episode_id").get<std::uint64_t>()
                         << " frame="
-                        << training_reset_trigger->frame_id
+                        << reset_request.at("frame_id").get<std::uint64_t>()
                         << " reason="
-                        << training_reset_trigger->reason
+                        << reset_request.at("reason").get<std::string>()
+                        << " detected_reason="
+                        << pending_training_reset_detected_reason.value_or(
+                            reset_request.at("reason").get<std::string>()
+                        )
+                        << " attempt=" << pending_training_reset_attempt
                         << " operation=load_training_state\n\n"
                         << std::flush;
                 }
@@ -2039,6 +2421,10 @@ void handle_websocket_connection(
                             << " replay=" << reinforcement_decision.replay_size
                             << " updates="
                             << reinforcement_decision.training_updates
+                            << " repeated_frame_paused="
+                            << (repeated_frame_paused ? 1 : 0)
+                            << " repeated_frame_ms="
+                            << repeated_frame_duration_ms.load()
                             << " option=\""
                             << reinforcement_decision.option_name << '"'
                             << " step="
@@ -2083,6 +2469,69 @@ void handle_websocket_connection(
                 options.max_jpeg_bytes,
                 received_ms
             );
+            RepeatedFrameStatus repeated_frame_status;
+            if (repeated_frame_detector != nullptr) {
+                repeated_frame_status =
+                    repeated_frame_detector->observe(
+                        *decoded,
+                        received_ms
+                    );
+                repeated_frame_training_paused.store(
+                    repeated_frame_status.training_paused
+                );
+                repeated_frame_duration_ms.store(
+                    repeated_frame_status.unchanged_duration_ms
+                );
+                repeated_frame_count.store(
+                    repeated_frame_status.repeated_frames
+                );
+                if (repeated_frame_status.reset_requested) {
+                    repeated_frame_reset_frame_id.store(
+                        repeated_frame_status.frame_id
+                    );
+                    repeated_frame_reset_generation.fetch_add(1U);
+                }
+                if (
+                    repeated_frame_status.pause_started ||
+                    repeated_frame_status.recovered ||
+                    repeated_frame_status.reset_requested
+                ) {
+                    const std::string event =
+                        repeated_frame_status.reset_requested
+                            ? "repeated_frame_reset_requested"
+                            : repeated_frame_status.pause_started
+                                ? "repeated_frame_training_paused"
+                                : "repeated_frame_recovered";
+                    metrics.write({
+                        {"event", event},
+                        {"connection_id", connection_id},
+                        {"frame_id", repeated_frame_status.frame_id},
+                        {"timestamp_ms", received_ms},
+                        {"unchanged_duration_ms",
+                         repeated_frame_status.unchanged_duration_ms},
+                        {"repeated_frames",
+                         repeated_frame_status.repeated_frames},
+                        {"training_paused",
+                         repeated_frame_status.training_paused},
+                    });
+                    std::cout
+                        << "\n[REPEATED_FRAME] connection="
+                        << connection_id
+                        << " event=" << event
+                        << " frame=" << repeated_frame_status.frame_id
+                        << " unchanged_ms="
+                        << repeated_frame_status.unchanged_duration_ms
+                        << " repeated_frames="
+                        << repeated_frame_status.repeated_frames
+                        << " training_paused="
+                        << (
+                            repeated_frame_status.training_paused
+                                ? 1
+                                : 0
+                        )
+                        << "\n\n" << std::flush;
+                }
+            }
             const FramePushResult push_result = buffer.push(decoded);
             if (push_result == FramePushResult::rejected_stale) {
                 writer.send_json({
@@ -2092,8 +2541,12 @@ void handle_websocket_connection(
                 });
                 return;
             }
-            bool temporal_frame_allowed = true;
-            if (fight_tracker != nullptr) {
+            bool temporal_frame_allowed =
+                !repeated_frame_status.training_paused;
+            if (
+                fight_tracker != nullptr &&
+                !repeated_frame_status.training_paused
+            ) {
                 const FightControlSnapshot fight =
                     fight_tracker->observe(*decoded);
                 CombatStateSnapshot combat;
@@ -2444,6 +2897,7 @@ void handle_websocket_connection(
         {"acknowledgements_received", acknowledgements_received.load()},
         {"acknowledgements_rejected", acknowledgements_rejected.load()},
         {"training_reset_requests", training_reset_requests.load()},
+        {"training_reset_retries", training_reset_retries.load()},
         {"training_reset_acknowledgements",
          training_reset_acknowledgements.load()},
         {"training_reset_acknowledgements_rejected",
@@ -2456,6 +2910,11 @@ void handle_websocket_connection(
         {"persistence_frames_saved", persistence_frames_saved.load()},
         {"persistence_frames_dropped", persistence_frames_dropped.load()},
         {"persistence_errors", persistence_errors.load()},
+        {"repeated_frame_training_paused",
+         repeated_frame_training_paused.load()},
+        {"repeated_frame_duration_ms",
+         repeated_frame_duration_ms.load()},
+        {"repeated_frame_count", repeated_frame_count.load()},
         {"last_applied_decision_id", action_history.last_applied_decision_id()},
         {"rl_enabled", reinforcement_agent != nullptr},
         {"rl_replay_size", reinforcement_stats.has_value()
@@ -2478,6 +2937,8 @@ void handle_websocket_connection(
               << acknowledgements_rejected.load()
               << " training_resets="
               << training_reset_requests.load()
+              << " training_reset_retries="
+              << training_reset_retries.load()
               << " training_reset_acks="
               << training_reset_acknowledgements.load()
               << " temporal_overwritten="
@@ -2498,6 +2959,9 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
         options_.max_jpeg_bytes == 0 ||
         options_.decision_interval.count() <= 0 || options_.failsafe_timeout.count() <= 0 ||
         options_.reinforcement_reward_log_interval.count() <= 0 ||
+        options_.training_reset_non_fight_timeout.count() <= 0 ||
+        options_.repeated_frame_pause_timeout.count() <= 0 ||
+        options_.repeated_frame_reset_timeout.count() <= 0 ||
         options_.debug_capture_interval.count() <= 0 ||
         options_.capture_directory.empty()) {
         throw std::invalid_argument("invalid WebSocket server configuration");
@@ -2510,6 +2974,14 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
     }
     if (options_.observation_frames > options_.frame_buffer_capacity) {
         throw std::invalid_argument("observation frame count cannot exceed buffer capacity");
+    }
+    if (
+        options_.repeated_frame_reset_timeout <
+            options_.repeated_frame_pause_timeout
+    ) {
+        throw std::invalid_argument(
+            "repeated-frame reset timeout cannot precede pause timeout"
+        );
     }
     if (options_.failsafe_timeout < options_.decision_interval * 2) {
         throw std::invalid_argument(
@@ -2559,7 +3031,40 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
          options_.reinforcement_epsilon_decay_selections == 0 ||
          options_.reinforcement_gamma <= 0.0f ||
          options_.reinforcement_gamma > 1.0f ||
+         options_.reinforcement_q_value_limit <= 0.0f ||
+         options_.reinforcement_terminal_replay_fraction < 0.0f ||
+         options_.reinforcement_terminal_replay_fraction > 1.0f ||
+         options_.reinforcement_hard_negative_replay_fraction < 0.0f ||
+         options_.reinforcement_hard_negative_replay_fraction > 1.0f ||
+         options_.reinforcement_terminal_replay_fraction +
+                 options_.reinforcement_hard_negative_replay_fraction >
+             1.0f ||
+         options_.reinforcement_hard_negative_q_threshold < 0.0f ||
+         options_.reinforcement_n_step_options == 0 ||
          options_.reinforcement_learning_rate <= 0.0f ||
+         options_.reinforcement_neutral_option_penalty < 0.0f ||
+         options_.reinforcement_combo_max_distance <= 0.0f ||
+         options_.reinforcement_combo_max_distance > 1.0f ||
+         options_.reinforcement_close_attack_max_distance <= 0.0f ||
+         options_.reinforcement_close_attack_max_distance > 1.0f ||
+         options_.reinforcement_projectile_preferred_min_distance <= 0.0f ||
+         options_.reinforcement_projectile_preferred_min_distance > 1.0f ||
+         options_.reinforcement_projectile_q_preference_margin < 0.0f ||
+         options_.reinforcement_disable_cloud_min_distance < 0.0f ||
+         options_.reinforcement_disable_cloud_max_distance <=
+             options_.reinforcement_disable_cloud_min_distance ||
+         options_.reinforcement_disable_cloud_max_distance > 1.0f ||
+         options_.reinforcement_advance_min_distance < 0.0f ||
+         options_.reinforcement_advance_min_distance > 1.0f ||
+         options_.reinforcement_defense_max_distance <= 0.0f ||
+         options_.reinforcement_defense_max_distance > 1.0f ||
+         options_.reinforcement_disable_cloud_cooldown_options == 0 ||
+         options_.reinforcement_projectile_impact_credit_min_steps == 0 ||
+         options_.reinforcement_projectile_impact_credit_max_steps <
+             options_.reinforcement_projectile_impact_credit_min_steps ||
+         options_.reinforcement_greedy_training_episode_interval == 0 ||
+         options_.reinforcement_greedy_training_epsilon < 0.0f ||
+         options_.reinforcement_greedy_training_epsilon > 1.0f ||
          options_.reinforcement_epsilon_start < 0.0f ||
          options_.reinforcement_epsilon_start > 1.0f ||
          options_.reinforcement_epsilon_final < 0.0f ||
@@ -2642,7 +3147,8 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
     }
     if (options_.reinforcement_learning_enabled) {
         std::cout
-            << "[RL] shared multi-character semi-Markov Double DQN enabled input="
+            << "[RL] shared multi-character semi-Markov clipped twin "
+               "Double DQN enabled input="
             << (
                 options_.temporal_hidden_size +
                 kReinforcementContextFeatureCount
@@ -2735,6 +3241,18 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                      options_.reinforcement_epsilon_start},
                     {"reinforcement_epsilon_final",
                      options_.reinforcement_epsilon_final},
+                    {"reinforcement_gamma",
+                     options_.reinforcement_gamma},
+                    {"reinforcement_q_value_limit",
+                     options_.reinforcement_q_value_limit},
+                    {"reinforcement_terminal_replay_fraction",
+                     options_.reinforcement_terminal_replay_fraction},
+                    {"reinforcement_hard_negative_replay_fraction",
+                     options_.reinforcement_hard_negative_replay_fraction},
+                    {"reinforcement_n_step_options",
+                     options_.reinforcement_n_step_options},
+                    {"reinforcement_conservative_bootstrap",
+                     options_.reinforcement_conservative_bootstrap},
                     {"reinforcement_reward_log_interval_ms",
                      options_.reinforcement_reward_log_interval.count()},
                     {"combat_state_version", 2},
@@ -2760,10 +3278,48 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                     {"neutral_option_penalty",
                      options_
                          .reinforcement_neutral_option_penalty},
+                    {"neutral_suppressed_during_fight",
+                     options_
+                         .reinforcement_suppress_neutral_during_fight},
+                    {"combo_max_distance",
+                     options_.reinforcement_combo_max_distance},
+                    {"close_attack_max_distance",
+                     options_.reinforcement_close_attack_max_distance},
+                    {"projectile_preferred_min_distance",
+                     options_
+                         .reinforcement_projectile_preferred_min_distance},
+                    {"projectile_q_preference_margin",
+                     options_
+                         .reinforcement_projectile_q_preference_margin},
+                    {"disable_cloud_cooldown_options",
+                     options_
+                         .reinforcement_disable_cloud_cooldown_options},
+                    {"dynamic_facing",
+                     options_.reinforcement_dynamic_facing},
+                    {"melee_impact_credit_steps",
+                     options_.reinforcement_melee_impact_credit_steps},
+                    {"teleport_impact_credit_steps",
+                     options_.reinforcement_teleport_impact_credit_steps},
+                    {"projectile_impact_credit_min_steps",
+                     options_
+                         .reinforcement_projectile_impact_credit_min_steps},
+                    {"projectile_impact_credit_max_steps",
+                     options_
+                         .reinforcement_projectile_impact_credit_max_steps},
                     {"training_reset_state_enabled",
                      options_.reinforcement_learning_enabled &&
                          options_.training_reset_state_enabled},
-                    {"training_reset_trigger", "round_lost"},
+                    {"training_reset_non_fight_timeout_ms",
+                     options_
+                         .training_reset_non_fight_timeout.count()},
+                    {"repeated_frame_pause_ms",
+                     options_.repeated_frame_pause_timeout.count()},
+                    {"repeated_frame_reset_ms",
+                     options_.repeated_frame_reset_timeout.count()},
+                    {"training_reset_trigger",
+                     options_.reinforcement_training_enabled
+                         ? "round_lost_or_non_fight_timeout"
+                         : "round_terminal_or_non_fight_timeout"},
                     {"training_reset_ack_type",
                      "training_reset_ack"},
                     {"fight_gating_enabled",

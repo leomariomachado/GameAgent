@@ -35,6 +35,7 @@ add_library(
         src/MockAgent.cpp
         src/MockProtocol.cpp
         src/RecurrentPolicyBackend.cpp
+        src/RepeatedFrameDetector.cpp
         src/ReinforcementAgent.cpp
         src/ResNet50FeatureExtractor.cu
         src/StreamProtocol.cpp
@@ -103,6 +104,19 @@ if (BUILD_TESTING)
     add_test(
             NAME gameagent_frame_buffer
             COMMAND test_gameagent_frame_buffer
+    )
+
+    add_executable(
+            test_gameagent_repeated_frame_detector
+            tests/test_repeated_frame_detector.cpp
+    )
+    target_link_libraries(
+            test_gameagent_repeated_frame_detector
+            PRIVATE GameAgentMockCore
+    )
+    add_test(
+            NAME gameagent_repeated_frame_detector
+            COMMAND test_gameagent_repeated_frame_detector
     )
 
     add_executable(

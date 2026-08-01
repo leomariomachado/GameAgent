@@ -57,7 +57,10 @@ The server answers before accepting gameplay frames:
   "agent_mode": "reinforcement_learning",
   "shared_policy": true,
   "training_reset_state_enabled": true,
-  "training_reset_trigger": "round_lost",
+  "training_reset_non_fight_timeout_ms": 5000,
+  "repeated_frame_pause_ms": 2000,
+  "repeated_frame_reset_ms": 3000,
+  "training_reset_trigger": "round_lost_or_non_fight_timeout",
   "training_reset_ack_type": "training_reset_ack",
   "checkpoint_loaded": false,
   "trainable_lstm": true,
@@ -270,11 +273,12 @@ Possible `fight_phase` values are `no_hud`, `acquiring`, `round_intro`,
 `active_fight` and `round_end`. Only `active_fight` can carry non-empty RL
 commands. The client must not try to override this gate locally.
 
-## Training-state reset after a defeat
+## Training-state reset after a terminal round
 
-In reinforcement-learning mode, one lost round is treated as a complete failed
-training attempt. The server first emits its normal empty `action` state, then
-emits exactly one reset request for that episode:
+In training mode, one lost round is treated as a complete failed attempt. In
+read-only evaluation, either a loss or a win closes the trial and requests a
+clean state. The server first emits its normal empty `action` state, then emits
+one logical reset request:
 
 ```json
 {
@@ -290,7 +294,9 @@ emits exactly one reset request for that episode:
   "opponent_character": "subzero",
   "release_controls": true,
   "cancel_pending_sequence": true,
-  "ack_required": true
+  "ack_required": true,
+  "attempt": 1,
+  "retry": false
 }
 ```
 
@@ -315,10 +321,43 @@ short diagnostic message and keeps controls released. `reset_id` is monotonic
 within one WebSocket connection and makes the operation idempotent: a reset ID
 already completed must not load the state a second time.
 
+Until the acknowledgement arrives, the server keeps controls released and
+retransmits the same request every 500 ms. Retransmissions preserve `reset_id`,
+increment `attempt` and set `retry: true`. The client must acknowledge a
+duplicate request but must not load the same state more than once.
+While a reset is pending, it is the exclusive server response: ordinary
+`action` messages are suspended so a request/response-oriented client cannot
+discard the reset behind an action frame.
+
 The server does not have direct access to the emulator and therefore requests,
 rather than performs, the load. The fight gate continues emitting empty actions
-until fresh post-load HUD frames establish a new active round. `round_won`,
-`double_ko`, menus and ordinary round transitions do not request a reset.
+until fresh post-load HUD frames establish a new active round. Training resets
+only `round_lost`; evaluation resets both `round_lost` and `round_won`.
+In either mode, the recovery watchdog also requests a reset with reason
+`non_fight_timeout` internally after the detector remains outside `active_fight` for
+`training_reset_non_fight_timeout_ms` continuous milliseconds (5000 by
+default). Returning to `active_fight` clears the timer. After a successful ACK,
+a screen that is still not a fight must remain so for another full timeout
+before a new reset ID is issued. `double_ko`, menus and ordinary transitions do
+not cause an immediate terminal reset, but a persistent non-fight screen is
+recovered by this watchdog.
+To remain wire-compatible with clients that validate the original schema, a
+watchdog request is transmitted with `reason: "round_lost"` and an
+`episode_id` of at least 1. Its JSONL metric contains
+`detected_reason: "non_fight_timeout"`. The client processes and acknowledges
+it exactly like any other training-state reset; no new client branch is needed.
+
+For RL sessions the server additionally compares the complete decoded RGB
+image between consecutive frames. Incrementing `frame_id` does not count as
+visual progress. If all pixels remain identical for
+`repeated_frame_pause_ms` (2000 ms), the server sends empty action state,
+cancels the pending sequence and disables agent transitions, replay writes,
+optimizer updates and epsilon decay. If the same streak reaches
+`repeated_frame_reset_ms` (3000 ms), it requests one state reset. The request
+uses the same legacy wire schema and is logged server-side with
+`detected_reason: "repeated_frame_timeout"`. The request is not regenerated
+after its ACK while the screen remains frozen. Learning resumes only after a
+different decoded RGB frame arrives and the regular fight gate allows it.
 `session_config_ack.training_reset_state_enabled` tells the client whether this
 extension is active.
 

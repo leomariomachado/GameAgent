@@ -101,16 +101,26 @@ struct TrainingResetTrigger {
     std::string reason;
 };
 
-// Training treats a lost round as a complete failed attempt. This tracker
-// converts that boundary into one reset request and suppresses duplicates.
+// Training resets failed attempts after a loss. Read-only evaluation may also
+// reset after a win. A non-fight watchdog recovers menus, loading screens and
+// missed round boundaries. Terminal boundaries produce at most one request;
+// a persistent non-fight state may request recovery again after each timeout.
 class TrainingResetTracker {
 public:
+    explicit TrainingResetTracker(
+        bool reset_after_round_win = false,
+        std::int64_t non_fight_timeout_ms = 5000
+    );
     [[nodiscard]] std::optional<TrainingResetTrigger> observe(
-        const FightControlSnapshot& fight
+        const FightControlSnapshot& fight,
+        std::int64_t now_ms
     );
     void reset();
 
 private:
+    bool reset_after_round_win_ = false;
+    std::int64_t non_fight_timeout_ms_ = 5000;
+    std::optional<std::int64_t> non_fight_since_ms_;
     std::uint64_t last_reset_episode_id_ = 0;
 };
 

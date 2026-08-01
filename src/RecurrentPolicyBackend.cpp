@@ -83,6 +83,7 @@ struct RecurrentPolicyBackend::Implementation {
         require_positive(config.replay_capacity, "replay capacity");
         require_positive(config.minimum_replay_size, "minimum replay");
         require_positive(config.batch_size, "batch size");
+        require_positive(config.n_step_options, "n-step options");
         if (config.trainable_resnet) {
             if (
                 config.resnet50_checkpoint_path.empty() ||
@@ -120,6 +121,15 @@ struct RecurrentPolicyBackend::Implementation {
             config.minimum_replay_size > config.replay_capacity ||
             config.batch_size > config.replay_capacity ||
             config.gamma <= 0.0f || config.gamma > 1.0f ||
+            config.q_value_limit <= 0.0f ||
+            config.terminal_replay_fraction < 0.0f ||
+            config.terminal_replay_fraction > 1.0f ||
+            config.hard_negative_replay_fraction < 0.0f ||
+            config.hard_negative_replay_fraction > 1.0f ||
+            config.terminal_replay_fraction +
+                    config.hard_negative_replay_fraction >
+                1.0f ||
+            config.hard_negative_q_threshold < 0.0f ||
             config.learning_rate <= 0.0f ||
             config.resnet_learning_rate <= 0.0f ||
             config.gradient_clip <= 0.0f
@@ -157,6 +167,8 @@ struct RecurrentPolicyBackend::Implementation {
             "-u",
             config.service_script.string(),
             "--checkpoint", config.checkpoint_path.string(),
+            "--migration-checkpoint",
+            config.migration_checkpoint_path.string(),
             "--device-id", std::to_string(config.device_id),
             "--training", config.training_enabled ? "1" : "0",
             "--checkpoint-writes",
@@ -189,6 +201,16 @@ struct RecurrentPolicyBackend::Implementation {
             "--initial-updates",
             std::to_string(config.initial_training_updates),
             "--gamma", std::to_string(config.gamma),
+            "--conservative-bootstrap",
+            config.conservative_bootstrap ? "1" : "0",
+            "--q-value-limit", std::to_string(config.q_value_limit),
+            "--terminal-replay-fraction",
+            std::to_string(config.terminal_replay_fraction),
+            "--hard-negative-replay-fraction",
+            std::to_string(config.hard_negative_replay_fraction),
+            "--hard-negative-q-threshold",
+            std::to_string(config.hard_negative_q_threshold),
+            "--n-step-options", std::to_string(config.n_step_options),
             "--learning-rate", std::to_string(config.learning_rate),
             "--trainable-resnet",
             config.trainable_resnet ? "1" : "0",
@@ -313,6 +335,45 @@ struct RecurrentPolicyBackend::Implementation {
             response.value("sequence_size", stats.sequence_size);
         stats.last_loss =
             response.value("last_loss", stats.last_loss);
+        stats.last_predicted_q_mean = response.value(
+            "last_predicted_q_mean", stats.last_predicted_q_mean
+        );
+        stats.last_td_target_mean = response.value(
+            "last_td_target_mean", stats.last_td_target_mean
+        );
+        stats.last_bootstrap_mean = response.value(
+            "last_bootstrap_mean", stats.last_bootstrap_mean
+        );
+        stats.last_q_target_gap = response.value(
+            "last_q_target_gap", stats.last_q_target_gap
+        );
+        stats.last_abs_td_error = response.value(
+            "last_abs_td_error", stats.last_abs_td_error
+        );
+        stats.last_q_target_clipped_fraction = response.value(
+            "last_q_target_clipped_fraction",
+            stats.last_q_target_clipped_fraction
+        );
+        stats.last_terminal_sample_fraction = response.value(
+            "last_terminal_sample_fraction",
+            stats.last_terminal_sample_fraction
+        );
+        stats.last_terminal_predicted_q_mean = response.value(
+            "last_terminal_predicted_q_mean",
+            stats.last_terminal_predicted_q_mean
+        );
+        stats.last_terminal_td_target_mean = response.value(
+            "last_terminal_td_target_mean",
+            stats.last_terminal_td_target_mean
+        );
+        stats.last_critic_disagreement = response.value(
+            "last_critic_disagreement",
+            stats.last_critic_disagreement
+        );
+        stats.last_hard_negative_sample_fraction = response.value(
+            "last_hard_negative_sample_fraction",
+            stats.last_hard_negative_sample_fraction
+        );
         stats.parameter_checksum =
             response.value(
                 "parameter_checksum", stats.parameter_checksum
@@ -329,6 +390,9 @@ struct RecurrentPolicyBackend::Implementation {
             response.value(
                 "checkpoint_loaded", stats.checkpoint_loaded
             );
+        stats.checkpoint_migrated = response.value(
+            "checkpoint_migrated", stats.checkpoint_migrated
+        );
         stats.resnet_checkpoint_loaded = response.value(
             "resnet_checkpoint_loaded",
             stats.resnet_checkpoint_loaded
@@ -444,13 +508,15 @@ std::vector<float> RecurrentPolicyBackend::q_values(
 void RecurrentPolicyBackend::begin_transition(
     std::size_t action,
     std::size_t character,
-    std::size_t opponent
+    std::size_t opponent,
+    float selected_q
 ) {
     static_cast<void>(implementation_->transact({
         {"op", "begin"},
         {"action", action},
         {"character", character},
         {"opponent", opponent},
+        {"selected_q", selected_q},
     }));
 }
 

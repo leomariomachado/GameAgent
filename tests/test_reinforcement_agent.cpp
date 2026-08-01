@@ -123,6 +123,65 @@ int main() {
             0.6f, 0.5f, 0.8f, 0.7f
         };
 
+        auto suspended_config = config;
+        suspended_config.checkpoint_path =
+            directory / "suspended_latest.garl";
+        suspended_config.best_checkpoint_path =
+            directory / "suspended_best.garl";
+        gameagent::ReinforcementAgent suspended(suspended_config);
+        auto suspended_decision = suspended.step({
+            .state = state_a,
+            .action_allowed = true,
+            .episode_started = true,
+            .episode_id = 1,
+            .frame_id = 1,
+            .decision_id = 1,
+        });
+        require(
+            suspended_decision.option_steps > 0,
+            "suspension test did not start an option"
+        );
+        suspended.suspend();
+        const auto before_suspended_ticks = suspended.stats();
+        for (std::uint64_t tick = 2; tick < 32; ++tick) {
+            suspended_decision = suspended.step({
+                .reward = 0.0f,
+                .action_allowed = false,
+                .episode_id = 1,
+                .frame_id = tick,
+                .decision_id = tick,
+            });
+            require(
+                suspended_decision.commands.empty(),
+                "suspended agent emitted a command"
+            );
+        }
+        const auto after_suspended_ticks = suspended.stats();
+        require(
+            after_suspended_ticks.training_updates ==
+                    before_suspended_ticks.training_updates &&
+                after_suspended_ticks.replay_size ==
+                    before_suspended_ticks.replay_size &&
+                after_suspended_ticks.action_selections ==
+                    before_suspended_ticks.action_selections &&
+                after_suspended_ticks.epsilon ==
+                    before_suspended_ticks.epsilon,
+            "suspended ticks changed replay, optimizer or epsilon"
+        );
+        suspended_decision = suspended.step({
+            .state = state_b,
+            .action_allowed = true,
+            .episode_id = 1,
+            .frame_id = 32,
+            .decision_id = 32,
+        });
+        require(
+            suspended_decision.option_steps > 0 &&
+                suspended.stats().action_selections ==
+                    before_suspended_ticks.action_selections + 1,
+            "agent did not resume cleanly after suspension"
+        );
+
         gameagent::ReinforcementAgent subzero(config);
         require(
             subzero.option_names().size() == 23,
@@ -407,11 +466,19 @@ int main() {
             gameagent::FighterCharacter::noob_saibot;
         cooldown_config.scripted_exploration_probability = 1.0f;
         cooldown_config.neutral_option_penalty = 0.0f;
+        cooldown_config.melee_impact_credit_steps = 2U;
+        cooldown_config.teleport_impact_credit_steps = 2U;
+        cooldown_config.projectile_impact_credit_min_steps = 2U;
+        cooldown_config.projectile_impact_credit_max_steps = 2U;
         cooldown_config.random_seed = 88117;
         gameagent::ReinforcementAgent cooldown_agent(cooldown_config);
         std::size_t selected_options = 0;
         std::size_t cloud_options = 0;
+        std::size_t teleport_options = 0;
         std::optional<std::size_t> last_cloud_option;
+        std::optional<std::size_t> last_teleport_option;
+        bool observed_unrestricted_teleport = false;
+        bool observed_delayed_credit = false;
         decision_id = 2000;
         for (std::size_t tick = 0;
              tick < 10000 && selected_options < 600;
@@ -425,6 +492,14 @@ int main() {
                 .decision_id = decision_id,
             });
             ++decision_id;
+            if (cooldown_decision.impact_credit_step > 0U) {
+                observed_delayed_credit = true;
+                require(
+                    cooldown_decision.commands.empty() &&
+                        cooldown_decision.impact_credit_steps == 2U,
+                    "delayed impact credit did not hold a released state"
+                );
+            }
             if (cooldown_decision.option_step != 1U) {
                 continue;
             }
@@ -443,11 +518,217 @@ int main() {
                 last_cloud_option = selected_options;
                 ++cloud_options;
             }
+            const bool is_teleport =
+                cooldown_decision.option_name ==
+                "Teleporte com Arremesso";
+            if (is_teleport) {
+                if (last_teleport_option.has_value()) {
+                    observed_unrestricted_teleport =
+                        observed_unrestricted_teleport ||
+                        selected_options < *last_teleport_option + 4U;
+                }
+                require(
+                    cooldown_decision.option_steps == 6U,
+                    "teleport did not expose its delayed credit window"
+                );
+                last_teleport_option = selected_options;
+                ++teleport_options;
+            }
             ++selected_options;
         }
         require(
-            selected_options == 600 && cloud_options > 10,
-            "DQN cooldown test did not sample enough scripted options"
+            selected_options == 600 && cloud_options > 10 &&
+                teleport_options > 10 && observed_unrestricted_teleport &&
+                observed_delayed_credit,
+            "DQN cooldown/credit test did not sample enough options"
+        );
+
+        auto facing_config = cooldown_config;
+        facing_config.random_seed = 99117;
+        gameagent::ReinforcementAgent facing_right_agent(facing_config);
+        gameagent::ReinforcementAgent facing_left_agent(facing_config);
+        bool observed_dynamic_mirror = false;
+        for (std::size_t tick = 0; tick < 2000U; ++tick) {
+            const auto right = facing_right_agent.step({
+                .state = state_a,
+                .action_allowed = true,
+                .episode_started = tick == 0,
+                .episode_id = 55,
+                .frame_id = 10000U + tick,
+                .decision_id = 10000U + tick,
+                .fighter_distance = 0.40f,
+                .player_x = 0.20f,
+                .opponent_x = 0.70f,
+                .spatial_valid = true,
+            });
+            const auto left = facing_left_agent.step({
+                .state = state_a,
+                .action_allowed = true,
+                .episode_started = tick == 0,
+                .episode_id = 55,
+                .frame_id = 12000U + tick,
+                .decision_id = 12000U + tick,
+                .fighter_distance = 0.40f,
+                .player_x = 0.70f,
+                .opponent_x = 0.20f,
+                .spatial_valid = true,
+            });
+            require(
+                right.option_name == left.option_name &&
+                    right.commands.size() == left.commands.size(),
+                "dynamic-facing peers diverged before command mirroring"
+            );
+            for (std::size_t index = 0;
+                 index < right.commands.size(); ++index) {
+                const int a = right.commands[index];
+                const int b = left.commands[index];
+                if (a == 8 || a == 9) {
+                    require(
+                        (a == 8 && b == 9) || (a == 9 && b == 8),
+                        "dynamic facing did not swap horizontal input"
+                    );
+                    observed_dynamic_mirror = true;
+                } else {
+                    require(
+                        a == b,
+                        "dynamic facing changed a non-horizontal input"
+                    );
+                }
+            }
+            if (observed_dynamic_mirror) {
+                require(
+                    !right.commands_mirrored && left.commands_mirrored,
+                    "dynamic-facing metadata is inconsistent"
+                );
+                break;
+            }
+        }
+        require(
+            observed_dynamic_mirror,
+            "dynamic-facing test never emitted a directional command"
+        );
+
+        auto far_config = cooldown_config;
+        far_config.random_seed = 77231;
+        gameagent::ReinforcementAgent far_agent(far_config);
+        selected_options = 0;
+        decision_id = 20000;
+        while (selected_options < 200U && decision_id < 40000U) {
+            const auto far_decision = far_agent.step({
+                .state = state_a,
+                .action_allowed = true,
+                .episode_started = decision_id == 20000U,
+                .episode_id = 60,
+                .frame_id = decision_id,
+                .decision_id = decision_id,
+                .fighter_distance = 0.70f,
+                .spatial_valid = true,
+            });
+            ++decision_id;
+            if (far_decision.option_step != 1U) {
+                continue;
+            }
+            require(
+                far_decision.option_name.rfind(
+                    "Arremesso de Sombra", 0
+                ) == 0 ||
+                    far_decision.option_name.rfind(
+                        "Nuvem de Desativação", 0
+                    ) == 0,
+                "far scripted exploration did not prefer a projectile"
+            );
+            require(
+                far_decision.option_name.find("[Espelho F/B]") ==
+                    std::string::npos,
+                "dynamic facing allowed an explicit mirrored duplicate"
+            );
+            require(
+                far_decision.option_name.find("Golpes") ==
+                    std::string::npos,
+                "far tactical mask allowed a close combo"
+            );
+            ++selected_options;
+        }
+        require(
+            selected_options == 200U,
+            "far tactical policy did not complete its sample"
+        );
+
+        auto near_config = cooldown_config;
+        near_config.random_seed = 88119;
+        gameagent::ReinforcementAgent near_agent(near_config);
+        bool observed_near_combo = false;
+        decision_id = 40000;
+        for (std::size_t tick = 0;
+             tick < 10000U && !observed_near_combo;
+             ++tick) {
+            const auto near_decision = near_agent.step({
+                .state = state_a,
+                .action_allowed = true,
+                .episode_started = tick == 0,
+                .episode_id = 61,
+                .frame_id = decision_id,
+                .decision_id = decision_id,
+                .fighter_distance = 0.10f,
+                .spatial_valid = true,
+            });
+            ++decision_id;
+            observed_near_combo =
+                near_decision.option_step == 1U &&
+                near_decision.option_name.find("Golpes") !=
+                    std::string::npos;
+            if (near_decision.option_step == 1U) {
+                require(
+                    near_decision.option_name.rfind(
+                        "Arremesso de Sombra", 0
+                    ) != 0 &&
+                        near_decision.option_name.rfind(
+                            "Nuvem de Desativação", 0
+                        ) != 0,
+                    "near tactical mask allowed a projectile"
+                );
+            }
+        }
+        require(
+            observed_near_combo,
+            "near tactical mask never released a close combo"
+        );
+
+        auto active_primitive_config = neutral_config;
+        active_primitive_config.random_seed = 55119;
+        gameagent::ReinforcementAgent active_primitive_agent(
+            active_primitive_config
+        );
+        selected_options = 0;
+        decision_id = 50000;
+        while (selected_options < 200U && decision_id < 60000U) {
+            const auto active_decision = active_primitive_agent.step({
+                .state = state_a,
+                .action_allowed = true,
+                .episode_started = decision_id == 50000U,
+                .episode_id = 62,
+                .frame_id = decision_id,
+                .decision_id = decision_id,
+                .fighter_distance = 0.40f,
+                .spatial_valid = true,
+            });
+            ++decision_id;
+            if (active_decision.option_step != 1U) {
+                continue;
+            }
+            require(
+                active_decision.option_name != "Neutro",
+                "active-fight tactical mask selected Neutral"
+            );
+            require(
+                active_decision.allowed_options > 0U,
+                "active-fight tactical mask reported no options"
+            );
+            ++selected_options;
+        }
+        require(
+            selected_options == 200U,
+            "active-fight neutral suppression did not complete its sample"
         );
 
         std::cout

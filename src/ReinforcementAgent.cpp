@@ -11,6 +11,7 @@
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 namespace gameagent {
@@ -32,7 +33,6 @@ constexpr int kUp = 6;
 constexpr int kDown = 7;
 constexpr int kLeft = 8;
 constexpr int kRight = 9;
-constexpr std::size_t kDisableCloudCooldownOptions = 2;
 
 constexpr std::array<FighterCharacter, 4> kControlledCharacters{
     FighterCharacter::subzero,
@@ -65,14 +65,123 @@ std::size_t opponent_index(OpponentCharacter character) {
     return index;
 }
 
+enum class OptionTactic {
+    neutral,
+    movement,
+    defense,
+    close_attack,
+    combo,
+    projectile,
+    teleport,
+    utility,
+};
+
 struct OptionDefinition {
     std::string name;
     std::vector<std::vector<int>> states;
     bool scripted = false;
+    OptionTactic tactic = OptionTactic::utility;
 };
 
 bool is_disable_cloud_option(const OptionDefinition& option) {
     return option.name.rfind("Nuvem de Desativação", 0) == 0;
+}
+
+bool is_projectile_option(const OptionDefinition& option) {
+    return option.tactic == OptionTactic::projectile;
+}
+
+bool is_combo_option(const OptionDefinition& option) {
+    return option.tactic == OptionTactic::combo;
+}
+
+bool is_mirrored_option(const OptionDefinition& option) {
+    return option.name.find("[Espelho F/B]") != std::string::npos;
+}
+
+bool is_advance_option(const OptionDefinition& option) {
+    return option.name == "Avançar" || option.name == "Corrida curta";
+}
+
+OptionTactic scripted_tactic(std::string_view name) {
+    if (
+        name.find("Golpes") != std::string_view::npos ||
+        name.find("Combo Alternativo") != std::string_view::npos
+    ) {
+        return OptionTactic::combo;
+    }
+    if (
+        name.find("Teleporte") != std::string_view::npos ||
+        name.find("Teleportado") != std::string_view::npos
+    ) {
+        return OptionTactic::teleport;
+    }
+    if (
+        name.rfind("Congelar", 0) == 0 ||
+        name.rfind("Chuva de Gelo", 0) == 0 ||
+        name.rfind("Arremesso de Sombra", 0) == 0 ||
+        name.rfind("Nuvem de Desativação", 0) == 0 ||
+        name.rfind("Arpão", 0) == 0 ||
+        name.rfind("Bola de Fogo", 0) == 0 ||
+        name.rfind("Grito", 0) == 0
+    ) {
+        return OptionTactic::projectile;
+    }
+    if (
+        name.rfind("Uppercut agachado", 0) == 0 ||
+        name.rfind("Agarrão Aéreo", 0) == 0
+    ) {
+        return OptionTactic::close_attack;
+    }
+    if (
+        name.rfind("Salto para frente", 0) == 0 ||
+        name.rfind("Corrida", 0) == 0 ||
+        name.rfind("Levitar", 0) == 0
+    ) {
+        return OptionTactic::movement;
+    }
+    return OptionTactic::utility;
+}
+
+struct ActionContext {
+    float distance = 0.40f;
+    float player_x = 0.25f;
+    float opponent_x = 0.75f;
+    bool spatial_valid = false;
+    bool opponent_attacking = false;
+
+    [[nodiscard]] bool player_is_right_of_opponent() const {
+        return player_x > opponent_x;
+    }
+};
+
+std::size_t impact_credit_steps(
+    const OptionDefinition& option,
+    const ActionContext& context,
+    const ReinforcementAgentConfig& config
+) {
+    if (
+        option.tactic == OptionTactic::close_attack ||
+        option.tactic == OptionTactic::combo
+    ) {
+        return config.melee_impact_credit_steps;
+    }
+    if (option.tactic == OptionTactic::teleport) {
+        return config.teleport_impact_credit_steps;
+    }
+    if (option.tactic != OptionTactic::projectile) {
+        return 0U;
+    }
+    const std::size_t minimum =
+        config.projectile_impact_credit_min_steps;
+    const std::size_t maximum =
+        config.projectile_impact_credit_max_steps;
+    if (!context.spatial_valid || maximum <= minimum) {
+        return minimum;
+    }
+    const float scaled = context.distance *
+        static_cast<float>(maximum - minimum);
+    return minimum + static_cast<std::size_t>(std::lround(scaled));
 }
 
 std::vector<OptionDefinition> make_options(FighterCharacter character) {
@@ -81,26 +190,41 @@ std::vector<OptionDefinition> make_options(FighterCharacter character) {
     constexpr int forward = kRight;
     constexpr int back = kLeft;
     std::vector<OptionDefinition> options{
-        {"Neutro", {{}}, false},
-        {"Avançar", {{forward}, {forward}, {}}, false},
-        {"Recuar", {{back}, {back}, {}}, false},
-        {"Pular", {{kUp}, {kUp}, {}}, false},
-        {"Agachar", {{kDown}, {kDown}, {}}, false},
-        {"Soco alto", {{kYHighPunch}, {kYHighPunch}, {}, {}}, false},
-        {"Chute alto", {{kXHighKick}, {kXHighKick}, {}, {}}, false},
-        {"Soco baixo", {{kBLowPunch}, {kBLowPunch}, {}, {}}, false},
-        {"Chute baixo", {{kALowKick}, {kALowKick}, {}, {}}, false},
-        {"Bloquear", {{kBlock}, {kBlock}, {kBlock}, {}}, false},
+        {"Neutro", {{}}, false, OptionTactic::neutral},
+        {"Avançar", {{forward}, {forward}, {}}, false,
+         OptionTactic::movement},
+        {"Recuar", {{back}, {back}, {}}, false,
+         OptionTactic::movement},
+        {"Pular", {{kUp}, {kUp}, {}}, false,
+         OptionTactic::movement},
+        {"Agachar", {{kDown}, {kDown}, {}}, false,
+         OptionTactic::movement},
+        {"Soco alto", {{kYHighPunch}, {kYHighPunch}, {}, {}}, false,
+         OptionTactic::close_attack},
+        {"Chute alto", {{kXHighKick}, {kXHighKick}, {}, {}}, false,
+         OptionTactic::close_attack},
+        {"Soco baixo", {{kBLowPunch}, {kBLowPunch}, {}, {}}, false,
+         OptionTactic::close_attack},
+        {"Chute baixo", {{kALowKick}, {kALowKick}, {}, {}}, false,
+         OptionTactic::close_attack},
+        {"Bloquear", {{kBlock}, {kBlock}, {kBlock}, {}}, false,
+         OptionTactic::defense},
         {
             "Corrida curta",
             {{kRun, forward}, {kRun, forward}, {forward}, {}},
-            false
+            false,
+            OptionTactic::movement
         },
     };
     for (const MockMoveDefinition& move :
-         make_character_curriculum(character, FighterFacing::right)) {
+        make_character_curriculum(character, FighterFacing::right)) {
         if (!move.states.empty()) {
-            options.push_back({move.name, move.states, true});
+            options.push_back({
+                move.name,
+                move.states,
+                true,
+                scripted_tactic(move.name),
+            });
         }
     }
     return options;
@@ -584,6 +708,8 @@ struct ReinforcementAgent::Implementation {
             RecurrentPolicyBackendConfig{
                 .service_script = config.recurrent_service_script,
                 .checkpoint_path = recurrent_checkpoint,
+                .migration_checkpoint_path =
+                    config.recurrent_migration_checkpoint_path,
                 .resnet50_checkpoint_path =
                     config.resnet50_checkpoint_path,
                 .action_sizes = std::move(action_sizes),
@@ -610,6 +736,14 @@ struct ReinforcementAgent::Implementation {
                     config.target_update_interval,
                 .initial_training_updates = training_updates,
                 .gamma = config.gamma,
+                .q_value_limit = config.q_value_limit,
+                .terminal_replay_fraction =
+                    config.terminal_replay_fraction,
+                .hard_negative_replay_fraction =
+                    config.hard_negative_replay_fraction,
+                .hard_negative_q_threshold =
+                    config.hard_negative_q_threshold,
+                .n_step_options = config.n_step_options,
                 .learning_rate = config.learning_rate,
                 .resnet_learning_rate =
                     config.resnet_learning_rate,
@@ -620,6 +754,8 @@ struct ReinforcementAgent::Implementation {
                 .checkpoint_writes_enabled =
                     config.checkpoint_writes_enabled,
                 .resume = config.resume,
+                .conservative_bootstrap =
+                    config.conservative_bootstrap,
                 .trainable_resnet = config.trainable_resnet,
                 .resnet_batch_size = config.resnet_batch_size,
                 .resnet_update_interval =
@@ -631,6 +767,27 @@ struct ReinforcementAgent::Implementation {
         const auto& recurrent_stats = recurrent_backend->stats();
         training_updates = recurrent_stats.training_updates;
         last_training_loss = recurrent_stats.last_loss;
+        if (recurrent_stats.checkpoint_loaded) {
+            const std::uint64_t recorded_selections = std::accumulate(
+                character_action_selections.begin(),
+                character_action_selections.end(),
+                std::uint64_t{0}
+            );
+            // The recurrent snapshot is authoritative. If metadata was
+            // interrupted or came from a short reconnection, reconstruct a
+            // conservative selection floor so epsilon cannot jump back to 1.
+            const std::uint64_t minimum_selections =
+                recurrent_stats.training_updates +
+                std::min<std::uint64_t>(
+                    config.minimum_replay_size,
+                    recurrent_stats.replay_size
+                );
+            if (recorded_selections < minimum_selections) {
+                character_action_selections[
+                    character_index(config.character)
+                ] += minimum_selections - recorded_selections;
+            }
+        }
     }
 
     const std::vector<OptionDefinition>& options() const {
@@ -665,6 +822,9 @@ struct ReinforcementAgent::Implementation {
             config.checkpoint_interval_episodes == 0 ||
             config.gamma <= 0.0f ||
             config.gamma > 1.0f ||
+            config.q_value_limit <= 0.0f ||
+            config.terminal_replay_fraction < 0.0f ||
+            config.terminal_replay_fraction > 1.0f ||
             config.learning_rate <= 0.0f ||
             config.adam_beta1 <= 0.0f ||
             config.adam_beta1 >= 1.0f ||
@@ -681,6 +841,35 @@ struct ReinforcementAgent::Implementation {
             config.scripted_exploration_probability < 0.0f ||
             config.scripted_exploration_probability > 1.0f ||
             config.neutral_option_penalty < 0.0f ||
+            config.combo_max_distance <= 0.0f ||
+            config.combo_max_distance > 1.0f ||
+            config.close_attack_max_distance <= 0.0f ||
+            config.close_attack_max_distance > 1.0f ||
+            config.projectile_preferred_min_distance <= 0.0f ||
+            config.projectile_preferred_min_distance > 1.0f ||
+            config.projectile_q_preference_margin < 0.0f ||
+            config.disable_cloud_min_distance < 0.0f ||
+            config.disable_cloud_max_distance <=
+                config.disable_cloud_min_distance ||
+            config.disable_cloud_max_distance > 1.0f ||
+            config.advance_min_distance < 0.0f ||
+            config.advance_min_distance > 1.0f ||
+            config.defense_max_distance <= 0.0f ||
+            config.defense_max_distance > 1.0f ||
+            config.disable_cloud_cooldown_options == 0 ||
+            config.projectile_impact_credit_min_steps == 0 ||
+            config.projectile_impact_credit_max_steps <
+                config.projectile_impact_credit_min_steps ||
+            config.greedy_training_episode_interval == 0 ||
+            config.greedy_training_epsilon < 0.0f ||
+            config.greedy_training_epsilon > 1.0f ||
+            config.n_step_options == 0 ||
+            config.hard_negative_replay_fraction < 0.0f ||
+            config.hard_negative_replay_fraction > 1.0f ||
+            config.hard_negative_replay_fraction +
+                    config.terminal_replay_fraction >
+                1.0f ||
+            config.hard_negative_q_threshold < 0.0f ||
             (
                 config.trainable_resnet &&
                 (
@@ -722,15 +911,97 @@ struct ReinforcementAgent::Implementation {
                     config.epsilon_decay_selections
                 )
         );
-        return static_cast<float>(
+        const float scheduled = static_cast<float>(
             config.epsilon_start +
             (config.epsilon_final - config.epsilon_start) * progress
         );
+        if (config.training_enabled && greedy_training_episode) {
+            return std::min(scheduled, config.greedy_training_epsilon);
+        }
+        return scheduled;
+    }
+
+    bool option_allowed(
+        std::size_t index,
+        const ActionContext& context
+    ) const {
+        const OptionDefinition& option = options()[index];
+        if (
+            disable_cloud_cooldown_options_remaining > 0 &&
+            is_disable_cloud_option(option)
+        ) {
+            return false;
+        }
+        if (
+            context.spatial_valid &&
+            config.suppress_neutral_during_fight &&
+            option.tactic == OptionTactic::neutral
+        ) {
+            return false;
+        }
+        // Screen position is a more reliable facing signal than the initial
+        // session setting after fighters cross. Canonical programs are
+        // mirrored dynamically, so explicit F/B duplicates are unnecessary
+        // whenever spatial tracking is valid.
+        if (
+            context.spatial_valid && config.dynamic_facing &&
+            is_mirrored_option(option)
+        ) {
+            return false;
+        }
+        if (
+            context.spatial_valid &&
+            context.distance > config.combo_max_distance &&
+            is_combo_option(option)
+        ) {
+            return false;
+        }
+        if (
+            context.spatial_valid &&
+            context.distance > config.close_attack_max_distance &&
+            option.tactic == OptionTactic::close_attack
+        ) {
+            return false;
+        }
+        if (
+            context.spatial_valid &&
+            context.distance < config.projectile_preferred_min_distance &&
+            is_projectile_option(option) &&
+            !is_disable_cloud_option(option)
+        ) {
+            return false;
+        }
+        if (
+            context.spatial_valid && is_disable_cloud_option(option) &&
+            (
+                context.distance < config.disable_cloud_min_distance ||
+                context.distance > config.disable_cloud_max_distance
+            )
+        ) {
+            return false;
+        }
+        if (
+            context.spatial_valid &&
+            context.distance < config.advance_min_distance &&
+            is_advance_option(option)
+        ) {
+            return false;
+        }
+        if (
+            context.spatial_valid &&
+            context.distance > config.defense_max_distance &&
+            option.tactic == OptionTactic::defense
+        ) {
+            return false;
+        }
+        return true;
     }
 
     std::pair<std::size_t, std::string> select_action(
         std::span<const float> state,
-        float& selected_q
+        const ActionContext& context,
+        float& selected_q,
+        std::size_t& allowed_options
     ) {
         const std::vector<float> values =
             recurrent_backend != nullptr
@@ -749,9 +1020,17 @@ struct ReinforcementAgent::Implementation {
         std::size_t selected = 0;
         std::string source = "dqn_exploit";
         const auto allowed = [&](std::size_t index) {
-            return disable_cloud_cooldown_options_remaining == 0 ||
-                !is_disable_cloud_option(options()[index]);
+            return option_allowed(index, context);
         };
+        allowed_options = 0;
+        for (std::size_t index = 0; index < options().size(); ++index) {
+            allowed_options += allowed(index) ? 1U : 0U;
+        }
+        if (allowed_options == 0) {
+            throw std::runtime_error(
+                "reinforcement tactical mask removed every action"
+            );
+        }
         if (probability(random_engine) < epsilon(config.character)) {
             const bool choose_scripted =
                 probability(random_engine) <
@@ -767,9 +1046,28 @@ struct ReinforcementAgent::Implementation {
                 std::back_inserter(candidates),
                 allowed
             );
+            if (
+                choose_scripted &&
+                context.spatial_valid &&
+                context.distance >=
+                    config.projectile_preferred_min_distance
+            ) {
+                std::vector<std::size_t> projectiles;
+                std::copy_if(
+                    candidates.begin(),
+                    candidates.end(),
+                    std::back_inserter(projectiles),
+                    [&](std::size_t index) {
+                        return is_projectile_option(options()[index]);
+                    }
+                );
+                if (!projectiles.empty()) {
+                    candidates = std::move(projectiles);
+                }
+            }
             if (candidates.empty()) {
                 throw std::runtime_error(
-                    "reinforcement action cooldown removed every candidate"
+                    "reinforcement tactical mask removed every candidate"
                 );
             }
             std::uniform_int_distribution<std::size_t> distribution(
@@ -794,8 +1092,40 @@ struct ReinforcementAgent::Implementation {
             }
             if (selected == options().size()) {
                 throw std::runtime_error(
-                    "reinforcement action cooldown removed every action"
+                    "reinforcement tactical mask removed every action"
                 );
+            }
+            if (
+                context.spatial_valid &&
+                context.distance >=
+                    config.projectile_preferred_min_distance
+            ) {
+                std::size_t projectile = options().size();
+                for (
+                    std::size_t index = 0;
+                    index < values.size();
+                    ++index
+                ) {
+                    if (
+                        allowed(index) &&
+                        is_projectile_option(options()[index]) &&
+                        (
+                            projectile == options().size() ||
+                            values[index] > values[projectile]
+                        )
+                    ) {
+                        projectile = index;
+                    }
+                }
+                if (
+                    projectile != options().size() &&
+                    values[projectile] +
+                            config.projectile_q_preference_margin *
+                                (context.opponent_attacking ? 0.5f : 1.0f) >=
+                        values[selected]
+                ) {
+                    selected = projectile;
+                }
             }
         }
         selected_q = values[selected];
@@ -804,7 +1134,7 @@ struct ReinforcementAgent::Implementation {
         }
         if (is_disable_cloud_option(options()[selected])) {
             disable_cloud_cooldown_options_remaining =
-                kDisableCloudCooldownOptions;
+                config.disable_cloud_cooldown_options;
         }
         ++character_action_selections[
             character_index(config.character)
@@ -812,15 +1142,21 @@ struct ReinforcementAgent::Implementation {
         return {selected, std::move(source)};
     }
 
-    std::vector<std::uint8_t> current_action_mask() const {
-        std::vector<std::uint8_t> mask(options().size(), 1U);
-        if (disable_cloud_cooldown_options_remaining == 0) {
-            return mask;
-        }
+    std::vector<std::uint8_t> current_action_mask(
+        const ActionContext& context
+    ) const {
+        std::vector<std::uint8_t> mask(options().size(), 0U);
         for (std::size_t index = 0; index < options().size(); ++index) {
-            if (is_disable_cloud_option(options()[index])) {
-                mask[index] = 0U;
-            }
+            mask[index] = option_allowed(index, context) ? 1U : 0U;
+        }
+        if (
+            std::none_of(mask.begin(), mask.end(), [](std::uint8_t value) {
+                return value != 0U;
+            })
+        ) {
+            throw std::runtime_error(
+                "reinforcement tactical mask removed every successor action"
+            );
         }
         return mask;
     }
@@ -1158,7 +1494,8 @@ struct ReinforcementAgent::Implementation {
 
     bool close_active_transition(
         std::span<const float> next_state,
-        bool terminal
+        bool terminal,
+        const ActionContext& context
     ) {
         if (!active_option.has_value()) {
             return false;
@@ -1170,7 +1507,7 @@ struct ReinforcementAgent::Implementation {
         bool trained = false;
         if (recurrent_backend != nullptr) {
             const std::vector<std::uint8_t> next_action_mask =
-                current_action_mask();
+                current_action_mask(context);
             const RecurrentPolicyCloseResult result =
                 recurrent_backend->close_transition(
                     std::max<std::size_t>(1U, option_elapsed_steps),
@@ -1214,6 +1551,9 @@ struct ReinforcementAgent::Implementation {
         option_reward = 0.0f;
         option_reward_discount = 1.0f;
         option_elapsed_steps = 0;
+        impact_credit_steps_remaining = 0;
+        impact_credit_steps_total = 0;
+        active_commands_mirrored = false;
         return trained;
     }
 
@@ -1521,9 +1861,13 @@ struct ReinforcementAgent::Implementation {
     float option_reward = 0.0f;
     float option_reward_discount = 1.0f;
     std::size_t option_elapsed_steps = 0;
+    std::size_t impact_credit_steps_remaining = 0;
+    std::size_t impact_credit_steps_total = 0;
     std::size_t disable_cloud_cooldown_options_remaining = 0;
     std::string active_selection_source;
     float active_selected_q = 0.0f;
+    bool active_commands_mirrored = false;
+    bool greedy_training_episode = false;
     std::array<
         std::uint64_t,
         kControlledCharacterCount
@@ -1574,6 +1918,22 @@ ReinforcementDecision ReinforcementAgent::step(
         );
     }
     if (
+        !std::isfinite(input.fighter_distance) ||
+        !std::isfinite(input.player_x) ||
+        !std::isfinite(input.opponent_x)
+    ) {
+        throw std::invalid_argument(
+            "reinforcement spatial context is not finite"
+        );
+    }
+    const ActionContext action_context{
+        .distance = std::clamp(input.fighter_distance, 0.0f, 1.0f),
+        .player_x = std::clamp(input.player_x, 0.0f, 1.0f),
+        .opponent_x = std::clamp(input.opponent_x, 0.0f, 1.0f),
+        .spatial_valid = input.spatial_valid,
+        .opponent_attacking = input.opponent_attacking,
+    };
+    if (
         state.recurrent_backend != nullptr &&
         !input.state.empty()
     ) {
@@ -1619,7 +1979,18 @@ ReinforcementDecision ReinforcementAgent::step(
         state.current_episode_id = input.episode_id;
         state.current_episode_return = 0.0f;
         state.disable_cloud_cooldown_options_remaining = 0;
+        const std::size_t player =
+            character_index(state.config.character);
+        state.greedy_training_episode =
+            state.config.training_enabled &&
+            (
+                (state.character_episodes_completed[player] + 1U) %
+                    state.config.greedy_training_episode_interval ==
+                0U
+            );
     }
+    decision.greedy_training_episode =
+        state.greedy_training_episode;
     state.current_episode_return += input.reward;
     if (state.active_option.has_value()) {
         state.option_reward +=
@@ -1629,13 +2000,16 @@ ReinforcementDecision ReinforcementAgent::step(
 
     bool trained = false;
     const auto& options = state.options();
-    const bool option_complete =
+    const bool option_program_complete =
         state.active_option.has_value() &&
         state.active_step >=
             options[*state.active_option].states.size();
+    const bool option_complete =
+        option_program_complete &&
+        state.impact_credit_steps_remaining == 0;
     if (input.episode_ended || option_complete) {
         trained = state.close_active_transition(
-            input.state, input.episode_ended
+            input.state, input.episode_ended, action_context
         );
     }
 
@@ -1688,8 +2062,14 @@ ReinforcementDecision ReinforcementAgent::step(
     ) {
         if (!state.active_option.has_value()) {
             float q = 0.0f;
+            std::size_t allowed_options = 0;
             auto [selected, source] =
-                state.select_action(input.state, q);
+                state.select_action(
+                    input.state,
+                    action_context,
+                    q,
+                    allowed_options
+                );
             state.active_option = selected;
             state.active_step = 0;
             state.option_start_state.assign(
@@ -1698,8 +2078,20 @@ ReinforcementDecision ReinforcementAgent::step(
             state.option_reward = 0.0f;
             state.option_reward_discount = 1.0f;
             state.option_elapsed_steps = 0;
+            state.impact_credit_steps_total =
+                impact_credit_steps(
+                    options[selected], action_context, state.config
+                );
+            state.impact_credit_steps_remaining =
+                state.impact_credit_steps_total;
+            state.active_commands_mirrored =
+                action_context.spatial_valid &&
+                    state.config.dynamic_facing
+                ? action_context.player_is_right_of_opponent()
+                : state.config.facing == FighterFacing::left;
             state.active_selection_source = std::move(source);
             state.active_selected_q = q;
+            decision.allowed_options = allowed_options;
             if (
                 selected == 0U &&
                 state.config.neutral_option_penalty > 0.0f
@@ -1717,30 +2109,46 @@ ReinforcementDecision ReinforcementAgent::step(
                 state.recurrent_backend->begin_transition(
                     selected,
                     character_index(state.config.character),
-                    opponent_index(state.config.opponent_character)
+                    opponent_index(state.config.opponent_character),
+                    q
                 );
             }
         }
         const std::size_t selected = *state.active_option;
         const OptionDefinition& option = options[selected];
-        decision.commands = option.states[state.active_step];
-        if (state.config.facing == FighterFacing::left) {
-            for (int& command : decision.commands) {
-                if (command == kLeft) {
-                    command = kRight;
-                } else if (command == kRight) {
-                    command = kLeft;
+        if (state.active_step < option.states.size()) {
+            decision.commands = option.states[state.active_step];
+            if (state.active_commands_mirrored) {
+                for (int& command : decision.commands) {
+                    if (command == kLeft) {
+                        command = kRight;
+                    } else if (command == kRight) {
+                        command = kLeft;
+                    }
                 }
             }
+            ++state.active_step;
+        } else if (state.impact_credit_steps_remaining > 0) {
+            decision.commands.clear();
+            decision.impact_credit_step =
+                state.impact_credit_steps_total -
+                state.impact_credit_steps_remaining + 1U;
+            --state.impact_credit_steps_remaining;
         }
         decision.option_name = option.name;
         decision.selection_source =
             state.active_selection_source;
         decision.option_index = selected;
-        decision.option_step = state.active_step + 1U;
-        decision.option_steps = option.states.size();
+        decision.option_step =
+            state.active_step + decision.impact_credit_step;
+        decision.option_steps =
+            option.states.size() + state.impact_credit_steps_total;
+        decision.impact_credit_steps =
+            state.impact_credit_steps_total;
+        decision.disable_cloud_cooldown_remaining =
+            state.disable_cloud_cooldown_options_remaining;
+        decision.commands_mirrored = state.active_commands_mirrored;
         decision.selected_q = state.active_selected_q;
-        ++state.active_step;
         ++state.option_elapsed_steps;
     }
 
@@ -1749,6 +2157,23 @@ ReinforcementDecision ReinforcementAgent::step(
     if (state.recurrent_backend != nullptr) {
         const auto& recurrent = state.recurrent_backend->stats();
         decision.training_loss = recurrent.last_loss;
+        decision.predicted_q_mean = recurrent.last_predicted_q_mean;
+        decision.td_target_mean = recurrent.last_td_target_mean;
+        decision.bootstrap_mean = recurrent.last_bootstrap_mean;
+        decision.q_target_gap = recurrent.last_q_target_gap;
+        decision.abs_td_error = recurrent.last_abs_td_error;
+        decision.q_target_clipped_fraction =
+            recurrent.last_q_target_clipped_fraction;
+        decision.terminal_sample_fraction =
+            recurrent.last_terminal_sample_fraction;
+        decision.terminal_predicted_q_mean =
+            recurrent.last_terminal_predicted_q_mean;
+        decision.terminal_td_target_mean =
+            recurrent.last_terminal_td_target_mean;
+        decision.critic_disagreement =
+            recurrent.last_critic_disagreement;
+        decision.hard_negative_sample_fraction =
+            recurrent.last_hard_negative_sample_fraction;
         decision.replay_size = recurrent.replay_size;
         decision.training_updates = recurrent.training_updates;
     } else {
@@ -1760,6 +2185,22 @@ ReinforcementDecision ReinforcementAgent::step(
     return decision;
 }
 
+void ReinforcementAgent::suspend() {
+    auto& state = *implementation_;
+    state.active_option.reset();
+    state.active_step = 0;
+    state.option_start_state.clear();
+    state.option_reward = 0.0f;
+    state.option_reward_discount = 1.0f;
+    state.option_elapsed_steps = 0;
+    state.impact_credit_steps_remaining = 0;
+    state.impact_credit_steps_total = 0;
+    state.active_commands_mirrored = false;
+    if (state.recurrent_backend != nullptr) {
+        state.recurrent_backend->reset();
+    }
+}
+
 void ReinforcementAgent::reset_episode(bool save_checkpoint) {
     auto& state = *implementation_;
     state.active_option.reset();
@@ -1768,6 +2209,10 @@ void ReinforcementAgent::reset_episode(bool save_checkpoint) {
     state.option_reward = 0.0f;
     state.option_reward_discount = 1.0f;
     state.option_elapsed_steps = 0;
+    state.impact_credit_steps_remaining = 0;
+    state.impact_credit_steps_total = 0;
+    state.active_commands_mirrored = false;
+    state.greedy_training_episode = false;
     state.disable_cloud_cooldown_options_remaining = 0;
     state.current_episode_return = 0.0f;
     state.current_episode_id = 0;
@@ -1825,6 +2270,50 @@ ReinforcementAgentStats ReinforcementAgent::stats() const {
             recurrent != nullptr
                 ? recurrent->last_loss
                 : state.last_training_loss,
+        .last_predicted_q_mean =
+            recurrent != nullptr
+                ? recurrent->last_predicted_q_mean
+                : 0.0f,
+        .last_td_target_mean =
+            recurrent != nullptr
+                ? recurrent->last_td_target_mean
+                : 0.0f,
+        .last_bootstrap_mean =
+            recurrent != nullptr
+                ? recurrent->last_bootstrap_mean
+                : 0.0f,
+        .last_q_target_gap =
+            recurrent != nullptr
+                ? recurrent->last_q_target_gap
+                : 0.0f,
+        .last_abs_td_error =
+            recurrent != nullptr
+                ? recurrent->last_abs_td_error
+                : 0.0f,
+        .last_q_target_clipped_fraction =
+            recurrent != nullptr
+                ? recurrent->last_q_target_clipped_fraction
+                : 0.0f,
+        .last_terminal_sample_fraction =
+            recurrent != nullptr
+                ? recurrent->last_terminal_sample_fraction
+                : 0.0f,
+        .last_terminal_predicted_q_mean =
+            recurrent != nullptr
+                ? recurrent->last_terminal_predicted_q_mean
+                : 0.0f,
+        .last_terminal_td_target_mean =
+            recurrent != nullptr
+                ? recurrent->last_terminal_td_target_mean
+                : 0.0f,
+        .last_critic_disagreement =
+            recurrent != nullptr
+                ? recurrent->last_critic_disagreement
+                : 0.0f,
+        .last_hard_negative_sample_fraction =
+            recurrent != nullptr
+                ? recurrent->last_hard_negative_sample_fraction
+                : 0.0f,
         .current_episode_return = state.current_episode_return,
         .best_episode_return =
             state.character_best_episode_return[player],
@@ -1840,6 +2329,8 @@ ReinforcementAgentStats ReinforcementAgent::stats() const {
         .trainable_lstm = recurrent != nullptr,
         .recurrent_checkpoint_loaded =
             recurrent != nullptr && recurrent->checkpoint_loaded,
+        .recurrent_checkpoint_migrated =
+            recurrent != nullptr && recurrent->checkpoint_migrated,
         .trainable_resnet =
             recurrent != nullptr && recurrent->trainable_resnet,
         .resnet_checkpoint_loaded =
