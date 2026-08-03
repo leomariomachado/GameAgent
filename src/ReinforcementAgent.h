@@ -76,9 +76,9 @@ struct ReinforcementAgentConfig {
     std::size_t checkpoint_interval_episodes = 1;
     bool resume = true;
     bool save_replay = true;
-    // Enables the CUDA/PyTorch recurrent Double-DQN backend. The legacy
-    // feed-forward DQN remains available for unit tests and checkpoint
-    // migration, but production RL uses a trainable LSTM by default.
+    // Native C++/CUDA is the production default. Python remains a reference
+    // backend for checkpoint conversion and controlled parity comparisons.
+    std::string recurrent_backend = "cpp";
     bool trainable_lstm = false;
     bool trainable_resnet = false;
     std::size_t temporal_visual_size = 2048;

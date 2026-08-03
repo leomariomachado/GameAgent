@@ -41,6 +41,7 @@ export GAMEAGENT_DEVICE_ID="${GAMEAGENT_DEVICE_ID:-0}"
 export GAMEAGENT_LSTM_PROJECTION_SIZE="${GAMEAGENT_LSTM_PROJECTION_SIZE:-256}"
 export GAMEAGENT_LSTM_HIDDEN_SIZE="${GAMEAGENT_LSTM_HIDDEN_SIZE:-256}"
 export GAMEAGENT_REINFORCEMENT_LEARNING="${GAMEAGENT_REINFORCEMENT_LEARNING:-0}"
+export GAMEAGENT_RL_BACKEND="${GAMEAGENT_RL_BACKEND:-cpp}"
 export GAMEAGENT_RL_TRAINING="${GAMEAGENT_RL_TRAINING:-1}"
 export GAMEAGENT_RL_RESUME="${GAMEAGENT_RL_RESUME:-1}"
 export GAMEAGENT_RL_TRAINABLE_LSTM="${GAMEAGENT_RL_TRAINABLE_LSTM:-1}"
@@ -73,6 +74,8 @@ export GAMEAGENT_RL_SCRIPTED_EXPLORATION="${GAMEAGENT_RL_SCRIPTED_EXPLORATION:-0
 export GAMEAGENT_RL_REWARD_LOG_INTERVAL_MS="${GAMEAGENT_RL_REWARD_LOG_INTERVAL_MS:-5000}"
 export GAMEAGENT_RL_DAMAGE_DEALT_REWARD_SCALE="${GAMEAGENT_RL_DAMAGE_DEALT_REWARD_SCALE:-15.0}"
 export GAMEAGENT_RL_DAMAGE_TAKEN_PENALTY_SCALE="${GAMEAGENT_RL_DAMAGE_TAKEN_PENALTY_SCALE:-11.0}"
+export GAMEAGENT_RL_ROUND_WIN_BONUS="${GAMEAGENT_RL_ROUND_WIN_BONUS:-10.0}"
+export GAMEAGENT_RL_ROUND_LOSS_PENALTY="${GAMEAGENT_RL_ROUND_LOSS_PENALTY:-5.0}"
 export GAMEAGENT_RL_COMBO_REWARD_SCALE="${GAMEAGENT_RL_COMBO_REWARD_SCALE:-0.05}"
 export GAMEAGENT_RL_DEFENSE_REWARD_PER_SECOND="${GAMEAGENT_RL_DEFENSE_REWARD_PER_SECOND:-0.05}"
 export GAMEAGENT_RL_IDLE_PENALTY_PER_SECOND="${GAMEAGENT_RL_IDLE_PENALTY_PER_SECOND:-0.01}"
@@ -200,7 +203,34 @@ if [[ "${GAMEAGENT_REINFORCEMENT_LEARNING}" == "1" ]]; then
     exit 1
   fi
   mkdir -p "${GAMEAGENT_RL_CHECKPOINT_DIR}"
+  if [[ "${GAMEAGENT_RL_TRAINABLE_LSTM}" == "1" &&
+        "${GAMEAGENT_RL_BACKEND}" == "cpp" ]]; then
+    CPP_RECURRENT_CHECKPOINT="${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_recurrent_latest.baseai.ckpt"
+    LEGACY_RECURRENT_CHECKPOINT="${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_recurrent_latest.pt"
+    MIGRATED_RESNET_CHECKPOINT="${GAMEAGENT_RL_CHECKPOINT_DIR}/resnet50_stage4_migrated.ckpt"
+    if [[ ! -f "${CPP_RECURRENT_CHECKPOINT}" &&
+          -f "${LEGACY_RECURRENT_CHECKPOINT}" &&
+          "${GAMEAGENT_RL_CPP_AUTO_MIGRATE:-1}" == "1" ]]; then
+      echo "Migrating legacy PyTorch recurrent checkpoint to native BaseAI format..."
+      if ! python3 -c 'import torch'; then
+        echo "One-time checkpoint migration requires PyTorch." >&2
+        echo "Use GAMEAGENT_RL_BACKEND=python or install PyTorch, then retry." >&2
+        exit 1
+      fi
+      python3 "${GAMEAGENT_ROOT}/scripts/convert_recurrent_checkpoint_to_baseai.py" \
+        --input "${LEGACY_RECURRENT_CHECKPOINT}" \
+        --output "${CPP_RECURRENT_CHECKPOINT}" \
+        --base-resnet "${GAMEAGENT_RESNET50_CHECKPOINT}" \
+        --output-resnet "${MIGRATED_RESNET_CHECKPOINT}"
+    fi
+    if [[ -f "${MIGRATED_RESNET_CHECKPOINT}" &&
+          "${GAMEAGENT_RESNET50_CHECKPOINT}" == "/workspace/resnet50_best.ckpt" ]]; then
+      export GAMEAGENT_RESNET50_CHECKPOINT="${MIGRATED_RESNET_CHECKPOINT}"
+      echo "Native ResNet50 checkpoint: ${GAMEAGENT_RESNET50_CHECKPOINT}"
+    fi
+  fi
   echo "Reinforcement control: shared multi-character recurrent semi-Markov clipped twin Double DQN"
+  echo "RL backend: ${GAMEAGENT_RL_BACKEND}"
   echo "RL mode: $([[ "${GAMEAGENT_RL_TRAINING}" == "1" ]] && echo training || echo evaluation)"
   if [[ "${GAMEAGENT_RL_TRAINING}" == "0" ]]; then
     echo "RL persistence: read-only (no replay append, optimizer update or checkpoint write)"
@@ -217,15 +247,26 @@ if [[ "${GAMEAGENT_REINFORCEMENT_LEARNING}" == "1" ]]; then
   echo "RL trainable LSTM: ${GAMEAGENT_RL_TRAINABLE_LSTM}"
   echo "RL trainable ResNet50 stage 4: ${GAMEAGENT_RL_TRAINABLE_RESNET}"
   if [[ "${GAMEAGENT_RL_TRAINABLE_LSTM}" == "1" ]]; then
-    if [[ ! -f "${GAMEAGENT_RL_RECURRENT_SERVICE}" ]]; then
-      echo "Recurrent RL service not found: ${GAMEAGENT_RL_RECURRENT_SERVICE}" >&2
+    if [[ "${GAMEAGENT_RL_BACKEND}" == "python" ]]; then
+      if [[ ! -f "${GAMEAGENT_RL_RECURRENT_SERVICE}" ]]; then
+        echo "Recurrent RL service not found: ${GAMEAGENT_RL_RECURRENT_SERVICE}" >&2
+        exit 1
+      fi
+      if ! python3 -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)'; then
+        echo "Python recurrent backend requires PyTorch with CUDA support." >&2
+        exit 1
+      fi
+      echo "RL recurrent checkpoint: ${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_recurrent_latest.pt"
+    elif [[ "${GAMEAGENT_RL_BACKEND}" == "cpp" ]]; then
+      if [[ "${GAMEAGENT_RL_TRAINABLE_RESNET}" == "1" ]]; then
+        echo "Native C++ backend currently requires GAMEAGENT_RL_TRAINABLE_RESNET=0." >&2
+        exit 1
+      fi
+      echo "RL recurrent checkpoint: ${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_recurrent_latest.baseai.ckpt"
+    else
+      echo "GAMEAGENT_RL_BACKEND must be cpp or python." >&2
       exit 1
     fi
-    if ! python3 -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)'; then
-      echo "Trainable recurrent RL requires PyTorch with CUDA support." >&2
-      exit 1
-    fi
-    echo "RL recurrent checkpoint: ${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_recurrent_latest.pt"
     echo "RL recurrent device: cuda:${GAMEAGENT_DEVICE_ID}"
     if [[ "${GAMEAGENT_RL_TRAINABLE_RESNET}" == "1" ]]; then
       echo "RL ResNet fine-tuning: lr=${GAMEAGENT_RL_RESNET_LEARNING_RATE}, batch=${GAMEAGENT_RL_RESNET_BATCH_SIZE}, every=${GAMEAGENT_RL_RESNET_UPDATE_INTERVAL} recurrent updates"
@@ -240,7 +281,7 @@ if [[ "${GAMEAGENT_REINFORCEMENT_LEARNING}" == "1" ]]; then
   echo "RL reward summary: every ${GAMEAGENT_RL_REWARD_LOG_INTERVAL_MS} ms"
   echo "RL value calibration: gamma=${GAMEAGENT_RL_GAMMA}, twin_critics=1, conservative_bootstrap=${GAMEAGENT_RL_CONSERVATIVE_BOOTSTRAP}, q_limit=${GAMEAGENT_RL_Q_VALUE_LIMIT}, n_step=${GAMEAGENT_RL_N_STEP_OPTIONS}, terminal_replay=${GAMEAGENT_RL_TERMINAL_REPLAY_FRACTION}, hard_negative_replay=${GAMEAGENT_RL_HARD_NEGATIVE_REPLAY_FRACTION}"
   echo "RL combat state: v2 (30 context features)"
-  echo "RL health reward: dealt=${GAMEAGENT_RL_DAMAGE_DEALT_REWARD_SCALE}, taken=${GAMEAGENT_RL_DAMAGE_TAKEN_PENALTY_SCALE}"
+  echo "RL health reward: dealt=${GAMEAGENT_RL_DAMAGE_DEALT_REWARD_SCALE}, taken=${GAMEAGENT_RL_DAMAGE_TAKEN_PENALTY_SCALE}, win=${GAMEAGENT_RL_ROUND_WIN_BONUS}, loss=${GAMEAGENT_RL_ROUND_LOSS_PENALTY}"
   echo "RL shaping: combo=${GAMEAGENT_RL_COMBO_REWARD_SCALE}, defense=${GAMEAGENT_RL_DEFENSE_REWARD_PER_SECOND}/s, idle=${GAMEAGENT_RL_IDLE_PENALTY_PER_SECOND}/s, corner=${GAMEAGENT_RL_CORNER_PENALTY_PER_SECOND}/s, neutral=${GAMEAGENT_RL_NEUTRAL_OPTION_PENALTY}/selection"
   echo "RL tactical mask: dynamic_facing=${GAMEAGENT_RL_DYNAMIC_FACING}, neutral_suppressed=${GAMEAGENT_RL_SUPPRESS_NEUTRAL}, combo_distance<=${GAMEAGENT_RL_COMBO_MAX_DISTANCE}, close_attack<=${GAMEAGENT_RL_CLOSE_ATTACK_MAX_DISTANCE}, projectile_distance>=${GAMEAGENT_RL_PROJECTILE_MIN_DISTANCE}, advance_distance>=${GAMEAGENT_RL_ADVANCE_MIN_DISTANCE}, defense_distance<=${GAMEAGENT_RL_DEFENSE_MAX_DISTANCE}"
   echo "RL tactical cooldown: disable cloud=${GAMEAGENT_RL_DISABLE_CLOUD_COOLDOWN_OPTIONS} alternative options; teleport unrestricted"

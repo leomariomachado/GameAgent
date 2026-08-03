@@ -914,7 +914,11 @@ void handle_websocket_connection(
             );
         const auto recurrent_checkpoint =
             options.reinforcement_checkpoint_directory /
-            "shared_recurrent_latest.pt";
+            (
+                options.reinforcement_backend == "cpp"
+                    ? "shared_recurrent_latest.baseai.ckpt"
+                    : "shared_recurrent_latest.pt"
+            );
         // A no-resume launch is fresh only while the directory has no
         // checkpoint. Once the first connection has persisted progress, every
         // reconnect resumes it automatically instead of silently resetting
@@ -1027,10 +1031,13 @@ void handle_websocket_connection(
                                 .reinforcement_checkpoint_interval_episodes,
                         .resume = effective_resume,
                         .save_replay = true,
+                        .recurrent_backend =
+                            options.reinforcement_backend,
                         .trainable_lstm =
                             options.reinforcement_trainable_lstm,
                         .trainable_resnet =
-                            options.reinforcement_trainable_resnet,
+                            options.reinforcement_trainable_resnet &&
+                            options.reinforcement_backend == "python",
                         .temporal_visual_size =
                             static_cast<std::size_t>(
                                 ResNet50FeatureExtractor::kFeatureSize
@@ -1170,6 +1177,8 @@ void handle_websocket_connection(
                 {"trainable_lstm",
                  reinforcement_agent != nullptr &&
                      reinforcement_agent->stats().trainable_lstm},
+                {"recurrent_backend",
+                 options.reinforcement_backend},
                 {"recurrent_checkpoint_loaded",
                  reinforcement_agent != nullptr &&
                      reinforcement_agent
@@ -1198,6 +1207,14 @@ void handle_websocket_connection(
                  reinforcement_agent != nullptr
                      ? options
                            .reinforcement_damage_taken_penalty_scale
+                     : 0.0f},
+                {"round_win_bonus",
+                 reinforcement_agent != nullptr
+                     ? options.reinforcement_round_win_bonus
+                     : 0.0f},
+                {"round_loss_penalty",
+                 reinforcement_agent != nullptr
+                     ? options.reinforcement_round_loss_penalty
                      : 0.0f},
                 {"combo_reward_scale",
                  reinforcement_agent != nullptr
@@ -1266,6 +1283,10 @@ void handle_websocket_connection(
          options.reinforcement_damage_dealt_reward_scale},
         {"damage_taken_penalty_scale",
          options.reinforcement_damage_taken_penalty_scale},
+        {"round_win_bonus",
+         options.reinforcement_round_win_bonus},
+        {"round_loss_penalty",
+         options.reinforcement_round_loss_penalty},
         {"combo_reward_scale",
          options.reinforcement_combo_reward_scale},
         {"defense_reward_per_second",
@@ -1312,6 +1333,7 @@ void handle_websocket_connection(
         {"trainable_lstm",
          reinforcement_agent != nullptr &&
              reinforcement_agent->stats().trainable_lstm},
+        {"recurrent_backend", options.reinforcement_backend},
         {"trainable_resnet",
          reinforcement_agent != nullptr &&
              reinforcement_agent->stats().trainable_resnet},
@@ -1359,6 +1381,7 @@ void handle_websocket_connection(
                 ? reinforcement_agent->stats().training_device
                 : "disabled"
         )
+        << " backend=" << options.reinforcement_backend
         << " resnet="
         << (
             reinforcement_agent != nullptr &&
@@ -1396,6 +1419,10 @@ void handle_websocket_connection(
                 options.reinforcement_damage_dealt_reward_scale,
             .damage_taken_penalty_scale =
                 options.reinforcement_damage_taken_penalty_scale,
+            .round_win_bonus =
+                options.reinforcement_round_win_bonus,
+            .round_loss_penalty =
+                options.reinforcement_round_loss_penalty,
         });
         combat_tracker = std::make_unique<CombatStateTracker>(
             CombatStateConfig{
@@ -3001,9 +3028,14 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
         (!options_.temporal_model_enabled ||
          options_.reinforcement_checkpoint_directory.empty() ||
          (
+             options_.reinforcement_backend != "cpp" &&
+             options_.reinforcement_backend != "python"
+         ) ||
+         (
              options_.reinforcement_trainable_resnet &&
              (
                  !options_.reinforcement_trainable_lstm ||
+                 options_.reinforcement_backend != "python" ||
                  options_.reinforcement_resnet_learning_rate <= 0.0f ||
                  options_.reinforcement_resnet_batch_size == 0 ||
                  options_.reinforcement_resnet_update_interval == 0 ||
@@ -3013,9 +3045,12 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
          (
              options_.reinforcement_trainable_lstm &&
              (
-                 options_.recurrent_service_script.empty() ||
-                 !std::filesystem::is_regular_file(
-                     options_.recurrent_service_script
+                 options_.reinforcement_backend == "python" &&
+                 (
+                     options_.recurrent_service_script.empty() ||
+                     !std::filesystem::is_regular_file(
+                         options_.recurrent_service_script
+                     )
                  )
              )
          ) ||
@@ -3086,7 +3121,8 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
         std::cout << "[TEMPORAL] loading "
                   << (
                       options_.reinforcement_learning_enabled &&
-                              options_.reinforcement_trainable_resnet
+                              options_.reinforcement_trainable_resnet &&
+                              options_.reinforcement_backend == "python"
                           ? "external trainable"
                           : "frozen"
                   )
@@ -3112,7 +3148,8 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                     ),
                 .external_visual_encoder =
                     options_.reinforcement_learning_enabled &&
-                    options_.reinforcement_trainable_resnet,
+                    options_.reinforcement_trainable_resnet &&
+                    options_.reinforcement_backend == "python",
             }
         );
         const auto& report = temporal_agent->checkpoint_report();
@@ -3264,6 +3301,10 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                     {"damage_taken_penalty_scale",
                      options_
                          .reinforcement_damage_taken_penalty_scale},
+                    {"round_win_bonus",
+                     options_.reinforcement_round_win_bonus},
+                    {"round_loss_penalty",
+                     options_.reinforcement_round_loss_penalty},
                     {"combo_reward_scale",
                      options_.reinforcement_combo_reward_scale},
                     {"defense_reward_per_second",

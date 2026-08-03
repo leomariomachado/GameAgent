@@ -222,6 +222,9 @@ int main(int argc, char** argv) {
             environment_or("GAMEAGENT_REINFORCEMENT_LEARNING", "0"),
             "reinforcement-learning flag"
         );
+        server_options.reinforcement_backend = environment_or(
+            "GAMEAGENT_RL_BACKEND", "cpp"
+        );
         server_options.reinforcement_training_enabled = parse_boolean(
             environment_or("GAMEAGENT_RL_TRAINING", "1"),
             "reinforcement-training flag"
@@ -289,6 +292,20 @@ int main(int argc, char** argv) {
                     "GAMEAGENT_RL_DAMAGE_TAKEN_PENALTY_SCALE", "11.0"
                 ),
                 "RL damage taken penalty scale", 0.0f, 100.0f
+            );
+        server_options.reinforcement_round_win_bonus =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_ROUND_WIN_BONUS", "10.0"
+                ),
+                "RL round win bonus", 0.0f, 100.0f
+            );
+        server_options.reinforcement_round_loss_penalty =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_ROUND_LOSS_PENALTY", "5.0"
+                ),
+                "RL round loss penalty", 0.0f, 100.0f
             );
         server_options.reinforcement_defense_reward_per_second =
             parse_float_range(

@@ -701,11 +701,14 @@ struct ReinforcementAgent::Implementation {
         std::filesystem::path recurrent_checkpoint =
             config.recurrent_checkpoint_path;
         if (recurrent_checkpoint.empty()) {
-            recurrent_checkpoint =
-                config.checkpoint_path.string() + ".recurrent.pt";
+            recurrent_checkpoint = config.checkpoint_path.string() +
+                (config.recurrent_backend == "cpp"
+                    ? ".recurrent.baseai.ckpt"
+                    : ".recurrent.pt");
         }
         recurrent_backend = std::make_unique<RecurrentPolicyBackend>(
             RecurrentPolicyBackendConfig{
+                .backend = config.recurrent_backend,
                 .service_script = config.recurrent_service_script,
                 .checkpoint_path = recurrent_checkpoint,
                 .migration_checkpoint_path =
@@ -871,9 +874,14 @@ struct ReinforcementAgent::Implementation {
                 1.0f ||
             config.hard_negative_q_threshold < 0.0f ||
             (
+                config.recurrent_backend != "cpp" &&
+                config.recurrent_backend != "python"
+            ) ||
+            (
                 config.trainable_resnet &&
                 (
                     !config.trainable_lstm ||
+                    config.recurrent_backend != "python" ||
                     config.resnet50_checkpoint_path.empty() ||
                     config.resnet_learning_rate <= 0.0f ||
                     config.resnet_batch_size == 0 ||
@@ -891,7 +899,10 @@ struct ReinforcementAgent::Implementation {
                     config.temporal_sequence_capacity == 0 ||
                     config.temporal_device_id < 0 ||
                     config.input_size <= config.temporal_hidden_size ||
-                    config.recurrent_service_script.empty()
+                    (
+                        config.recurrent_backend == "python" &&
+                        config.recurrent_service_script.empty()
+                    )
                 )
             )
         ) {
@@ -1686,7 +1697,10 @@ struct ReinforcementAgent::Implementation {
                         !config.recurrent_checkpoint_path.empty()
                     ? config.recurrent_checkpoint_path
                     : std::filesystem::path(
-                          path.string() + ".recurrent.pt"
+                          path.string() +
+                          (config.recurrent_backend == "cpp"
+                              ? ".recurrent.baseai.ckpt"
+                              : ".recurrent.pt")
                       );
             recurrent_backend->save(recurrent_path, false);
         }

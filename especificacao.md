@@ -233,11 +233,13 @@ Compatibilidade: um cliente antigo que envie um frame como primeira mensagem
 continua funcionando e recebe o perfil padrão do Sub-Zero contra `unknown`, mas
 não receberá `session_config_ack`.
 
-Os quatro personagens usam uma única política recorrente compartilhada. No
-launcher de treino, o último estágio (`layer4`) da ResNet50 também aprende; os
-estágios anteriores e as estatísticas de BatchNorm permanecem congelados.
-LSTM, embeddings do personagem/oponente, tronco de estratégia e heads Q
-aprendem juntos por BPTT na GPU. O replay de sequências é balanceado por
+Os quatro personagens usam uma única política recorrente compartilhada. O
+backend padrão é C++/CUDA nativo, executado no mesmo processo e construído
+sobre Tensor, Stream, AdamW e checkpoint do BaseAI. A ResNet50 permanece
+congelada nesse backend; LSTM, embeddings do personagem/oponente, tronco de
+estratégia e os dois críticos Q aprendem juntos por BPTT na GPU. O backend
+PyTorch continua disponível explicitamente para experimentos que precisem
+treinar o `layer4` da ResNet50. O replay de sequências é balanceado por
 combinação personagem/oponente e nunca atravessa o limite entre duas lutas.
 Epsilon, contadores de seleção e melhor retorno continuam independentes por
 personagem.
@@ -257,12 +259,13 @@ prolongada e permanência no canto. As métricas da ação expõem separadamente
 `corner_penalty`. Campos adicionais de diagnóstico são opcionais para o
 cliente, e `commands` continua sendo a única ação autoritativa.
 
-O modelo retomável é
-`/workspace/gameagent/rl_checkpoints/shared_recurrent_latest.pt`; ele inclui
-ResNet50, LSTM/DQN, estados dos otimizadores e replay compacto. O estado de
-opções/epsilon do C++ fica em `shared_recurrent_metadata_latest.garl`.
+O modelo retomável padrão é
+`/workspace/gameagent/rl_checkpoints/shared_recurrent_latest.baseai.ckpt`; ele
+inclui LSTM/DQN, críticos alvo, estado do AdamW e contadores. O replay é
+reabastecido em memória após retomar. O estado de opções/epsilon do C++ fica
+em `shared_recurrent_metadata_latest.garl`.
 Snapshots melhores usam
-`shared_recurrent_metadata_best_<personagem>.garl.recurrent.pt`. Não existe
+`shared_recurrent_metadata_best_<personagem>.garl.recurrent.baseai.ckpt`. Não existe
 checkpoint por dupla. O antigo `shared_policy_latest.garl` não é sobrescrito e
 continua disponível como baseline da DQN sem LSTM treinável.
 

@@ -1,4 +1,5 @@
 #include "RecurrentPolicyBackend.h"
+#include "CppRecurrentPolicyBackend.h"
 #include "StreamProtocol.h"
 
 #include <json.hpp>
@@ -44,6 +45,15 @@ void require_positive(std::size_t value, const char* name) {
 struct RecurrentPolicyBackend::Implementation {
     explicit Implementation(RecurrentPolicyBackendConfig value)
         : config(std::move(value)) {
+        if (config.backend == "cpp") {
+            cpp = std::make_unique<CppRecurrentPolicyBackend>(config);
+            return;
+        }
+        if (config.backend != "python") {
+            throw std::invalid_argument(
+                "GAMEAGENT_RL_BACKEND must be cpp or python"
+            );
+        }
         validate();
         spawn_service();
         const nlohmann::json ready = read_response();
@@ -325,6 +335,7 @@ struct RecurrentPolicyBackend::Implementation {
     }
 
     void update_stats(const nlohmann::json& response) {
+        stats.backend = "python";
         stats.training_updates =
             response.value("training_updates", stats.training_updates);
         stats.replay_size =
@@ -428,6 +439,7 @@ struct RecurrentPolicyBackend::Implementation {
 
     RecurrentPolicyBackendConfig config;
     RecurrentPolicyBackendStats stats;
+    std::unique_ptr<CppRecurrentPolicyBackend> cpp;
     pid_t child_pid = -1;
     FILE* service_input = nullptr;
     FILE* service_output = nullptr;
@@ -450,6 +462,12 @@ void RecurrentPolicyBackend::observe(
     bool episode_started
 ) {
     auto& state = *implementation_;
+    if (state.cpp != nullptr) {
+        state.cpp->observe(
+            visual, jpeg, frame_id, controller, context, episode_started
+        );
+        return;
+    }
     if (
         (
             !state.config.trainable_resnet &&
@@ -489,6 +507,11 @@ std::vector<float> RecurrentPolicyBackend::q_values(
     std::size_t action_count
 ) {
     auto& state = *implementation_;
+    if (state.cpp != nullptr) {
+        return state.cpp->q_values(
+            character, opponent, action_count
+        );
+    }
     const nlohmann::json response = state.transact({
         {"op", "q_values"},
         {"character", character},
@@ -511,6 +534,12 @@ void RecurrentPolicyBackend::begin_transition(
     std::size_t opponent,
     float selected_q
 ) {
+    if (implementation_->cpp != nullptr) {
+        implementation_->cpp->begin_transition(
+            action, character, opponent, selected_q
+        );
+        return;
+    }
     static_cast<void>(implementation_->transact({
         {"op", "begin"},
         {"action", action},
@@ -527,6 +556,11 @@ RecurrentPolicyCloseResult RecurrentPolicyBackend::close_transition(
     std::span<const std::uint8_t> next_action_mask
 ) {
     auto& state = *implementation_;
+    if (state.cpp != nullptr) {
+        return state.cpp->close_transition(
+            duration, reward, terminal, next_action_mask
+        );
+    }
     const nlohmann::json response = state.transact({
         {"op", "close"},
         {"duration", duration},
@@ -544,6 +578,10 @@ RecurrentPolicyCloseResult RecurrentPolicyBackend::close_transition(
 }
 
 void RecurrentPolicyBackend::reset() {
+    if (implementation_->cpp != nullptr) {
+        implementation_->cpp->reset();
+        return;
+    }
     static_cast<void>(implementation_->transact({{"op", "reset"}}));
 }
 
@@ -552,6 +590,10 @@ void RecurrentPolicyBackend::save(
     bool include_replay
 ) {
     auto& state = *implementation_;
+    if (state.cpp != nullptr) {
+        state.cpp->save(path, include_replay);
+        return;
+    }
     static_cast<void>(state.transact({
         {"op", "save"},
         {"path",
@@ -563,6 +605,9 @@ void RecurrentPolicyBackend::save(
 }
 
 const RecurrentPolicyBackendStats& RecurrentPolicyBackend::stats() const {
+    if (implementation_->cpp != nullptr) {
+        return implementation_->cpp->stats();
+    }
     return implementation_->stats;
 }
 

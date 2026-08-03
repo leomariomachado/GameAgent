@@ -32,6 +32,7 @@ fi
   test_gameagent_http_server \
   test_gameagent_stream_protocol \
   test_gameagent_frame_buffer \
+  test_gameagent_repeated_frame_detector \
   test_gameagent_websocket_server \
   test_gameagent_action_history \
   test_gameagent_mock_agent \
@@ -40,6 +41,10 @@ fi
   test_gameagent_health_bar_detector \
   test_gameagent_combat_state_tracker \
   test_gameagent_reinforcement_agent \
+  test_gameagent_cpp_recurrent_backend \
+  test_gameagent_cpp_recurrent_parity \
+  test_gameagent_cpp_recurrent_training_parity \
+  benchmark_gameagent_cpp_recurrent_backend \
   -j"${BUILD_JOBS}"
 
 "${GAMEAGENT_CTEST_BIN}" --test-dir "${BUILD_DIR}" --output-on-failure

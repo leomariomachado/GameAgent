@@ -29,6 +29,7 @@ add_library(
         GameAgentMockCore
         src/ActionHistory.cpp
         src/CombatStateTracker.cpp
+        src/CppRecurrentPolicyBackend.cu
         src/FrameBuffer.cpp
         src/HealthBarDetector.cpp
         src/HttpServer.cpp
@@ -54,6 +55,47 @@ target_link_libraries(GameAgent PRIVATE GameAgentMockCore)
 
 include(CTest)
 if (BUILD_TESTING)
+    add_executable(
+            test_gameagent_cpp_recurrent_backend
+            tests/test_cpp_recurrent_backend.cu
+    )
+    target_link_libraries(
+            test_gameagent_cpp_recurrent_backend
+            PRIVATE GameAgentMockCore
+    )
+    add_test(
+            NAME gameagent_cpp_recurrent_backend
+            COMMAND test_gameagent_cpp_recurrent_backend
+    )
+    set_tests_properties(
+            gameagent_cpp_recurrent_backend
+            PROPERTIES SKIP_RETURN_CODE 77
+    )
+    add_executable(
+            test_gameagent_cpp_recurrent_parity
+            tests/test_cpp_recurrent_parity.cu
+    )
+    target_link_libraries(
+            test_gameagent_cpp_recurrent_parity
+            PRIVATE GameAgentMockCore
+    )
+    add_executable(
+            test_gameagent_cpp_recurrent_training_parity
+            tests/test_cpp_recurrent_training_parity.cu
+    )
+    target_link_libraries(
+            test_gameagent_cpp_recurrent_training_parity
+            PRIVATE GameAgentMockCore
+    )
+    add_executable(
+            benchmark_gameagent_cpp_recurrent_backend
+            tests/benchmark_cpp_recurrent_backend.cu
+    )
+    target_link_libraries(
+            benchmark_gameagent_cpp_recurrent_backend
+            PRIVATE GameAgentMockCore
+    )
+
     add_executable(
             test_gameagent_mock_protocol
             tests/test_mock_protocol.cpp

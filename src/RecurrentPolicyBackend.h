@@ -11,6 +11,10 @@
 namespace gameagent {
 
 struct RecurrentPolicyBackendConfig {
+    // Native C++/CUDA is the production default.  The Python sidecar remains
+    // available as a compatibility/reference backend while checkpoints are
+    // migrated and numerical parity is verified.
+    std::string backend = "cpp";
     std::filesystem::path service_script;
     std::filesystem::path checkpoint_path;
     std::filesystem::path migration_checkpoint_path;
@@ -77,6 +81,7 @@ struct RecurrentPolicyBackendStats {
     bool checkpoint_migrated = false;
     bool resnet_checkpoint_loaded = false;
     bool trainable_resnet = false;
+    std::string backend = "cpp";
     std::string device;
 };
 
@@ -85,9 +90,9 @@ struct RecurrentPolicyCloseResult {
     bool training_performed = false;
 };
 
-// Bidirectional local sidecar connection. PyTorch owns the trainable recurrent
-// graph and optimizer on CUDA; C++ remains responsible for deterministic
-// controller option timing and the public WebSocket protocol.
+// Recurrent policy facade.  The native backend owns the trainable LSTM, twin
+// DQN, replay and BaseAI AdamW state in-process.  The former Python sidecar is
+// retained behind GAMEAGENT_RL_BACKEND=python for parity/fallback only.
 class RecurrentPolicyBackend {
 public:
     explicit RecurrentPolicyBackend(RecurrentPolicyBackendConfig config);

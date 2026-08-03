@@ -71,10 +71,13 @@ image path, feature path, shape, inference time and numerical statistics.
 Records are ordered by the original client timestamp so later temporal windows
 can be formed without relying on lexicographic JPEG filenames.
 
-## Trainable ResNet50 and temporal LSTM
+## Native C++/CUDA temporal LSTM
 
-The reinforcement path now trains the temporal model together with the
-Double-DQN on CUDA, without changing the WebSocket protocol:
+The reinforcement path trains the temporal model together with the
+Double-DQN on CUDA, without changing the WebSocket protocol. The default
+`GAMEAGENT_RL_BACKEND=cpp` runs in-process and uses BaseAI tensors, streams,
+AdamW and v3 checkpoints; Python is not involved in the decision or training
+loop:
 
 ```text
 new decoded frame
@@ -97,19 +100,19 @@ decision ring. The controller input comes from `action_ack`, so the temporal mod
 sees what the client actually applied rather than assuming every requested
 state succeeded.
 
-The character RL launcher also fine-tunes ResNet50 `layer4` by default. Earlier
-stages, every BatchNorm running statistic and the dimensionality-reduction
-projection stay frozen. One visual mini-batch is trained every 16 recurrent
-updates, using the compressed JPEG retained in the bounded in-memory replay.
-This prevents image persistence and repeated JPEG re-encoding from entering the
-decision path.
+The native backend keeps the pretrained ResNet50 and the 2048→256 projection
+frozen, while BPTT updates the LSTM, shared strategy trunk,
+character/opponent embeddings and both independent Q critics. This avoids
+Python IPC and keeps image persistence and JPEG re-encoding outside the
+decision path. The former PyTorch backend remains available with
+`GAMEAGENT_RL_BACKEND=python`; it is currently the compatibility option when
+ResNet50 `layer4` fine-tuning is explicitly required.
 
 Backpropagation through time updates the LSTM, shared strategy trunk,
 character/opponent embeddings and all four Q heads in GPU batches. The replay
 stores bounded sequences and never crosses an episode boundary. The older
 inference-only `.gat` path remains available when trainable RL is disabled.
-The generic server launcher keeps ResNet fine-tuning disabled unless
-`GAMEAGENT_RL_TRAINABLE_RESNET=1` is explicitly set.
+The generic server launcher keeps ResNet fine-tuning disabled by default.
 
 ## Uniform character curricula
 
@@ -130,9 +133,10 @@ different learning privileges.
 
 ## Online reinforcement learning
 
-Reinforcement mode uses the optionally fine-tuned ResNet50 and trainable
-temporal encoder as the state encoder for a shared recurrent semi-Markov Double
-DQN. It adds the controlled and opponent health fractions, health advantage,
+Reinforcement mode uses the pretrained ResNet50 and trainable temporal encoder
+as the state encoder for a shared recurrent semi-Markov clipped twin Double
+DQN. The Python compatibility backend can optionally fine-tune ResNet50
+`layer4`. The policy adds the controlled and opponent health fractions, health advantage,
 HUD confidence, the latest client-confirmed 10-button state, ACK-known flag and
 15 explicit combat-state values to the 256-value LSTM hidden state. The added
 values are player/opponent X, distance, grounded/defending/attacking flags,
@@ -221,21 +225,26 @@ of truth for commands actually applied.
 
 ### Checkpoints and resume
 
-The recurrent checkpoint stores online/target LSTM and Double-DQN parameters,
-their AdamW state, the fine-tuned ResNet50 and its optimizer when enabled,
-update counters and a compact recent replay snapshot. Persisted replay omits
-JPEG bytes to keep checkpoints bounded; new frames refill visual replay after
-resume. A separate format-v4 metadata checkpoint preserves per-character
-epsilon/episode state. Both are written atomically at round end and connection
-shutdown:
+The native recurrent checkpoint stores online/target LSTM and clipped twin
+Double-DQN parameters, AdamW moments and update counters in BaseAI v3 format.
+Replay remains in memory and warms up again after a restart. A separate
+format-v4 metadata checkpoint preserves per-character epsilon/episode state.
+Both are written atomically at round end and connection shutdown:
 
 ```text
 /workspace/gameagent/rl_checkpoints/
-├── shared_recurrent_latest.pt
+├── shared_recurrent_latest.baseai.ckpt
 ├── shared_recurrent_metadata_latest.garl
 ├── shared_recurrent_metadata_best_<character>.garl
-└── shared_recurrent_metadata_best_<character>.garl.recurrent.pt
+└── shared_recurrent_metadata_best_<character>.garl.recurrent.baseai.ckpt
 ```
+
+When the native checkpoint is absent but `shared_recurrent_latest.pt` exists,
+the launcher performs a one-time conversion, without overwriting the Python
+file. Projection and neural weights are preserved; optimizer moments and
+replay restart cleanly. If the Python checkpoint contains a fine-tuned
+ResNet50 stage 4, it is exported as
+`resnet50_stage4_migrated.ckpt` and loaded by the native feature extractor.
 
 Combat-state v2 expands the recurrent context from 15 to 30 values. A
 pre-v2 checkpoint is intentionally rejected instead of silently attaching old
@@ -308,9 +317,9 @@ python3 scripts/analyze_rl_evaluation.py
 ```
 
 The analyzer fails if it observes exploration, training, changing update
-counters or checkpoint saves. The evaluator snapshots
-`shared_recurrent_latest.pt` (and metadata when present) before starting and
-verifies that every snapshot remains byte-identical.
+counters or checkpoint saves. The evaluator snapshots the backend-specific
+checkpoint (`shared_recurrent_latest.baseai.ckpt` by default) and metadata
+before starting and verifies that every snapshot remains byte-identical.
 Use `GAMEAGENT_EVALUATION_PORT=8081` when evaluating on a separately exposed
 port.
 
@@ -702,8 +711,9 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_LSTM_PROJECTION_SIZE` | `256` | ResNet50 feature projection width |
 | `GAMEAGENT_LSTM_HIDDEN_SIZE` | `256` | temporal hidden-state width |
 | `GAMEAGENT_REINFORCEMENT_LEARNING` | `0` | enable shared multi-character recurrent Double DQN |
+| `GAMEAGENT_RL_BACKEND` | `cpp` | recurrent backend: native in-process C++/CUDA (`cpp`) or PyTorch compatibility sidecar (`python`) |
 | `GAMEAGENT_RL_TRAINABLE_LSTM` | `1` | train the LSTM and Q network with BPTT on CUDA |
-| `GAMEAGENT_RL_TRAINABLE_RESNET` | `0` (`1` in character RL launcher) | fine-tune ResNet50 `layer4`; earlier stages and BatchNorm statistics stay frozen |
+| `GAMEAGENT_RL_TRAINABLE_RESNET` | `0` (`1` with Python backend) | fine-tune ResNet50 `layer4`; currently supported only by the Python compatibility backend |
 | `GAMEAGENT_RL_GAMMA` | `0.995` | discount per 100 ms decision, giving an approximately 20-second value horizon |
 | `GAMEAGENT_RL_CONSERVATIVE_BOOTSTRAP` | `1` | use the lower value from two independent recurrent critics |
 | `GAMEAGENT_RL_Q_VALUE_LIMIT` | `25.0` | symmetric TD-target bound based on the attainable combat reward range |
@@ -717,6 +727,8 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_RL_RESNET_REPLAY_IMAGES` | `4096` | newest compressed JPEGs retained only in memory for visual training |
 | `GAMEAGENT_RL_DAMAGE_DEALT_REWARD_SCALE` | `15.0` | reward multiplier for normalized damage dealt |
 | `GAMEAGENT_RL_DAMAGE_TAKEN_PENALTY_SCALE` | `11.0` | penalty multiplier for normalized damage taken |
+| `GAMEAGENT_RL_ROUND_WIN_BONUS` | `10.0` | terminal reward added when the controlled fighter wins the round |
+| `GAMEAGENT_RL_ROUND_LOSS_PENALTY` | `5.0` | terminal penalty subtracted when the controlled fighter loses the round |
 | `GAMEAGENT_RL_COMBO_REWARD_SCALE` | `0.05` | incremental bonus for each consecutive hit after the first, capped at five extra hits |
 | `GAMEAGENT_RL_DEFENSE_REWARD_PER_SECOND` | `0.05` | reward rate for a confirmed nearby block that prevents damage |
 | `GAMEAGENT_RL_NEUTRAL_OPTION_PENALTY` | `0.20` | fallback opportunity cost when `Neutro` is available under uncertain spatial state |
@@ -738,7 +750,8 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_RL_MIGRATION_CHECKPOINT` | unset | optional v7 recurrent checkpoint used only to initialize v8 perception and temporal representation |
 | `GAMEAGENT_RL_IDLE_PENALTY_PER_SECOND` | `0.01` | small penalty per second after 1.5 seconds without movement, commands or damage |
 | `GAMEAGENT_RL_CORNER_PENALTY_PER_SECOND` | `0.02` | small penalty per second after 1.0 second near a screen edge |
-| `GAMEAGENT_RL_RECURRENT_SERVICE` | `/tmp/GameAgent/scripts/recurrent_dqn_service.py` | persistent local PyTorch/CUDA recurrent backend |
+| `GAMEAGENT_RL_RECURRENT_SERVICE` | `/tmp/GameAgent/scripts/recurrent_dqn_service.py` | PyTorch/CUDA compatibility backend, used only with `GAMEAGENT_RL_BACKEND=python` |
+| `GAMEAGENT_RL_CPP_AUTO_MIGRATE` | `1` | convert a same-directory legacy `.pt` checkpoint once when the native checkpoint is absent |
 | `GAMEAGENT_RL_CHECKPOINT_DIR` | `/workspace/gameagent/rl_checkpoints` | shared latest policy/replay plus per-character best snapshots |
 | `GAMEAGENT_TRAINING_RESET_STATE` | `1` | request a client-side save-state load once after each `round_lost` |
 | `GAMEAGENT_TRAINING_RESET_NON_FIGHT_TIMEOUT_MS` | `5000` | request recovery after this many continuous milliseconds outside `active_fight` |
