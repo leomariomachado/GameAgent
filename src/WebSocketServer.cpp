@@ -766,6 +766,7 @@ void handle_websocket_connection(
     SocketReader& reader,
     const WebSocketServerOptions& options,
     TemporalAgent* temporal_agent,
+    std::unique_ptr<ReinforcementAgent>& reinforcement_agent_storage,
     MetricsLogger& metrics,
     std::uint64_t connection_id,
     const std::atomic_bool& stop_requested
@@ -891,7 +892,7 @@ void handle_websocket_connection(
         ) == "right"
             ? FighterFacing::right
             : FighterFacing::left;
-    std::unique_ptr<ReinforcementAgent> reinforcement_agent_storage;
+    bool reinforcement_agent_reused = false;
     if (options.reinforcement_learning_enabled) {
         const std::string character_slug(
             fighter_character_slug(player_character)
@@ -928,8 +929,9 @@ void handle_websocket_connection(
             std::filesystem::is_regular_file(latest_checkpoint) ||
             std::filesystem::is_regular_file(recurrent_checkpoint);
         try {
-            reinforcement_agent_storage =
-                std::make_unique<ReinforcementAgent>(
+            if (reinforcement_agent_storage == nullptr) {
+                reinforcement_agent_storage =
+                    std::make_unique<ReinforcementAgent>(
                     ReinforcementAgentConfig{
                         .input_size =
                             options.temporal_hidden_size +
@@ -955,6 +957,18 @@ void handle_websocket_connection(
                         .hard_negative_replay_fraction =
                             options
                                 .reinforcement_hard_negative_replay_fraction,
+                        .winning_replay_fraction =
+                            options
+                                .reinforcement_winning_replay_fraction,
+                        .winning_replay_min_fraction =
+                            options
+                                .reinforcement_winning_replay_min_fraction,
+                        .winning_replay_ramp_episodes =
+                            options
+                                .reinforcement_winning_replay_ramp_episodes,
+                        .winning_replay_capacity =
+                            options
+                                .reinforcement_winning_replay_capacity,
                         .hard_negative_q_threshold =
                             options
                                 .reinforcement_hard_negative_q_threshold,
@@ -971,6 +985,12 @@ void handle_websocket_connection(
                         .epsilon_decay_selections =
                             options
                                 .reinforcement_epsilon_decay_selections,
+                        .new_matchup_epsilon_start =
+                            options
+                                .reinforcement_new_matchup_epsilon_start,
+                        .new_matchup_epsilon_decay_selections =
+                            options
+                                .reinforcement_new_matchup_epsilon_decay_selections,
                         .scripted_exploration_probability =
                             options
                                 .reinforcement_scripted_exploration_probability,
@@ -1075,6 +1095,15 @@ void handle_websocket_connection(
                         .best_checkpoint_path = best_checkpoint,
                     }
                 );
+            } else {
+                reinforcement_agent_storage->configure_session(
+                    player_character,
+                    opponent_character,
+                    facing,
+                    best_checkpoint
+                );
+                reinforcement_agent_reused = true;
+            }
         } catch (const std::exception& error) {
             writer.send_json({
                 {"protocol_version", kActionProtocolVersion},
@@ -1132,6 +1161,12 @@ void handle_websocket_connection(
                      : "mock_teacher"},
                 {"shared_policy",
                  reinforcement_agent != nullptr},
+                {"rl_replay_retained_across_connections",
+                 reinforcement_agent != nullptr},
+                {"rl_replay_size",
+                 reinforcement_agent != nullptr
+                     ? reinforcement_agent->stats().replay_size
+                     : 0U},
                 {"rl_training_enabled",
                  reinforcement_agent != nullptr &&
                      options.reinforcement_training_enabled},
@@ -1277,6 +1312,13 @@ void handle_websocket_connection(
         {"rl_read_only",
          reinforcement_agent != nullptr &&
              !options.reinforcement_training_enabled},
+        {"rl_agent_reused", reinforcement_agent_reused},
+        {"rl_replay_retained_across_connections",
+         reinforcement_agent != nullptr},
+        {"rl_replay_size",
+         reinforcement_agent != nullptr
+             ? reinforcement_agent->stats().replay_size
+             : 0U},
         {"rl_checkpoint_interval_episodes",
          options.reinforcement_checkpoint_interval_episodes},
         {"damage_dealt_reward_scale",
@@ -1382,6 +1424,13 @@ void handle_websocket_connection(
                 : "disabled"
         )
         << " backend=" << options.reinforcement_backend
+        << " replay="
+        << (
+            reinforcement_agent != nullptr
+                ? reinforcement_agent->stats().replay_size
+                : 0U
+        )
+        << " reused=" << (reinforcement_agent_reused ? 1 : 0)
         << " resnet="
         << (
             reinforcement_agent != nullptr &&
@@ -1801,6 +1850,9 @@ void handle_websocket_connection(
                             .episode_started = fight.episode_started,
                             .episode_ended = fight.episode_ended,
                             .terminal = fight.terminal,
+                            .episode_won =
+                                fight.episode_ended &&
+                                fight.transition_reason == "round_won",
                             .episode_id = fight.episode_id,
                             .frame_id = fight.frame_id,
                             .decision_id = current_decision_id,
@@ -1911,6 +1963,18 @@ void handle_websocket_connection(
                             << reward_log_decisions
                             << " epsilon=" << stats.epsilon
                             << " replay=" << stats.replay_size
+                            << " winning_replay="
+                            << stats.winning_replay_size
+                            << " winning_episodes="
+                            << stats.winning_episodes
+                            << " winning_target="
+                            << stats.effective_winning_replay_fraction
+                            << " matchup_selections="
+                            << stats.matchup_action_selections
+                            << " matchup_episodes="
+                            << stats.matchup_episodes_completed
+                            << " matchup_wins="
+                            << stats.matchup_wins
                             << " matchups="
                             << stats.shared_replay_matchups
                             << " updates=" << stats.training_updates
@@ -1937,6 +2001,8 @@ void handle_websocket_connection(
                             << stats.last_critic_disagreement
                             << " hard_negative_batch="
                             << stats.last_hard_negative_sample_fraction
+                            << " winning_batch="
+                            << stats.last_winning_sample_fraction
                             << " greedy_episode="
                             << reinforcement_decision
                                    .greedy_training_episode
@@ -2139,6 +2205,19 @@ void handle_websocket_connection(
                         reinforcement_decision.episode_return;
                     response_metrics["rl_replay_size"] =
                         reinforcement_decision.replay_size;
+                    response_metrics["rl_winning_replay_size"] =
+                        reinforcement_decision.winning_replay_size;
+                    response_metrics["rl_winning_episodes"] =
+                        reinforcement_decision.winning_episodes;
+                    response_metrics["rl_matchup_action_selections"] =
+                        reinforcement_decision.matchup_action_selections;
+                    response_metrics["rl_matchup_episodes_completed"] =
+                        reinforcement_decision.matchup_episodes_completed;
+                    response_metrics["rl_matchup_wins"] =
+                        reinforcement_decision.matchup_wins;
+                    response_metrics["rl_effective_winning_replay_fraction"] =
+                        reinforcement_agent->stats()
+                            .effective_winning_replay_fraction;
                     response_metrics["rl_training_updates"] =
                         reinforcement_decision.training_updates;
                     response_metrics["rl_training_loss"] =
@@ -2169,6 +2248,10 @@ void handle_websocket_connection(
                         "rl_hard_negative_sample_fraction"
                     ] = reinforcement_decision
                         .hard_negative_sample_fraction;
+                    response_metrics[
+                        "rl_winning_sample_fraction"
+                    ] = reinforcement_decision
+                        .winning_sample_fraction;
                     response_metrics["rl_training_performed"] =
                         reinforcement_decision.training_performed;
                     response_metrics["rl_checkpoint_saved"] =
@@ -3071,8 +3154,16 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
          options_.reinforcement_terminal_replay_fraction > 1.0f ||
          options_.reinforcement_hard_negative_replay_fraction < 0.0f ||
          options_.reinforcement_hard_negative_replay_fraction > 1.0f ||
+         options_.reinforcement_winning_replay_fraction < 0.0f ||
+         options_.reinforcement_winning_replay_fraction > 1.0f ||
+         options_.reinforcement_winning_replay_min_fraction < 0.0f ||
+         options_.reinforcement_winning_replay_min_fraction >
+            options_.reinforcement_winning_replay_fraction ||
+         options_.reinforcement_winning_replay_ramp_episodes == 0 ||
+         options_.reinforcement_winning_replay_capacity == 0 ||
          options_.reinforcement_terminal_replay_fraction +
-                 options_.reinforcement_hard_negative_replay_fraction >
+                 options_.reinforcement_hard_negative_replay_fraction +
+                 options_.reinforcement_winning_replay_fraction >
              1.0f ||
          options_.reinforcement_hard_negative_q_threshold < 0.0f ||
          options_.reinforcement_n_step_options == 0 ||
@@ -3105,6 +3196,10 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
          options_.reinforcement_epsilon_final < 0.0f ||
          options_.reinforcement_epsilon_final >
             options_.reinforcement_epsilon_start ||
+         options_.reinforcement_new_matchup_epsilon_start <
+            options_.reinforcement_epsilon_final ||
+         options_.reinforcement_new_matchup_epsilon_start > 1.0f ||
+         options_.reinforcement_new_matchup_epsilon_decay_selections == 0 ||
          options_.reinforcement_scripted_exploration_probability < 0.0f ||
          options_.reinforcement_scripted_exploration_probability > 1.0f)) {
         throw std::invalid_argument(
@@ -3202,6 +3297,10 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
             << options_.reinforcement_checkpoint_directory << '\n';
     }
     std::uint64_t connection_id = 0;
+    // The learner owns the replay and must outlive individual WebSocket
+    // sessions. Connections are handled serially, so no additional locking is
+    // required when changing the current matchup.
+    std::unique_ptr<ReinforcementAgent> reinforcement_agent_storage;
 
     while (wait_for_client(listening.value, stop_requested)) {
         sockaddr_storage peer{};
@@ -3274,6 +3373,12 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                     {"reinforcement_read_only",
                      options_.reinforcement_learning_enabled &&
                          !options_.reinforcement_training_enabled},
+                    {"reinforcement_replay_retained_across_connections",
+                     options_.reinforcement_learning_enabled},
+                    {"reinforcement_replay_size",
+                     reinforcement_agent_storage != nullptr
+                         ? reinforcement_agent_storage->stats().replay_size
+                         : 0U},
                     {"reinforcement_epsilon_start",
                      options_.reinforcement_epsilon_start},
                     {"reinforcement_epsilon_final",
@@ -3394,6 +3499,7 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                 reader,
                 options_,
                 temporal_agent.get(),
+                reinforcement_agent_storage,
                 metrics,
                 connection_id,
                 stop_requested

@@ -46,6 +46,7 @@ gameagent::RecurrentPolicyBackendConfig make_config(
         .batch_size = 4,
         .training_updates_per_transition = 1,
         .target_update_interval = 2,
+        .initial_matchup_wins = {},
         .gamma = 0.95f,
         .q_value_limit = 10.0f,
         .terminal_replay_fraction = 0.25f,
@@ -136,7 +137,7 @@ int main() {
                     1, 1, 1, 1
                 };
                 const auto close = backend.close_transition(
-                    1, reward, terminal, action_mask
+                    1, reward, terminal, terminal, action_mask
                 );
                 if (terminal) {
                     observe(backend, step + 100, true);
@@ -146,9 +147,48 @@ int main() {
                     "native training loss must be finite"
                 );
             }
+            // The terminal screen can arrive after the option has already
+            // closed. Its reward must flush the pending n-step suffix and the
+            // complete winning trajectory must still enter the win reserve.
+            const std::vector<float> between_option_q =
+                backend.q_values(1, 2, 4);
+            backend.begin_transition(
+                2, 1, 2, between_option_q[2]
+            );
+            observe(backend, 250, false);
+            const std::array<std::uint8_t, 4> episode_mask{
+                1, 1, 1, 1
+            };
+            backend.close_transition(
+                2, 0.25f, false, false, episode_mask
+            );
+            observe(backend, 251, false);
+            const auto finalized = backend.finalize_episode(
+                10.0f, true, episode_mask
+            );
+            require(
+                finalized.stats.winning_episodes == 4,
+                "between-option victory promoted"
+            );
             const auto& stats = backend.stats();
             require(stats.training_updates > 0, "native BPTT update");
             require(stats.replay_size >= 4, "native replay population");
+            require(
+                stats.winning_replay_size > 0 &&
+                stats.winning_episodes == 4,
+                "native successful-trajectory replay population"
+            );
+            require(
+                stats.current_matchup_winning_episodes == 4 &&
+                std::abs(
+                    stats.effective_winning_replay_fraction - 0.26f
+                ) < 1.0e-5f,
+                "native adaptive winning replay fraction"
+            );
+            require(
+                stats.last_winning_sample_fraction >= 0.20f,
+                "native successful trajectories sampled in training"
+            );
             require(
                 std::isfinite(stats.last_abs_td_error),
                 "native TD diagnostics"

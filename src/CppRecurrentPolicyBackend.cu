@@ -190,6 +190,7 @@ struct Transition {
     std::size_t duration = 1;
     float reward = 0.0f;
     bool terminal = false;
+    bool successful_episode = false;
     std::size_t character = 0;
     std::size_t opponent = 0;
     float selected_q = 0.0f;
@@ -807,8 +808,14 @@ struct CppRecurrentPolicyBackend::Implementation {
     explicit Implementation(RecurrentPolicyBackendConfig value)
         : config(std::move(value)),
           random(config.random_seed),
-          stream(base::Stream::create(cudaStreamNonBlocking)) {
+          stream(base::Stream::create(cudaStreamNonBlocking)),
+          matchup_wins(config.initial_matchup_wins) {
         validate();
+        if (matchup_wins.empty()) {
+            matchup_wins.assign(
+                config.action_sizes.size() * config.opponent_count, 0U
+            );
+        }
         check_cuda(
             cudaSetDevice(config.device_id),
             "select native recurrent CUDA device"
@@ -876,6 +883,13 @@ struct CppRecurrentPolicyBackend::Implementation {
                          "opponent embedding size");
         require_positive(config.opponent_count, "opponent count");
         require_positive(config.replay_capacity, "replay capacity");
+        require_positive(
+            config.winning_replay_capacity, "winning replay capacity"
+        );
+        require_positive(
+            config.winning_replay_ramp_episodes,
+            "winning replay ramp episodes"
+        );
         require_positive(config.minimum_replay_size, "minimum replay");
         require_positive(config.batch_size, "batch size");
         require_positive(config.training_updates_per_transition,
@@ -897,8 +911,19 @@ struct CppRecurrentPolicyBackend::Implementation {
             config.terminal_replay_fraction > 1.0f ||
             config.hard_negative_replay_fraction < 0.0f ||
             config.hard_negative_replay_fraction > 1.0f ||
+            config.winning_replay_fraction < 0.0f ||
+            config.winning_replay_fraction > 1.0f ||
+            config.winning_replay_min_fraction < 0.0f ||
+            config.winning_replay_min_fraction >
+                config.winning_replay_fraction ||
+            (
+                !config.initial_matchup_wins.empty() &&
+                config.initial_matchup_wins.size() !=
+                    config.action_sizes.size() * config.opponent_count
+            ) ||
             config.terminal_replay_fraction +
-                    config.hard_negative_replay_fraction >
+                    config.hard_negative_replay_fraction +
+                    config.winning_replay_fraction >
                 1.0f ||
             config.hard_negative_q_threshold < 0.0f ||
             config.learning_rate <= 0.0f ||
@@ -1129,6 +1154,9 @@ struct CppRecurrentPolicyBackend::Implementation {
                 "invalid native recurrent identity/action count"
             );
         }
+        current_sampling_character = character;
+        current_sampling_opponent = opponent;
+        refresh_winning_sampling_stats();
         Transition synthetic;
         synthetic.state_sequence = snapshot();
         synthetic.next_sequence = synthetic.state_sequence;
@@ -1190,6 +1218,9 @@ struct CppRecurrentPolicyBackend::Implementation {
                 "invalid native recurrent transition"
             );
         }
+        current_sampling_character = character;
+        current_sampling_opponent = opponent;
+        refresh_winning_sampling_stats();
         active = ActiveTransition{
             .sequence = snapshot(),
             .context = current_context,
@@ -1235,6 +1266,7 @@ struct CppRecurrentPolicyBackend::Implementation {
     }
 
     void append_replay(Transition transition) {
+        current_episode_transitions.push_back(transition);
         if (replay.size() == config.replay_capacity) {
             replay.pop_front();
         }
@@ -1261,25 +1293,66 @@ struct CppRecurrentPolicyBackend::Implementation {
         return appended;
     }
 
+    void finish_episode(bool successful_episode) {
+        if (
+            successful_episode &&
+            !current_episode_transitions.empty()
+        ) {
+            const Transition& episode =
+                current_episode_transitions.front();
+            ++matchup_wins[
+                episode.character * config.opponent_count +
+                episode.opponent
+            ];
+            for (Transition transition : current_episode_transitions) {
+                transition.successful_episode = true;
+                if (
+                    winning_replay.size() ==
+                    config.winning_replay_capacity
+                ) {
+                    winning_replay.pop_front();
+                }
+                winning_replay.push_back(std::move(transition));
+            }
+            ++stats.winning_episodes;
+        }
+        current_episode_transitions.clear();
+        refresh_replay_stats();
+    }
+
     std::vector<const Transition*> balanced_sample() {
-        std::vector<std::size_t> terminal;
-        std::vector<std::size_t> nonterminal;
-        std::vector<std::size_t> hard_negative;
-        for (std::size_t index = 0; index < replay.size(); ++index) {
-            const Transition& value = replay[index];
+        std::vector<const Transition*> terminal;
+        std::vector<const Transition*> nonterminal;
+        std::vector<const Transition*> hard_negative;
+        std::vector<const Transition*> winning;
+        winning.reserve(winning_replay.size());
+        for (const Transition& value : winning_replay) {
+            winning.push_back(&value);
+        }
+        for (const Transition& value : replay) {
             if (value.terminal) {
-                terminal.push_back(index);
+                terminal.push_back(&value);
             } else {
-                nonterminal.push_back(index);
+                nonterminal.push_back(&value);
                 if (
                     value.selected_q >=
                         config.hard_negative_q_threshold &&
                     value.reward < 0.0f
                 ) {
-                    hard_negative.push_back(index);
+                    hard_negative.push_back(&value);
                 }
             }
         }
+        refresh_winning_sampling_stats();
+        const std::size_t requested_winning =
+            stats.effective_winning_replay_fraction > 0.0f
+                ? std::max<std::size_t>(1, static_cast<std::size_t>(
+                      std::lround(config.batch_size *
+                          stats.effective_winning_replay_fraction)
+                  ))
+                : 0;
+        const std::size_t winning_count = winning.empty()
+            ? 0 : std::min(config.batch_size, requested_winning);
         const std::size_t requested_terminal =
             config.terminal_replay_fraction > 0.0f
                 ? std::max<std::size_t>(1, static_cast<std::size_t>(
@@ -1288,21 +1361,24 @@ struct CppRecurrentPolicyBackend::Implementation {
                   ))
                 : 0;
         const std::size_t terminal_count = terminal.empty()
-            ? 0 : std::min(config.batch_size, requested_terminal);
+            ? 0 : std::min(
+                config.batch_size - winning_count,
+                requested_terminal
+            );
         const std::size_t requested_hard = static_cast<std::size_t>(
             std::lround(config.batch_size *
                 config.hard_negative_replay_fraction)
         );
         const std::size_t hard_count = hard_negative.empty()
             ? 0 : std::min(
-                config.batch_size - terminal_count,
+                config.batch_size - winning_count - terminal_count,
                 requested_hard
             );
         const std::size_t regular_count =
-            config.batch_size - terminal_count - hard_count;
+            config.batch_size - winning_count - terminal_count - hard_count;
         std::vector<const Transition*> result;
         result.reserve(config.batch_size);
-        auto draw = [&](const std::vector<std::size_t>& pool,
+        auto draw = [&](const std::vector<const Transition*>& pool,
                         std::size_t count) {
             if (count == 0) {
                 return;
@@ -1312,15 +1388,17 @@ struct CppRecurrentPolicyBackend::Implementation {
             if (actual_source.empty()) {
                 throw std::logic_error("native replay sampling is empty");
             }
-            std::unordered_map<std::uint64_t, std::vector<std::size_t>> buckets;
-            for (std::size_t index : actual_source) {
-                const Transition& value = replay[index];
+            std::unordered_map<
+                std::uint64_t,
+                std::vector<const Transition*>
+            > buckets;
+            for (const Transition* value : actual_source) {
                 const std::uint64_t key =
-                    (static_cast<std::uint64_t>(value.character) << 32U) |
-                    static_cast<std::uint64_t>(value.opponent);
-                buckets[key].push_back(index);
+                    (static_cast<std::uint64_t>(value->character) << 32U) |
+                    static_cast<std::uint64_t>(value->opponent);
+                buckets[key].push_back(value);
             }
-            std::vector<const std::vector<std::size_t>*> choices;
+            std::vector<const std::vector<const Transition*>*> choices;
             choices.reserve(buckets.size());
             for (const auto& [_, values] : buckets) {
                 choices.push_back(&values);
@@ -1334,9 +1412,10 @@ struct CppRecurrentPolicyBackend::Implementation {
                 std::uniform_int_distribution<std::size_t> item_distribution(
                     0, bucket.size() - 1
                 );
-                result.push_back(&replay[bucket[item_distribution(random)]]);
+                result.push_back(bucket[item_distribution(random)]);
             }
         };
+        draw(winning, winning_count);
         draw(terminal, terminal_count);
         draw(hard_negative, hard_count);
         draw(nonterminal, regular_count);
@@ -1348,6 +1427,12 @@ struct CppRecurrentPolicyBackend::Implementation {
                         value->selected_q >=
                             config.hard_negative_q_threshold &&
                         value->reward < 0.0f;
+                }
+            )) / static_cast<float>(result.size());
+        stats.last_winning_sample_fraction =
+            static_cast<float>(std::count_if(
+                result.begin(), result.end(), [](const Transition* value) {
+                    return value->successful_episode;
                 }
             )) / static_cast<float>(result.size());
         return result;
@@ -1590,6 +1675,7 @@ struct CppRecurrentPolicyBackend::Implementation {
         std::size_t duration,
         float reward,
         bool terminal,
+        bool successful_episode,
         std::span<const std::uint8_t> next_action_mask
     ) {
         bool trained = false;
@@ -1629,6 +1715,91 @@ struct CppRecurrentPolicyBackend::Implementation {
             };
             const std::size_t appended =
                 append_n_step(std::move(transition));
+            if (terminal) {
+                finish_episode(successful_episode);
+            }
+            for (std::size_t index = 0;
+                 index < appended *
+                    config.training_updates_per_transition;
+                 ++index) {
+                trained = train_once() || trained;
+            }
+        }
+        active.reset();
+        refresh_replay_stats();
+        return {.stats = stats, .training_performed = trained};
+    }
+
+    RecurrentPolicyCloseResult finalize_episode(
+        float terminal_reward,
+        bool successful_episode,
+        std::span<const std::uint8_t> next_action_mask
+    ) {
+        bool trained = false;
+        std::size_t appended = 0;
+        if (config.training_enabled) {
+            if (!std::isfinite(terminal_reward)) {
+                throw std::invalid_argument(
+                    "native recurrent terminal reward is not finite"
+                );
+            }
+            const Transition* most_recent = !pending_n_step.empty()
+                ? &pending_n_step.back()
+                : (
+                    !current_episode_transitions.empty()
+                        ? &current_episode_transitions.back()
+                        : nullptr
+                );
+            if (most_recent != nullptr) {
+                if (
+                    next_action_mask.size() !=
+                        config.action_sizes[most_recent->character] ||
+                    std::none_of(
+                        next_action_mask.begin(),
+                        next_action_mask.end(),
+                        [](std::uint8_t value) { return value != 0; }
+                    )
+                ) {
+                    throw std::invalid_argument(
+                        "invalid native recurrent episode action mask"
+                    );
+                }
+                if (!pending_n_step.empty()) {
+                    Transition& terminal = pending_n_step.back();
+                    terminal.reward += std::pow(
+                        config.gamma,
+                        static_cast<float>(terminal.duration)
+                    ) * terminal_reward;
+                    terminal.terminal = true;
+                    terminal.next_sequence = snapshot();
+                    terminal.next_context = current_context;
+                    terminal.next_action_mask.assign(
+                        next_action_mask.begin(), next_action_mask.end()
+                    );
+                    while (!pending_n_step.empty()) {
+                        append_replay(
+                            combine_pending(pending_n_step.size())
+                        );
+                        pending_n_step.pop_front();
+                        ++appended;
+                    }
+                } else {
+                    Transition terminal = *most_recent;
+                    terminal.reward += std::pow(
+                        config.gamma,
+                        static_cast<float>(terminal.duration)
+                    ) * terminal_reward;
+                    terminal.terminal = true;
+                    terminal.next_sequence = snapshot();
+                    terminal.next_context = current_context;
+                    terminal.next_action_mask.assign(
+                        next_action_mask.begin(), next_action_mask.end()
+                    );
+                    append_replay(std::move(terminal));
+                    ++appended;
+                }
+            }
+            finish_episode(successful_episode);
             for (std::size_t index = 0;
                  index < appended *
                     config.training_updates_per_transition;
@@ -1646,11 +1817,13 @@ struct CppRecurrentPolicyBackend::Implementation {
         current_context.assign(config.context_size, 0.0f);
         active.reset();
         pending_n_step.clear();
+        current_episode_transitions.clear();
         stats.sequence_size = 0;
     }
 
     void refresh_replay_stats() {
         stats.replay_size = replay.size();
+        stats.winning_replay_size = winning_replay.size();
         std::unordered_map<std::uint64_t, bool> matchups;
         for (const Transition& transition : replay) {
             const std::uint64_t key =
@@ -1659,6 +1832,28 @@ struct CppRecurrentPolicyBackend::Implementation {
             matchups[key] = true;
         }
         stats.matchup_count = matchups.size();
+        refresh_winning_sampling_stats();
+    }
+
+    void refresh_winning_sampling_stats() {
+        const std::uint64_t current_matchup_wins = matchup_wins[
+            current_sampling_character * config.opponent_count +
+            current_sampling_opponent
+        ];
+        stats.current_matchup_winning_episodes = current_matchup_wins;
+        const float progress = std::min(
+            1.0f,
+            static_cast<float>(current_matchup_wins) /
+                static_cast<float>(
+                    config.winning_replay_ramp_episodes
+                )
+        );
+        stats.effective_winning_replay_fraction =
+            config.winning_replay_min_fraction +
+            (
+                config.winning_replay_fraction -
+                config.winning_replay_min_fraction
+            ) * progress;
     }
 
     void refresh_parameter_checksum() {
@@ -2004,6 +2199,11 @@ struct CppRecurrentPolicyBackend::Implementation {
     std::optional<ActiveTransition> active;
     std::deque<Transition> pending_n_step;
     std::deque<Transition> replay;
+    std::vector<Transition> current_episode_transitions;
+    std::deque<Transition> winning_replay;
+    std::vector<std::uint64_t> matchup_wins;
+    std::size_t current_sampling_character = 0;
+    std::size_t current_sampling_opponent = 0;
 };
 
 CppRecurrentPolicyBackend::CppRecurrentPolicyBackend(
@@ -2052,10 +2252,21 @@ RecurrentPolicyCloseResult CppRecurrentPolicyBackend::close_transition(
     std::size_t duration,
     float reward,
     bool terminal,
+    bool successful_episode,
     std::span<const std::uint8_t> next_action_mask
 ) {
     return implementation_->close_transition(
-        duration, reward, terminal, next_action_mask
+        duration, reward, terminal, successful_episode, next_action_mask
+    );
+}
+
+RecurrentPolicyCloseResult CppRecurrentPolicyBackend::finalize_episode(
+    float terminal_reward,
+    bool successful_episode,
+    std::span<const std::uint8_t> next_action_mask
+) {
+    return implementation_->finalize_episode(
+        terminal_reward, successful_episode, next_action_mask
     );
 }
 

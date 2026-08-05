@@ -32,6 +32,17 @@ std::string join_sizes(std::span<const std::size_t> values) {
     return result;
 }
 
+std::string join_u64(std::span<const std::uint64_t> values) {
+    std::string result;
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        if (index != 0) {
+            result.push_back(',');
+        }
+        result += std::to_string(values[index]);
+    }
+    return result;
+}
+
 void require_positive(std::size_t value, const char* name) {
     if (value == 0) {
         throw std::invalid_argument(
@@ -91,6 +102,13 @@ struct RecurrentPolicyBackend::Implementation {
         require_positive(config.context_size, "context size");
         require_positive(config.sequence_capacity, "sequence capacity");
         require_positive(config.replay_capacity, "replay capacity");
+        require_positive(
+            config.winning_replay_capacity, "winning replay capacity"
+        );
+        require_positive(
+            config.winning_replay_ramp_episodes,
+            "winning replay ramp episodes"
+        );
         require_positive(config.minimum_replay_size, "minimum replay");
         require_positive(config.batch_size, "batch size");
         require_positive(config.n_step_options, "n-step options");
@@ -136,8 +154,19 @@ struct RecurrentPolicyBackend::Implementation {
             config.terminal_replay_fraction > 1.0f ||
             config.hard_negative_replay_fraction < 0.0f ||
             config.hard_negative_replay_fraction > 1.0f ||
+            config.winning_replay_fraction < 0.0f ||
+            config.winning_replay_fraction > 1.0f ||
+            config.winning_replay_min_fraction < 0.0f ||
+            config.winning_replay_min_fraction >
+                config.winning_replay_fraction ||
+            (
+                !config.initial_matchup_wins.empty() &&
+                config.initial_matchup_wins.size() !=
+                    config.action_sizes.size() * config.opponent_count
+            ) ||
             config.terminal_replay_fraction +
-                    config.hard_negative_replay_fraction >
+                    config.hard_negative_replay_fraction +
+                    config.winning_replay_fraction >
                 1.0f ||
             config.hard_negative_q_threshold < 0.0f ||
             config.learning_rate <= 0.0f ||
@@ -210,6 +239,8 @@ struct RecurrentPolicyBackend::Implementation {
             std::to_string(config.training_updates_per_transition),
             "--initial-updates",
             std::to_string(config.initial_training_updates),
+            "--initial-matchup-wins",
+            join_u64(config.initial_matchup_wins),
             "--gamma", std::to_string(config.gamma),
             "--conservative-bootstrap",
             config.conservative_bootstrap ? "1" : "0",
@@ -218,6 +249,14 @@ struct RecurrentPolicyBackend::Implementation {
             std::to_string(config.terminal_replay_fraction),
             "--hard-negative-replay-fraction",
             std::to_string(config.hard_negative_replay_fraction),
+            "--winning-replay-fraction",
+            std::to_string(config.winning_replay_fraction),
+            "--winning-replay-min-fraction",
+            std::to_string(config.winning_replay_min_fraction),
+            "--winning-replay-ramp-episodes",
+            std::to_string(config.winning_replay_ramp_episodes),
+            "--winning-replay-capacity",
+            std::to_string(config.winning_replay_capacity),
             "--hard-negative-q-threshold",
             std::to_string(config.hard_negative_q_threshold),
             "--n-step-options", std::to_string(config.n_step_options),
@@ -340,6 +379,12 @@ struct RecurrentPolicyBackend::Implementation {
             response.value("training_updates", stats.training_updates);
         stats.replay_size =
             response.value("replay_size", stats.replay_size);
+        stats.winning_replay_size = response.value(
+            "winning_replay_size", stats.winning_replay_size
+        );
+        stats.winning_episodes = response.value(
+            "winning_episodes", stats.winning_episodes
+        );
         stats.matchup_count =
             response.value("matchup_count", stats.matchup_count);
         stats.sequence_size =
@@ -384,6 +429,18 @@ struct RecurrentPolicyBackend::Implementation {
         stats.last_hard_negative_sample_fraction = response.value(
             "last_hard_negative_sample_fraction",
             stats.last_hard_negative_sample_fraction
+        );
+        stats.last_winning_sample_fraction = response.value(
+            "last_winning_sample_fraction",
+            stats.last_winning_sample_fraction
+        );
+        stats.effective_winning_replay_fraction = response.value(
+            "effective_winning_replay_fraction",
+            stats.effective_winning_replay_fraction
+        );
+        stats.current_matchup_winning_episodes = response.value(
+            "current_matchup_winning_episodes",
+            stats.current_matchup_winning_episodes
         );
         stats.parameter_checksum =
             response.value(
@@ -553,12 +610,14 @@ RecurrentPolicyCloseResult RecurrentPolicyBackend::close_transition(
     std::size_t duration,
     float reward,
     bool terminal,
+    bool successful_episode,
     std::span<const std::uint8_t> next_action_mask
 ) {
     auto& state = *implementation_;
     if (state.cpp != nullptr) {
         return state.cpp->close_transition(
-            duration, reward, terminal, next_action_mask
+            duration, reward, terminal, successful_episode,
+            next_action_mask
         );
     }
     const nlohmann::json response = state.transact({
@@ -566,6 +625,33 @@ RecurrentPolicyCloseResult RecurrentPolicyBackend::close_transition(
         {"duration", duration},
         {"reward", reward},
         {"terminal", terminal},
+        {"successful_episode", successful_episode},
+        {"next_action_mask", std::vector<std::uint8_t>(
+             next_action_mask.begin(), next_action_mask.end()
+         )},
+    });
+    return {
+        .stats = state.stats,
+        .training_performed =
+            response.value("training_performed", false),
+    };
+}
+
+RecurrentPolicyCloseResult RecurrentPolicyBackend::finalize_episode(
+    float terminal_reward,
+    bool successful_episode,
+    std::span<const std::uint8_t> next_action_mask
+) {
+    auto& state = *implementation_;
+    if (state.cpp != nullptr) {
+        return state.cpp->finalize_episode(
+            terminal_reward, successful_episode, next_action_mask
+        );
+    }
+    const nlohmann::json response = state.transact({
+        {"op", "finalize_episode"},
+        {"terminal_reward", terminal_reward},
+        {"successful_episode", successful_episode},
         {"next_action_mask", std::vector<std::uint8_t>(
              next_action_mask.begin(), next_action_mask.end()
          )},

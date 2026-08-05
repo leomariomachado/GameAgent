@@ -259,6 +259,13 @@ new checkpoint directory. If recurrent weights contain more updates than the
 metadata selection counters, the server reconstructs a conservative counter
 floor so epsilon cannot silently jump back to one.
 
+The reinforcement learner is owned by the long-lived server rather than by a
+WebSocket session. Reconnecting clears only the incomplete episode, active
+option and recurrent hidden state; the bounded in-memory replay, optimizer,
+epsilon counters and learned weights remain intact. A full server/process
+restart still reloads weights, optimizer and counters from checkpoint and
+refills replay from new experience.
+
 The former `shared_policy_latest.garl` is not overwritten, so it remains an
 independent baseline for the inference-only DQN.
 
@@ -347,7 +354,7 @@ running an extra inference or synchronizing the GPU again:
 ```
 
 An episode ending forces an immediate summary instead of waiting for the next
-reporting interval. `reward_terminal` is `+5` for a win, `-5` for a loss and
+reporting interval. `reward_terminal` is `+10` for a win, `-5` for a loss and
 zero otherwise. `reward_gained` is the reward since the previous summary, while
 `reward_accumulated` is the complete episode return, including damage rewards,
 damage penalties and the terminal reward. A blank line follows each summary to
@@ -361,6 +368,43 @@ TD error, `bootstrap` is the conservative successor estimate and
 `terminal_batch` is the terminal fraction of that replay batch; for those
 samples `terminal_target` contains only the observed terminal transition and
 never a successor bootstrap, while `terminal_q_pred` shows its calibration.
+
+Completed winning episodes also populate a bounded successful-trajectory
+reserve. When that reserve is non-empty, `winning_batch` reports the fraction
+of the current batch drawn from it, while `winning_replay` and
+`winning_episodes` report its population. `winning_target` starts at 10% for a
+matchup with no victories and ramps to 30% after five victories for that exact
+controlled-character/opponent pair. This prevents a new opponent from being
+dominated by victories learned against a different opponent:
+
+```bash
+GAMEAGENT_RL_WINNING_REPLAY_FRACTION=0.30 \
+GAMEAGENT_RL_WINNING_REPLAY_MIN_FRACTION=0.10 \
+GAMEAGENT_RL_WINNING_REPLAY_RAMP_EPISODES=5 \
+GAMEAGENT_RL_WINNING_REPLAY_CAPACITY=4096 \
+bash scripts/run_character_rl.sh
+```
+
+The reserve stores every n-step transition from the successful episode, not
+only its terminal event. A process restart starts the in-memory replay reserves
+empty; model weights, AdamW state, update counters and epsilon progress still
+resume from the regular checkpoint.
+
+Exploration progress is tracked per controlled-character/opponent pair. A
+previously unseen matchup starts at epsilon 0.35 and decays independently to
+the configured final epsilon over 15,000 selected options. Existing shared
+weights and replay remain available, so changing the opponent does not discard
+prior knowledge:
+
+```bash
+GAMEAGENT_RL_NEW_MATCHUP_EPSILON_START=0.35 \
+GAMEAGENT_RL_NEW_MATCHUP_EPSILON_DECAY=15000 \
+bash scripts/run_character_rl.sh
+```
+
+`matchup_selections`, `matchup_episodes` and `matchup_wins` in `RL_REWARD`
+make the independent schedule visible. Read-only evaluation always uses its
+configured final epsilon (normally zero), regardless of matchup age.
 
 The same line also reports `shaping`, `combo_reward`, `idle_penalty`,
 `corner_penalty`, player/opponent X, distance, combo length, stationary time

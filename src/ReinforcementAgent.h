@@ -24,6 +24,10 @@ struct ReinforcementAgentConfig {
     float q_value_limit = 25.0f;
     float terminal_replay_fraction = 0.25f;
     float hard_negative_replay_fraction = 0.25f;
+    float winning_replay_fraction = 0.30f;
+    float winning_replay_min_fraction = 0.10f;
+    std::size_t winning_replay_ramp_episodes = 5;
+    std::size_t winning_replay_capacity = 4096;
     float hard_negative_q_threshold = 1.0f;
     std::size_t n_step_options = 3;
     bool conservative_bootstrap = true;
@@ -35,6 +39,8 @@ struct ReinforcementAgentConfig {
     float epsilon_start = 1.0f;
     float epsilon_final = 0.05f;
     std::uint64_t epsilon_decay_selections = 100000;
+    float new_matchup_epsilon_start = 0.35f;
+    std::uint64_t new_matchup_epsilon_decay_selections = 15000;
     float scripted_exploration_probability = 0.50f;
     // Neutral remains in the action head for checkpoint compatibility, but is
     // masked during a spatially valid fight. The penalty still protects
@@ -109,6 +115,7 @@ struct ReinforcementStepInput {
     bool episode_started = false;
     bool episode_ended = false;
     bool terminal = false;
+    bool episode_won = false;
     std::uint64_t episode_id = 0;
     std::uint64_t frame_id = 0;
     std::uint64_t decision_id = 0;
@@ -149,8 +156,14 @@ struct ReinforcementDecision {
     float terminal_td_target_mean = 0.0f;
     float critic_disagreement = 0.0f;
     float hard_negative_sample_fraction = 0.0f;
+    float winning_sample_fraction = 0.0f;
     std::size_t replay_size = 0;
+    std::size_t winning_replay_size = 0;
+    std::uint64_t winning_episodes = 0;
     std::uint64_t training_updates = 0;
+    std::uint64_t matchup_action_selections = 0;
+    std::uint64_t matchup_episodes_completed = 0;
+    std::uint64_t matchup_wins = 0;
     bool training_performed = false;
     bool checkpoint_saved = false;
 };
@@ -159,7 +172,12 @@ struct ReinforcementAgentStats {
     std::uint64_t action_selections = 0;
     std::uint64_t training_updates = 0;
     std::uint64_t episodes_completed = 0;
+    std::uint64_t matchup_action_selections = 0;
+    std::uint64_t matchup_episodes_completed = 0;
+    std::uint64_t matchup_wins = 0;
     std::size_t replay_size = 0;
+    std::size_t winning_replay_size = 0;
+    std::uint64_t winning_episodes = 0;
     float epsilon = 0.0f;
     float last_training_loss = 0.0f;
     float last_predicted_q_mean = 0.0f;
@@ -173,6 +191,8 @@ struct ReinforcementAgentStats {
     float last_terminal_td_target_mean = 0.0f;
     float last_critic_disagreement = 0.0f;
     float last_hard_negative_sample_fraction = 0.0f;
+    float last_winning_sample_fraction = 0.0f;
+    float effective_winning_replay_fraction = 0.0f;
     float current_episode_return = 0.0f;
     float best_episode_return = 0.0f;
     double shared_parameter_checksum = 0.0;
@@ -204,6 +224,15 @@ public:
     ReinforcementAgent& operator=(ReinforcementAgent&&) noexcept;
 
     ReinforcementDecision step(const ReinforcementStepInput& input);
+    // Starts a new WebSocket session without reconstructing the learner. The
+    // in-flight option/recurrent state is cleared, while replay, optimizer,
+    // exploration counters and learned parameters remain server-owned.
+    void configure_session(
+        FighterCharacter character,
+        OpponentCharacter opponent_character,
+        FighterFacing facing,
+        std::filesystem::path best_checkpoint_path
+    );
     // Cancels the in-flight option without creating a replay transition or
     // changing episode return/epsilon. Used when the visual stream freezes.
     void suspend();

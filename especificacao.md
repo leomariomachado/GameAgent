@@ -262,7 +262,10 @@ cliente, e `commands` continua sendo a única ação autoritativa.
 O modelo retomável padrão é
 `/workspace/gameagent/rl_checkpoints/shared_recurrent_latest.baseai.ckpt`; ele
 inclui LSTM/DQN, críticos alvo, estado do AdamW e contadores. O replay é
-reabastecido em memória após retomar. O estado de opções/epsilon do C++ fica
+mantido em memória entre reconexões WebSocket enquanto o processo servidor
+estiver ativo; somente episódio parcial, opção ativa e estado recorrente são
+limpos na troca de sessão. Após reiniciar o processo, o replay é reabastecido
+com novas experiências. O estado de opções/epsilon do C++ fica
 em `shared_recurrent_metadata_latest.garl`.
 Snapshots melhores usam
 `shared_recurrent_metadata_best_<personagem>.garl.recurrent.baseai.ckpt`. Não existe

@@ -514,6 +514,13 @@ int main(int argc, char** argv) {
             environment_or("GAMEAGENT_RL_EPSILON_DECAY", "100000"),
             "RL epsilon decay"
         );
+        server_options.reinforcement_new_matchup_epsilon_decay_selections =
+            parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_RL_NEW_MATCHUP_EPSILON_DECAY", "15000"
+                ),
+                "RL new-matchup epsilon decay"
+            );
         server_options.reinforcement_gamma = parse_float_range(
             environment_or("GAMEAGENT_RL_GAMMA", "0.995"),
             "RL gamma", 0.01f, 1.0f
@@ -535,6 +542,34 @@ int main(int argc, char** argv) {
                     "GAMEAGENT_RL_HARD_NEGATIVE_REPLAY_FRACTION", "0.25"
                 ),
                 "RL hard-negative replay fraction", 0.0f, 1.0f
+            );
+        server_options.reinforcement_winning_replay_fraction =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_WINNING_REPLAY_FRACTION", "0.30"
+                ),
+                "RL winning replay fraction", 0.0f, 1.0f
+            );
+        server_options.reinforcement_winning_replay_min_fraction =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_WINNING_REPLAY_MIN_FRACTION", "0.10"
+                ),
+                "RL minimum winning replay fraction", 0.0f, 1.0f
+            );
+        server_options.reinforcement_winning_replay_ramp_episodes =
+            parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_RL_WINNING_REPLAY_RAMP_EPISODES", "5"
+                ),
+                "RL winning replay ramp episodes"
+            );
+        server_options.reinforcement_winning_replay_capacity =
+            parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_RL_WINNING_REPLAY_CAPACITY", "4096"
+                ),
+                "RL winning replay capacity"
             );
         server_options.reinforcement_hard_negative_q_threshold =
             parse_float_range(
@@ -594,6 +629,13 @@ int main(int argc, char** argv) {
             environment_or("GAMEAGENT_RL_EPSILON_FINAL", "0.05"),
             "RL epsilon final", 0.0f, 1.0f
         );
+        server_options.reinforcement_new_matchup_epsilon_start =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_NEW_MATCHUP_EPSILON_START", "0.35"
+                ),
+                "RL new-matchup epsilon start", 0.0f, 1.0f
+            );
         server_options.reinforcement_scripted_exploration_probability =
             parse_float_range(
                 environment_or("GAMEAGENT_RL_SCRIPTED_EXPLORATION", "0.50"),

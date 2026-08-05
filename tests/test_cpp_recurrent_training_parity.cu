@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
             const std::vector<std::uint8_t> mask(
                 config.action_sizes[character], 1
             );
-            backend.close_transition(1, 1.0f, true, mask);
+            backend.close_transition(1, 1.0f, true, true, mask);
         }
         if (backend.stats().training_updates != initial_updates + 1) {
             throw std::runtime_error(

@@ -59,6 +59,10 @@ struct WebSocketServerOptions {
     float reinforcement_q_value_limit = 25.0f;
     float reinforcement_terminal_replay_fraction = 0.25f;
     float reinforcement_hard_negative_replay_fraction = 0.25f;
+    float reinforcement_winning_replay_fraction = 0.30f;
+    float reinforcement_winning_replay_min_fraction = 0.10f;
+    std::size_t reinforcement_winning_replay_ramp_episodes = 5;
+    std::size_t reinforcement_winning_replay_capacity = 4096;
     float reinforcement_hard_negative_q_threshold = 1.0f;
     std::size_t reinforcement_n_step_options = 3;
     bool reinforcement_conservative_bootstrap = true;
@@ -95,6 +99,9 @@ struct WebSocketServerOptions {
     float reinforcement_greedy_training_epsilon = 0.05f;
     float reinforcement_epsilon_start = 1.0f;
     float reinforcement_epsilon_final = 0.05f;
+    float reinforcement_new_matchup_epsilon_start = 0.35f;
+    std::uint64_t reinforcement_new_matchup_epsilon_decay_selections =
+        15000;
     float reinforcement_scripted_exploration_probability = 0.50f;
     std::filesystem::path metrics_path = "metrics.jsonl";
     std::filesystem::path reinforcement_migration_checkpoint;

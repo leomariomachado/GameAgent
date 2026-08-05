@@ -100,6 +100,8 @@ int main() {
             .epsilon_start = 0.0f,
             .epsilon_final = 0.0f,
             .epsilon_decay_selections = 1,
+            .new_matchup_epsilon_start = 0.0f,
+            .new_matchup_epsilon_decay_selections = 1,
             .scripted_exploration_probability = 0.5f,
             .neutral_option_penalty = 0.0f,
             .random_seed = 12345,
@@ -226,6 +228,52 @@ int main() {
             "Sub-Zero did not write shared latest/best checkpoints"
         );
 
+        const auto before_reconnect = subzero.stats();
+        subzero.configure_session(
+            gameagent::FighterCharacter::subzero,
+            gameagent::OpponentCharacter::scorpion,
+            gameagent::FighterFacing::right,
+            subzero_best
+        );
+        const auto after_reconnect = subzero.stats();
+        require(
+            after_reconnect.replay_size == before_reconnect.replay_size &&
+                after_reconnect.training_updates ==
+                    before_reconnect.training_updates &&
+                after_reconnect.action_selections ==
+                    before_reconnect.action_selections &&
+                after_reconnect.matchup_action_selections ==
+                    before_reconnect.matchup_action_selections &&
+                after_reconnect.current_episode_return == 0.0f,
+            "WebSocket session reconfiguration discarded replay or learner state"
+        );
+        subzero.configure_session(
+            gameagent::FighterCharacter::subzero,
+            gameagent::OpponentCharacter::kitana,
+            gameagent::FighterFacing::right,
+            subzero_best
+        );
+        const auto unseen_matchup = subzero.stats();
+        require(
+            unseen_matchup.action_selections ==
+                    before_reconnect.action_selections &&
+                unseen_matchup.matchup_action_selections == 0 &&
+                unseen_matchup.matchup_episodes_completed == 0 &&
+                unseen_matchup.matchup_wins == 0,
+            "new opponent did not receive independent exploration progress"
+        );
+        subzero.configure_session(
+            gameagent::FighterCharacter::subzero,
+            gameagent::OpponentCharacter::scorpion,
+            gameagent::FighterFacing::right,
+            subzero_best
+        );
+        require(
+            subzero.stats().matchup_action_selections ==
+                before_reconnect.matchup_action_selections,
+            "returning matchup did not restore its exploration progress"
+        );
+
         auto scorpion_config = config;
         scorpion_config.character =
             gameagent::FighterCharacter::scorpion;
@@ -325,6 +373,7 @@ int main() {
         evaluation_config.checkpoint_writes_enabled = false;
         evaluation_config.epsilon_start = 0.0f;
         evaluation_config.epsilon_final = 0.0f;
+        evaluation_config.new_matchup_epsilon_start = 0.35f;
         evaluation_config.character =
             gameagent::FighterCharacter::subzero;
         evaluation_config.opponent_character =
@@ -424,6 +473,7 @@ int main() {
         neutral_config.checkpoint_writes_enabled = false;
         neutral_config.epsilon_start = 1.0f;
         neutral_config.epsilon_final = 1.0f;
+        neutral_config.new_matchup_epsilon_start = 1.0f;
         neutral_config.scripted_exploration_probability = 0.0f;
         neutral_config.neutral_option_penalty = 0.25f;
         neutral_config.random_seed = 9917;

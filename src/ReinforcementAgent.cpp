@@ -17,10 +17,14 @@
 namespace gameagent {
 namespace {
 
-constexpr std::array<char, 8> kCheckpointMagic{
+constexpr std::array<char, 8> kCheckpointMagicV4{
     'G', 'A', 'R', 'L', '0', '0', '0', '4'
 };
-constexpr std::uint32_t kCheckpointVersion = 4;
+constexpr std::array<char, 8> kCheckpointMagic{
+    'G', 'A', 'R', 'L', '0', '0', '0', '5'
+};
+constexpr std::uint32_t kCheckpointVersion = 5;
+constexpr std::uint32_t kLegacyCheckpointVersion = 4;
 constexpr std::uint64_t kCheckpointTrailer = 0x4741524c454e4421ULL;
 
 constexpr int kYHighPunch = 0;
@@ -698,6 +702,16 @@ struct ReinforcementAgent::Implementation {
         for (const auto& character_options : options_by_character) {
             action_sizes.push_back(character_options.size());
         }
+        std::vector<std::uint64_t> recurrent_matchup_wins;
+        recurrent_matchup_wins.reserve(
+            kControlledCharacterCount * kOpponentCharacterFeatureCount
+        );
+        for (const auto& character : matchup_wins) {
+            recurrent_matchup_wins.insert(
+                recurrent_matchup_wins.end(),
+                character.begin(), character.end()
+            );
+        }
         std::filesystem::path recurrent_checkpoint =
             config.recurrent_checkpoint_path;
         if (recurrent_checkpoint.empty()) {
@@ -738,12 +752,22 @@ struct ReinforcementAgent::Implementation {
                 .target_update_interval =
                     config.target_update_interval,
                 .initial_training_updates = training_updates,
+                .initial_matchup_wins =
+                    std::move(recurrent_matchup_wins),
                 .gamma = config.gamma,
                 .q_value_limit = config.q_value_limit,
                 .terminal_replay_fraction =
                     config.terminal_replay_fraction,
                 .hard_negative_replay_fraction =
                     config.hard_negative_replay_fraction,
+                .winning_replay_fraction =
+                    config.winning_replay_fraction,
+                .winning_replay_min_fraction =
+                    config.winning_replay_min_fraction,
+                .winning_replay_ramp_episodes =
+                    config.winning_replay_ramp_episodes,
+                .winning_replay_capacity =
+                    config.winning_replay_capacity,
                 .hard_negative_q_threshold =
                     config.hard_negative_q_threshold,
                 .n_step_options = config.n_step_options,
@@ -828,6 +852,13 @@ struct ReinforcementAgent::Implementation {
             config.q_value_limit <= 0.0f ||
             config.terminal_replay_fraction < 0.0f ||
             config.terminal_replay_fraction > 1.0f ||
+            config.winning_replay_fraction < 0.0f ||
+            config.winning_replay_fraction > 1.0f ||
+            config.winning_replay_min_fraction < 0.0f ||
+            config.winning_replay_min_fraction >
+                config.winning_replay_fraction ||
+            config.winning_replay_ramp_episodes == 0 ||
+            config.winning_replay_capacity == 0 ||
             config.learning_rate <= 0.0f ||
             config.adam_beta1 <= 0.0f ||
             config.adam_beta1 >= 1.0f ||
@@ -841,6 +872,10 @@ struct ReinforcementAgent::Implementation {
             config.epsilon_final > 1.0f ||
             config.epsilon_final > config.epsilon_start ||
             config.epsilon_decay_selections == 0 ||
+            config.new_matchup_epsilon_start <
+                config.epsilon_final ||
+            config.new_matchup_epsilon_start > 1.0f ||
+            config.new_matchup_epsilon_decay_selections == 0 ||
             config.scripted_exploration_probability < 0.0f ||
             config.scripted_exploration_probability > 1.0f ||
             config.neutral_option_penalty < 0.0f ||
@@ -870,7 +905,8 @@ struct ReinforcementAgent::Implementation {
             config.hard_negative_replay_fraction < 0.0f ||
             config.hard_negative_replay_fraction > 1.0f ||
             config.hard_negative_replay_fraction +
-                    config.terminal_replay_fraction >
+                    config.terminal_replay_fraction +
+                    config.winning_replay_fraction >
                 1.0f ||
             config.hard_negative_q_threshold < 0.0f ||
             (
@@ -912,19 +948,29 @@ struct ReinforcementAgent::Implementation {
         }
     }
 
-    float epsilon(FighterCharacter character) const {
+    float epsilon(
+        FighterCharacter character,
+        OpponentCharacter opponent
+    ) const {
+        if (!config.training_enabled) {
+            return config.epsilon_final;
+        }
         const double progress = std::min(
             1.0,
             static_cast<double>(
-                character_action_selections[character_index(character)]
+                matchup_action_selections[character_index(character)]
+                    [opponent_index(opponent)]
             ) /
                 static_cast<double>(
-                    config.epsilon_decay_selections
+                    config.new_matchup_epsilon_decay_selections
                 )
         );
         const float scheduled = static_cast<float>(
-            config.epsilon_start +
-            (config.epsilon_final - config.epsilon_start) * progress
+            config.new_matchup_epsilon_start +
+            (
+                config.epsilon_final -
+                config.new_matchup_epsilon_start
+            ) * progress
         );
         if (config.training_enabled && greedy_training_episode) {
             return std::min(scheduled, config.greedy_training_epsilon);
@@ -1042,7 +1088,11 @@ struct ReinforcementAgent::Implementation {
                 "reinforcement tactical mask removed every action"
             );
         }
-        if (probability(random_engine) < epsilon(config.character)) {
+        if (
+            probability(random_engine) < epsilon(
+                config.character, config.opponent_character
+            )
+        ) {
             const bool choose_scripted =
                 probability(random_engine) <
                     config.scripted_exploration_probability;
@@ -1150,6 +1200,9 @@ struct ReinforcementAgent::Implementation {
         ++character_action_selections[
             character_index(config.character)
         ];
+        ++matchup_action_selections[
+            character_index(config.character)
+        ][opponent_index(config.opponent_character)];
         return {selected, std::move(source)};
     }
 
@@ -1506,6 +1559,7 @@ struct ReinforcementAgent::Implementation {
     bool close_active_transition(
         std::span<const float> next_state,
         bool terminal,
+        bool successful_episode,
         const ActionContext& context
     ) {
         if (!active_option.has_value()) {
@@ -1524,6 +1578,7 @@ struct ReinforcementAgent::Implementation {
                     std::max<std::size_t>(1U, option_elapsed_steps),
                     option_reward,
                     terminal,
+                    successful_episode,
                     next_action_mask
                 );
             trained = result.training_performed;
@@ -1632,6 +1687,21 @@ struct ReinforcementAgent::Implementation {
         for (std::uint64_t value : character_action_selections) {
             write_value(output, value);
         }
+        for (const auto& character : matchup_action_selections) {
+            for (std::uint64_t value : character) {
+                write_value(output, value);
+            }
+        }
+        for (const auto& character : matchup_episodes_completed) {
+            for (std::uint64_t value : character) {
+                write_value(output, value);
+            }
+        }
+        for (const auto& character : matchup_wins) {
+            for (std::uint64_t value : character) {
+                write_value(output, value);
+            }
+        }
         for (std::uint64_t value : character_episodes_completed) {
             write_value(output, value);
         }
@@ -1716,10 +1786,20 @@ struct ReinforcementAgent::Implementation {
         }
         std::array<char, 8> magic{};
         input.read(magic.data(), magic.size());
+        const std::uint32_t checkpoint_version =
+            input ? read_value<std::uint32_t>(input) : 0U;
         if (
             !input ||
-            magic != kCheckpointMagic ||
-            read_value<std::uint32_t>(input) != kCheckpointVersion
+            !(
+                (
+                    magic == kCheckpointMagic &&
+                    checkpoint_version == kCheckpointVersion
+                ) ||
+                (
+                    magic == kCheckpointMagicV4 &&
+                    checkpoint_version == kLegacyCheckpointVersion
+                )
+            )
         ) {
             throw std::runtime_error(
                 "invalid shared reinforcement checkpoint header"
@@ -1766,6 +1846,33 @@ struct ReinforcementAgent::Implementation {
         }
         for (std::uint64_t& value : character_action_selections) {
             value = read_value<std::uint64_t>(input);
+        }
+        if (checkpoint_version >= kCheckpointVersion) {
+            for (auto& character : matchup_action_selections) {
+                for (std::uint64_t& value : character) {
+                    value = read_value<std::uint64_t>(input);
+                }
+            }
+            for (auto& character : matchup_episodes_completed) {
+                for (std::uint64_t& value : character) {
+                    value = read_value<std::uint64_t>(input);
+                }
+            }
+            for (auto& character : matchup_wins) {
+                for (std::uint64_t& value : character) {
+                    value = read_value<std::uint64_t>(input);
+                }
+            }
+        } else {
+            for (auto& character : matchup_action_selections) {
+                character.fill(0U);
+            }
+            for (auto& character : matchup_episodes_completed) {
+                character.fill(0U);
+            }
+            for (auto& character : matchup_wins) {
+                character.fill(0U);
+            }
         }
         for (std::uint64_t& value : character_episodes_completed) {
             value = read_value<std::uint64_t>(input);
@@ -1887,9 +1994,30 @@ struct ReinforcementAgent::Implementation {
         kControlledCharacterCount
     > character_action_selections{};
     std::array<
+        std::array<
+            std::uint64_t,
+            kOpponentCharacterFeatureCount
+        >,
+        kControlledCharacterCount
+    > matchup_action_selections{};
+    std::array<
         std::uint64_t,
         kControlledCharacterCount
     > character_episodes_completed{};
+    std::array<
+        std::array<
+            std::uint64_t,
+            kOpponentCharacterFeatureCount
+        >,
+        kControlledCharacterCount
+    > matchup_episodes_completed{};
+    std::array<
+        std::array<
+            std::uint64_t,
+            kOpponentCharacterFeatureCount
+        >,
+        kControlledCharacterCount
+    > matchup_wins{};
     std::array<
         float,
         kControlledCharacterCount
@@ -1995,10 +2123,15 @@ ReinforcementDecision ReinforcementAgent::step(
         state.disable_cloud_cooldown_options_remaining = 0;
         const std::size_t player =
             character_index(state.config.character);
+        const std::size_t opponent =
+            opponent_index(state.config.opponent_character);
         state.greedy_training_episode =
             state.config.training_enabled &&
             (
-                (state.character_episodes_completed[player] + 1U) %
+                (
+                    state.matchup_episodes_completed[player][opponent] +
+                    1U
+                ) %
                     state.config.greedy_training_episode_interval ==
                 0U
             );
@@ -2022,16 +2155,40 @@ ReinforcementDecision ReinforcementAgent::step(
         option_program_complete &&
         state.impact_credit_steps_remaining == 0;
     if (input.episode_ended || option_complete) {
-        trained = state.close_active_transition(
-            input.state, input.episode_ended, action_context
-        );
+        if (state.active_option.has_value()) {
+            trained = state.close_active_transition(
+                input.state,
+                input.episode_ended,
+                input.episode_won,
+                action_context
+            );
+        } else if (
+            input.episode_ended &&
+            state.recurrent_backend != nullptr
+        ) {
+            const RecurrentPolicyCloseResult result =
+                state.recurrent_backend->finalize_episode(
+                    input.reward,
+                    input.episode_won,
+                    state.current_action_mask(action_context)
+                );
+            trained = result.training_performed;
+            state.training_updates = result.stats.training_updates;
+            state.last_training_loss = result.stats.last_loss;
+        }
     }
 
     if (input.episode_ended) {
         state.disable_cloud_cooldown_options_remaining = 0;
         const std::size_t player =
             character_index(state.config.character);
+        const std::size_t opponent =
+            opponent_index(state.config.opponent_character);
         ++state.character_episodes_completed[player];
+        ++state.matchup_episodes_completed[player][opponent];
+        if (input.episode_won) {
+            ++state.matchup_wins[player][opponent];
+        }
         const bool new_best =
             state.current_episode_return >
             state.character_best_episode_return[player];
@@ -2166,7 +2323,9 @@ ReinforcementDecision ReinforcementAgent::step(
         ++state.option_elapsed_steps;
     }
 
-    decision.epsilon = state.epsilon(state.config.character);
+    decision.epsilon = state.epsilon(
+        state.config.character, state.config.opponent_character
+    );
     decision.episode_return = state.current_episode_return;
     if (state.recurrent_backend != nullptr) {
         const auto& recurrent = state.recurrent_backend->stats();
@@ -2188,15 +2347,47 @@ ReinforcementDecision ReinforcementAgent::step(
             recurrent.last_critic_disagreement;
         decision.hard_negative_sample_fraction =
             recurrent.last_hard_negative_sample_fraction;
+        decision.winning_sample_fraction =
+            recurrent.last_winning_sample_fraction;
         decision.replay_size = recurrent.replay_size;
+        decision.winning_replay_size = recurrent.winning_replay_size;
+        decision.winning_episodes = recurrent.winning_episodes;
         decision.training_updates = recurrent.training_updates;
     } else {
         decision.training_loss = state.last_training_loss;
         decision.replay_size = state.replay.size();
         decision.training_updates = state.training_updates;
     }
+    const std::size_t decision_player =
+        character_index(state.config.character);
+    const std::size_t decision_opponent =
+        opponent_index(state.config.opponent_character);
+    decision.matchup_action_selections =
+        state.matchup_action_selections[decision_player][decision_opponent];
+    decision.matchup_episodes_completed =
+        state.matchup_episodes_completed[decision_player][decision_opponent];
+    decision.matchup_wins =
+        state.matchup_wins[decision_player][decision_opponent];
     decision.training_performed = trained;
     return decision;
+}
+
+void ReinforcementAgent::configure_session(
+    FighterCharacter character,
+    OpponentCharacter opponent_character,
+    FighterFacing facing,
+    std::filesystem::path best_checkpoint_path
+) {
+    // A reconnect is not an environment transition. Drop only the partial
+    // episode/option and recurrent hidden state; keeping the same backend
+    // instance is what preserves its bounded replay buffer in memory.
+    reset_episode(false);
+    auto& state = *implementation_;
+    state.config.character = character;
+    state.config.opponent_character = opponent_character;
+    state.config.facing = facing;
+    state.config.best_checkpoint_path =
+        std::move(best_checkpoint_path);
 }
 
 void ReinforcementAgent::suspend() {
@@ -2262,6 +2453,8 @@ ReinforcementAgentStats ReinforcementAgent::stats() const {
     const auto& state = *implementation_;
     const std::size_t player =
         character_index(state.config.character);
+    const std::size_t opponent =
+        opponent_index(state.config.opponent_character);
     const RecurrentPolicyBackendStats* recurrent =
         state.recurrent_backend != nullptr
             ? &state.recurrent_backend->stats()
@@ -2275,11 +2468,27 @@ ReinforcementAgentStats ReinforcementAgent::stats() const {
                 : state.training_updates,
         .episodes_completed =
             state.character_episodes_completed[player],
+        .matchup_action_selections =
+            state.matchup_action_selections[player][opponent],
+        .matchup_episodes_completed =
+            state.matchup_episodes_completed[player][opponent],
+        .matchup_wins =
+            state.matchup_wins[player][opponent],
         .replay_size =
             recurrent != nullptr
                 ? recurrent->replay_size
                 : state.replay.size(),
-        .epsilon = state.epsilon(state.config.character),
+        .winning_replay_size =
+            recurrent != nullptr
+                ? recurrent->winning_replay_size
+                : 0U,
+        .winning_episodes =
+            recurrent != nullptr
+                ? recurrent->winning_episodes
+                : 0U,
+        .epsilon = state.epsilon(
+            state.config.character, state.config.opponent_character
+        ),
         .last_training_loss =
             recurrent != nullptr
                 ? recurrent->last_loss
@@ -2327,6 +2536,14 @@ ReinforcementAgentStats ReinforcementAgent::stats() const {
         .last_hard_negative_sample_fraction =
             recurrent != nullptr
                 ? recurrent->last_hard_negative_sample_fraction
+                : 0.0f,
+        .last_winning_sample_fraction =
+            recurrent != nullptr
+                ? recurrent->last_winning_sample_fraction
+                : 0.0f,
+        .effective_winning_replay_fraction =
+            recurrent != nullptr
+                ? recurrent->effective_winning_replay_fraction
                 : 0.0f,
         .current_episode_return = state.current_episode_return,
         .best_episode_return =

@@ -70,6 +70,7 @@ class Transition:
     terminal: bool
     character: int
     opponent: int
+    successful_episode: bool = False
     # Conservative Q reported when the option was selected. A positive value
     # followed by a negative n-step return is replayed as a hard negative.
     selected_q: float = 0.0
@@ -499,6 +500,18 @@ def parse_arguments() -> argparse.Namespace:
         "--hard-negative-replay-fraction", type=float, default=0.25
     )
     parser.add_argument(
+        "--winning-replay-fraction", type=float, default=0.30
+    )
+    parser.add_argument(
+        "--winning-replay-min-fraction", type=float, default=0.10
+    )
+    parser.add_argument(
+        "--winning-replay-ramp-episodes", type=int, default=5
+    )
+    parser.add_argument(
+        "--winning-replay-capacity", type=int, default=4096
+    )
+    parser.add_argument(
         "--hard-negative-q-threshold", type=float, default=1.0
     )
     parser.add_argument("--n-step-options", type=int, default=3)
@@ -516,6 +529,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--gradient-clip", type=float, default=5.0)
     parser.add_argument("--seed", type=int, default=0x524C444E)
     parser.add_argument("--initial-updates", type=int, default=0)
+    parser.add_argument("--initial-matchup-wins", default="")
     parser.add_argument("--persist-replay-limit", type=int, default=5000)
     parser.add_argument(
         "--allow-cpu",
@@ -530,6 +544,18 @@ class Service:
         action_sizes = tuple(
             int(value) for value in arguments.action_sizes.split(",")
         )
+        initial_matchup_wins = (
+            tuple(
+                int(value)
+                for value in arguments.initial_matchup_wins.split(",")
+            )
+            if arguments.initial_matchup_wins
+            else tuple(
+                0 for _ in range(
+                    len(action_sizes) * arguments.opponent_count
+                )
+            )
+        )
         if (
             not action_sizes
             or any(value <= 0 for value in action_sizes)
@@ -540,8 +566,17 @@ class Service:
             or arguments.q_value_limit <= 0.0
             or not 0.0 <= arguments.terminal_replay_fraction <= 1.0
             or not 0.0 <= arguments.hard_negative_replay_fraction <= 1.0
+            or not 0.0 <= arguments.winning_replay_fraction <= 1.0
+            or not 0.0 <= arguments.winning_replay_min_fraction
+                <= arguments.winning_replay_fraction
+            or arguments.winning_replay_ramp_episodes <= 0
+            or arguments.winning_replay_capacity <= 0
+            or len(initial_matchup_wins) !=
+                len(action_sizes) * arguments.opponent_count
+            or any(value < 0 for value in initial_matchup_wins)
             or arguments.terminal_replay_fraction
-                + arguments.hard_negative_replay_fraction > 1.0
+                + arguments.hard_negative_replay_fraction
+                + arguments.winning_replay_fraction > 1.0
             or arguments.hard_negative_q_threshold < 0.0
             or arguments.n_step_options <= 0
             or (
@@ -644,6 +679,12 @@ class Service:
         self.replay: collections.deque[Transition] = collections.deque(
             maxlen=arguments.replay_capacity
         )
+        self.winning_replay: collections.deque[Transition] = (
+            collections.deque(maxlen=arguments.winning_replay_capacity)
+        )
+        self.current_episode_transitions: list[Transition] = []
+        self.winning_episodes = 0
+        self.matchup_wins = list(initial_matchup_wins)
         self.matchup_counts: collections.Counter[tuple[int, int]] = (
             collections.Counter()
         )
@@ -674,6 +715,13 @@ class Service:
         self.last_terminal_td_target_mean = 0.0
         self.last_critic_disagreement = 0.0
         self.last_hard_negative_sample_fraction = 0.0
+        self.last_winning_sample_fraction = 0.0
+        self.effective_winning_replay_fraction = (
+            arguments.winning_replay_min_fraction
+        )
+        self.current_matchup_winning_episodes = 0
+        self.current_sampling_character = 0
+        self.current_sampling_opponent = 0
         self.checkpoint_loaded = False
         self.checkpoint_migrated = False
         self.resnet_checkpoint_loaded = False
@@ -903,6 +951,8 @@ class Service:
 
     def balanced_sample(self) -> list[Transition]:
         replay = list(self.replay)
+        winning = list(self.winning_replay)
+        self.refresh_winning_sampling_stats()
         terminal = [value for value in replay if value.terminal]
         nonterminal = [value for value in replay if not value.terminal]
         hard_negative = [
@@ -911,6 +961,18 @@ class Service:
                 self.arguments.hard_negative_q_threshold
             and value.reward < 0.0
         ]
+        requested_winning = (
+            max(1, int(round(
+                self.arguments.batch_size
+                * self.effective_winning_replay_fraction
+            )))
+            if self.effective_winning_replay_fraction > 0.0
+            else 0
+        )
+        winning_count = (
+            min(self.arguments.batch_size, requested_winning)
+            if winning else 0
+        )
         requested_terminal = (
             max(1, int(round(
                 self.arguments.batch_size
@@ -920,7 +982,10 @@ class Service:
             else 0
         )
         terminal_count = (
-            min(self.arguments.batch_size, requested_terminal)
+            min(
+                self.arguments.batch_size - winning_count,
+                requested_terminal,
+            )
             if terminal
             else 0
         )
@@ -930,16 +995,17 @@ class Service:
         ))
         hard_negative_count = (
             min(
-                self.arguments.batch_size - terminal_count,
+                self.arguments.batch_size - winning_count - terminal_count,
                 requested_hard_negative,
             )
             if hard_negative else 0
         )
         remaining = (
-            self.arguments.batch_size - terminal_count -
+            self.arguments.batch_size - winning_count - terminal_count -
             hard_negative_count
         )
-        result = self.balanced_sample_from(terminal, terminal_count)
+        result = self.balanced_sample_from(winning, winning_count)
+        result.extend(self.balanced_sample_from(terminal, terminal_count))
         result.extend(self.balanced_sample_from(
             hard_negative, hard_negative_count
         ))
@@ -958,9 +1024,32 @@ class Service:
             ) / len(result)
             if result else 0.0
         )
+        self.last_winning_sample_fraction = (
+            sum(value.successful_episode for value in result) / len(result)
+            if result else 0.0
+        )
         return result
 
+    def refresh_winning_sampling_stats(self) -> None:
+        self.current_matchup_winning_episodes = self.matchup_wins[
+            self.current_sampling_character * self.arguments.opponent_count +
+            self.current_sampling_opponent
+        ]
+        progress = min(
+            1.0,
+            self.current_matchup_winning_episodes /
+                self.arguments.winning_replay_ramp_episodes,
+        )
+        self.effective_winning_replay_fraction = (
+            self.arguments.winning_replay_min_fraction +
+            (
+                self.arguments.winning_replay_fraction -
+                self.arguments.winning_replay_min_fraction
+            ) * progress
+        )
+
     def append_replay(self, transition: Transition) -> None:
+        self.current_episode_transitions.append(transition)
         if len(self.replay) == self.replay.maxlen:
             removed = self.replay[0]
             removed_key = (removed.character, removed.opponent)
@@ -979,6 +1068,21 @@ class Service:
                 with_images += 1
                 if with_images > self.arguments.resnet_replay_images:
                     value.state_jpeg = None
+
+    def finish_episode(self, successful_episode: bool) -> None:
+        if successful_episode and self.current_episode_transitions:
+            episode = self.current_episode_transitions[0]
+            matchup_index = (
+                episode.character * self.arguments.opponent_count +
+                episode.opponent
+            )
+            self.matchup_wins[matchup_index] += 1
+            for value in self.current_episode_transitions:
+                winning = copy.copy(value)
+                winning.successful_episode = True
+                self.winning_replay.append(winning)
+            self.winning_episodes += 1
+        self.current_episode_transitions.clear()
 
     def combine_n_step(self, count: int) -> Transition:
         values = list(self.pending_n_step)[:count]
@@ -1002,6 +1106,7 @@ class Service:
             duration=max(1, elapsed),
             reward=reward,
             terminal=last.terminal,
+            successful_episode=False,
             character=first.character,
             opponent=first.opponent,
             selected_q=first.selected_q,
@@ -1282,6 +1387,9 @@ class Service:
             or action_count != self.config.action_sizes[character]
         ):
             raise ValueError("invalid recurrent policy identity/action count")
+        self.current_sampling_character = character
+        self.current_sampling_opponent = opponent
+        self.refresh_winning_sampling_stats()
         sequence = self.snapshot()
         synthetic = Transition(
             state_sequence=sequence,
@@ -1331,6 +1439,9 @@ class Service:
             raise ValueError("invalid recurrent transition action")
         if not math.isfinite(selected_q):
             raise ValueError("non-finite selected Q")
+        self.current_sampling_character = character
+        self.current_sampling_opponent = opponent
+        self.refresh_winning_sampling_stats()
         self.active = {
             "sequence": self.snapshot(),
             "context": self.current_context.copy(),
@@ -1372,6 +1483,7 @@ class Service:
                 duration=duration,
                 reward=reward,
                 terminal=bool(request["terminal"]),
+                successful_episode=False,
                 character=self.active["character"],
                 opponent=self.active["opponent"],
                 selected_q=self.active.get("selected_q", 0.0),
@@ -1379,6 +1491,81 @@ class Service:
                 next_action_mask=next_action_mask,
             )
             appended = self.append_n_step(transition)
+            if transition.terminal:
+                self.finish_episode(
+                    bool(request.get("successful_episode", False))
+                )
+            for _ in range(
+                self.arguments.updates_per_transition * appended
+            ):
+                trained = self.train_once() or trained
+        self.active = None
+        response = self.stats()
+        response["training_performed"] = trained
+        return response
+
+    def finalize_episode(self, request: dict[str, Any]) -> dict[str, Any]:
+        trained = False
+        appended = 0
+        if self.arguments.training:
+            terminal_reward = float(request["terminal_reward"])
+            if not math.isfinite(terminal_reward):
+                raise ValueError("non-finite recurrent terminal reward")
+            most_recent = (
+                self.pending_n_step[-1]
+                if self.pending_n_step
+                else (
+                    self.current_episode_transitions[-1]
+                    if self.current_episode_transitions
+                    else None
+                )
+            )
+            if most_recent is not None:
+                raw_next_action_mask = request.get("next_action_mask")
+                action_count = self.config.action_sizes[
+                    most_recent.character
+                ]
+                if (
+                    not isinstance(raw_next_action_mask, list)
+                    or len(raw_next_action_mask) != action_count
+                ):
+                    raise ValueError("invalid episode action mask")
+                next_action_mask = tuple(
+                    bool(value) for value in raw_next_action_mask
+                )
+                if not any(next_action_mask):
+                    raise ValueError(
+                        "episode action mask blocks every action"
+                    )
+                if self.pending_n_step:
+                    terminal = self.pending_n_step[-1]
+                    terminal.reward += (
+                        self.arguments.gamma ** terminal.duration
+                    ) * terminal_reward
+                    terminal.terminal = True
+                    terminal.next_sequence = self.snapshot()
+                    terminal.next_context = self.current_context.copy()
+                    terminal.next_action_mask = next_action_mask
+                    while self.pending_n_step:
+                        self.append_replay(self.combine_n_step(
+                            len(self.pending_n_step)
+                        ))
+                        self.pending_n_step.popleft()
+                        appended += 1
+                else:
+                    terminal = copy.copy(most_recent)
+                    terminal.reward += (
+                        self.arguments.gamma ** terminal.duration
+                    ) * terminal_reward
+                    terminal.terminal = True
+                    terminal.next_sequence = self.snapshot()
+                    terminal.next_context = self.current_context.copy()
+                    terminal.next_action_mask = next_action_mask
+                    self.append_replay(terminal)
+                    appended += 1
+            self.finish_episode(
+                bool(request.get("successful_episode", False))
+            )
             for _ in range(
                 self.arguments.updates_per_transition * appended
             ):
@@ -1395,6 +1582,7 @@ class Service:
         self.current_jpeg = None
         self.current_frame_id = 0
         self.pending_n_step.clear()
+        self.current_episode_transitions.clear()
         self.cached_projected_visual = None
         self.cached_frame_id = 0
         return self.stats()
@@ -1438,6 +1626,15 @@ class Service:
                 self.last_critic_disagreement,
             "last_hard_negative_sample_fraction":
                 self.last_hard_negative_sample_fraction,
+            "last_winning_sample_fraction":
+                self.last_winning_sample_fraction,
+            "effective_winning_replay_fraction":
+                self.effective_winning_replay_fraction,
+            "current_matchup_winning_episodes":
+                self.current_matchup_winning_episodes,
+            "winning_episodes": self.winning_episodes,
+            "winning_replay": list(self.winning_replay)
+                if include_replay else [],
             "parameter_checksum": self.parameter_checksum,
             "checkpoint_migrated": self.checkpoint_migrated,
             "replay": replay,
@@ -1535,6 +1732,12 @@ class Service:
         self.last_hard_negative_sample_fraction = float(
             checkpoint.get("last_hard_negative_sample_fraction", 0.0)
         )
+        self.last_winning_sample_fraction = float(
+            checkpoint.get("last_winning_sample_fraction", 0.0)
+        )
+        self.winning_episodes = int(
+            checkpoint.get("winning_episodes", 0)
+        )
         self.checkpoint_migrated = bool(
             checkpoint.get("checkpoint_migrated", False)
         )
@@ -1564,6 +1767,11 @@ class Service:
             if not hasattr(transition, "selected_q"):
                 transition.selected_q = 0.0
             self.append_replay(transition)
+        self.current_episode_transitions.clear()
+        for transition in checkpoint.get("winning_replay", []):
+            if not hasattr(transition, "successful_episode"):
+                transition.successful_episode = True
+            self.winning_replay.append(transition)
         self.checkpoint_loaded = True
         self.online_a.eval()
         self.online_b.eval()
@@ -1652,6 +1860,8 @@ class Service:
             "device": str(self.device),
             "training_updates": self.training_updates,
             "replay_size": len(self.replay),
+            "winning_replay_size": len(self.winning_replay),
+            "winning_episodes": self.winning_episodes,
             "matchup_count": len(self.matchup_counts),
             "last_loss": self.last_loss,
             "last_predicted_q_mean": self.last_predicted_q_mean,
@@ -1671,6 +1881,12 @@ class Service:
                 self.last_critic_disagreement,
             "last_hard_negative_sample_fraction":
                 self.last_hard_negative_sample_fraction,
+            "last_winning_sample_fraction":
+                self.last_winning_sample_fraction,
+            "effective_winning_replay_fraction":
+                self.effective_winning_replay_fraction,
+            "current_matchup_winning_episodes":
+                self.current_matchup_winning_episodes,
             "parameter_checksum": self.parameter_checksum,
             "trainable_resnet": self.visual_encoder is not None,
             "resnet_training_updates": self.resnet_training_updates,
@@ -1694,6 +1910,8 @@ class Service:
             return self.begin(request)
         if operation == "close":
             return self.close(request)
+        if operation == "finalize_episode":
+            return self.finalize_episode(request)
         if operation == "reset":
             return self.reset()
         if operation == "save":

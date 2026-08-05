@@ -84,7 +84,7 @@ int main() {
             const std::vector<std::uint8_t> mask(32, 1);
             const auto begin = Clock::now();
             const auto result = backend.close_transition(
-                1, 1.0f, true, mask
+                1, 1.0f, true, true, mask
             );
             const auto end = Clock::now();
             if (sample == 63) {

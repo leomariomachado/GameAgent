@@ -48,6 +48,12 @@ public:
         std::size_t duration,
         float reward,
         bool terminal,
+        bool successful_episode,
+        std::span<const std::uint8_t> next_action_mask
+    );
+    RecurrentPolicyCloseResult finalize_episode(
+        float terminal_reward,
+        bool successful_episode,
         std::span<const std::uint8_t> next_action_mask
     );
     void reset();

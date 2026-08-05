@@ -36,10 +36,18 @@ struct RecurrentPolicyBackendConfig {
     std::size_t training_updates_per_transition = 1;
     std::uint64_t target_update_interval = 500;
     std::uint64_t initial_training_updates = 0;
+    // Flattened [character][opponent] victory counts loaded from the shared
+    // metadata checkpoint. They drive replay sampling without changing the
+    // recurrent checkpoint architecture.
+    std::vector<std::uint64_t> initial_matchup_wins;
     float gamma = 0.995f;
     float q_value_limit = 25.0f;
     float terminal_replay_fraction = 0.25f;
     float hard_negative_replay_fraction = 0.25f;
+    float winning_replay_fraction = 0.30f;
+    float winning_replay_min_fraction = 0.10f;
+    std::size_t winning_replay_ramp_episodes = 5;
+    std::size_t winning_replay_capacity = 4096;
     float hard_negative_q_threshold = 1.0f;
     std::size_t n_step_options = 3;
     float learning_rate = 1.0e-4f;
@@ -60,6 +68,8 @@ struct RecurrentPolicyBackendConfig {
 struct RecurrentPolicyBackendStats {
     std::uint64_t training_updates = 0;
     std::size_t replay_size = 0;
+    std::size_t winning_replay_size = 0;
+    std::uint64_t winning_episodes = 0;
     std::size_t matchup_count = 0;
     std::size_t sequence_size = 0;
     float last_loss = 0.0f;
@@ -74,6 +84,9 @@ struct RecurrentPolicyBackendStats {
     float last_terminal_td_target_mean = 0.0f;
     float last_critic_disagreement = 0.0f;
     float last_hard_negative_sample_fraction = 0.0f;
+    float last_winning_sample_fraction = 0.0f;
+    float effective_winning_replay_fraction = 0.0f;
+    std::uint64_t current_matchup_winning_episodes = 0;
     double parameter_checksum = 0.0;
     double resnet_parameter_checksum = 0.0;
     std::uint64_t resnet_training_updates = 0;
@@ -126,6 +139,15 @@ public:
         std::size_t duration,
         float reward,
         bool terminal,
+        bool successful_episode,
+        std::span<const std::uint8_t> next_action_mask
+    );
+    // Finalizes a round that ended between options. The terminal reward is
+    // attached to the most recent pending option before its n-step suffix is
+    // flushed, and a successful trajectory is promoted to the win reserve.
+    RecurrentPolicyCloseResult finalize_episode(
+        float terminal_reward,
+        bool successful_episode,
         std::span<const std::uint8_t> next_action_mask
     );
     void reset();
