@@ -1919,7 +1919,7 @@ struct CppRecurrentPolicyBackend::Implementation {
 
     std::vector<float> config_signature() const {
         std::vector<float> result{
-            1.0f,
+            21.0f,
             static_cast<float>(config.visual_size),
             static_cast<float>(config.projection_size),
             static_cast<float>(config.controller_size),
@@ -2271,6 +2271,12 @@ RecurrentPolicyCloseResult CppRecurrentPolicyBackend::finalize_episode(
 }
 
 void CppRecurrentPolicyBackend::reset() {
+    implementation_->reset();
+}
+
+void CppRecurrentPolicyBackend::set_training_enabled(bool enabled) {
+    implementation_->config.training_enabled = enabled;
+    implementation_->config.checkpoint_writes_enabled = enabled;
     implementation_->reset();
 }
 

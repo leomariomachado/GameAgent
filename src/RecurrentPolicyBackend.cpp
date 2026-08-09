@@ -671,11 +671,28 @@ void RecurrentPolicyBackend::reset() {
     static_cast<void>(implementation_->transact({{"op", "reset"}}));
 }
 
+void RecurrentPolicyBackend::set_training_enabled(bool enabled) {
+    auto& state = *implementation_;
+    state.config.training_enabled = enabled;
+    state.config.checkpoint_writes_enabled = enabled;
+    if (state.cpp != nullptr) {
+        state.cpp->set_training_enabled(enabled);
+        return;
+    }
+    // The Python compatibility sidecar has a constructor-time training flag.
+    // Keeping transitions out of it is sufficient to freeze replay/optimizer;
+    // reset also discards any in-flight option at the episode boundary.
+    static_cast<void>(state.transact({{"op", "reset"}}));
+}
+
 void RecurrentPolicyBackend::save(
     const std::filesystem::path& path,
     bool include_replay
 ) {
     auto& state = *implementation_;
+    if (!state.config.checkpoint_writes_enabled) {
+        return;
+    }
     if (state.cpp != nullptr) {
         state.cpp->save(path, include_replay);
         return;

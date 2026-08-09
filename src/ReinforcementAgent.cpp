@@ -17,14 +17,10 @@
 namespace gameagent {
 namespace {
 
-constexpr std::array<char, 8> kCheckpointMagicV4{
-    'G', 'A', 'R', 'L', '0', '0', '0', '4'
-};
 constexpr std::array<char, 8> kCheckpointMagic{
-    'G', 'A', 'R', 'L', '0', '0', '0', '5'
+    'G', 'A', 'R', 'L', '0', '0', '2', '1'
 };
-constexpr std::uint32_t kCheckpointVersion = 5;
-constexpr std::uint32_t kLegacyCheckpointVersion = 4;
+constexpr std::uint32_t kCheckpointVersion = 21;
 constexpr std::uint64_t kCheckpointTrailer = 0x4741524c454e4421ULL;
 
 constexpr int kYHighPunch = 0;
@@ -77,6 +73,8 @@ enum class OptionTactic {
     combo,
     projectile,
     teleport,
+    throw_attack,
+    sweep,
     utility,
 };
 
@@ -105,6 +103,14 @@ bool is_mirrored_option(const OptionDefinition& option) {
 
 bool is_advance_option(const OptionDefinition& option) {
     return option.name == "Avançar" || option.name == "Corrida curta";
+}
+
+bool is_throw_option(const OptionDefinition& option) {
+    return option.tactic == OptionTactic::throw_attack;
+}
+
+bool is_sweep_option(const OptionDefinition& option) {
+    return option.tactic == OptionTactic::sweep;
 }
 
 OptionTactic scripted_tactic(std::string_view name) {
@@ -137,6 +143,12 @@ OptionTactic scripted_tactic(std::string_view name) {
     ) {
         return OptionTactic::close_attack;
     }
+    if (name == "Agarrão" || name.rfind("Agarrão [", 0) == 0) {
+        return OptionTactic::throw_attack;
+    }
+    if (name == "Rasteira" || name.rfind("Rasteira [", 0) == 0) {
+        return OptionTactic::sweep;
+    }
     if (
         name.rfind("Salto para frente", 0) == 0 ||
         name.rfind("Corrida", 0) == 0 ||
@@ -152,6 +164,8 @@ struct ActionContext {
     float player_x = 0.25f;
     float opponent_x = 0.75f;
     bool spatial_valid = false;
+    bool player_on_ground = true;
+    bool opponent_on_ground = true;
     bool opponent_attacking = false;
 
     [[nodiscard]] bool player_is_right_of_opponent() const {
@@ -166,7 +180,9 @@ std::size_t impact_credit_steps(
 ) {
     if (
         option.tactic == OptionTactic::close_attack ||
-        option.tactic == OptionTactic::combo
+        option.tactic == OptionTactic::combo ||
+        option.tactic == OptionTactic::throw_attack ||
+        option.tactic == OptionTactic::sweep
     ) {
         return config.melee_impact_credit_steps;
     }
@@ -883,6 +899,10 @@ struct ReinforcementAgent::Implementation {
             config.combo_max_distance > 1.0f ||
             config.close_attack_max_distance <= 0.0f ||
             config.close_attack_max_distance > 1.0f ||
+            config.throw_max_distance <= 0.0f ||
+            config.throw_max_distance > config.close_attack_max_distance ||
+            config.sweep_max_distance <= 0.0f ||
+            config.sweep_max_distance > 1.0f ||
             config.projectile_preferred_min_distance <= 0.0f ||
             config.projectile_preferred_min_distance > 1.0f ||
             config.projectile_q_preference_margin < 0.0f ||
@@ -895,6 +915,8 @@ struct ReinforcementAgent::Implementation {
             config.defense_max_distance <= 0.0f ||
             config.defense_max_distance > 1.0f ||
             config.disable_cloud_cooldown_options == 0 ||
+            config.throw_cooldown_options == 0 ||
+            config.sweep_cooldown_options == 0 ||
             config.projectile_impact_credit_min_steps == 0 ||
             config.projectile_impact_credit_max_steps <
                 config.projectile_impact_credit_min_steps ||
@@ -953,23 +975,37 @@ struct ReinforcementAgent::Implementation {
         OpponentCharacter opponent
     ) const {
         if (!config.training_enabled) {
-            return config.epsilon_final;
+            return 0.0f;
         }
+        if (exploration_mode == ExplorationMode::manual_fixed) {
+            return exploration_value;
+        }
+        const std::uint64_t selections =
+            matchup_action_selections[character_index(character)]
+                [opponent_index(opponent)];
+        const std::uint64_t origin =
+            exploration_mode == ExplorationMode::automatic_from_value
+                ? exploration_selection_origin[character_index(character)]
+                      [opponent_index(opponent)]
+                : 0U;
         const double progress = std::min(
             1.0,
             static_cast<double>(
-                matchup_action_selections[character_index(character)]
-                    [opponent_index(opponent)]
+                selections >= origin ? selections - origin : 0U
             ) /
                 static_cast<double>(
                     config.new_matchup_epsilon_decay_selections
                 )
         );
+        const float initial =
+            exploration_mode == ExplorationMode::automatic_from_value
+                ? exploration_value
+                : config.new_matchup_epsilon_start;
         const float scheduled = static_cast<float>(
-            config.new_matchup_epsilon_start +
+            initial +
             (
                 config.epsilon_final -
-                config.new_matchup_epsilon_start
+                initial
             ) * progress
         );
         if (config.training_enabled && greedy_training_episode) {
@@ -989,11 +1025,31 @@ struct ReinforcementAgent::Implementation {
         ) {
             return false;
         }
+        if (throw_cooldown_options_remaining > 0 &&
+            is_throw_option(option)) {
+            return false;
+        }
+        if (sweep_cooldown_options_remaining > 0 &&
+            is_sweep_option(option)) {
+            return false;
+        }
         if (
             context.spatial_valid &&
             config.suppress_neutral_during_fight &&
             option.tactic == OptionTactic::neutral
         ) {
+            return false;
+        }
+        if ((is_throw_option(option) || is_sweep_option(option)) &&
+            (!context.player_on_ground || !context.opponent_on_ground)) {
+            return false;
+        }
+        if (context.spatial_valid && is_throw_option(option) &&
+            context.distance > config.throw_max_distance) {
+            return false;
+        }
+        if (context.spatial_valid && is_sweep_option(option) &&
+            context.distance > config.sweep_max_distance) {
             return false;
         }
         // Screen position is a more reliable facing signal than the initial
@@ -1193,16 +1249,32 @@ struct ReinforcementAgent::Implementation {
         if (disable_cloud_cooldown_options_remaining > 0) {
             --disable_cloud_cooldown_options_remaining;
         }
+        if (throw_cooldown_options_remaining > 0) {
+            --throw_cooldown_options_remaining;
+        }
+        if (sweep_cooldown_options_remaining > 0) {
+            --sweep_cooldown_options_remaining;
+        }
         if (is_disable_cloud_option(options()[selected])) {
             disable_cloud_cooldown_options_remaining =
                 config.disable_cloud_cooldown_options;
         }
-        ++character_action_selections[
-            character_index(config.character)
-        ];
-        ++matchup_action_selections[
-            character_index(config.character)
-        ][opponent_index(config.opponent_character)];
+        if (is_throw_option(options()[selected])) {
+            throw_cooldown_options_remaining =
+                config.throw_cooldown_options;
+        }
+        if (is_sweep_option(options()[selected])) {
+            sweep_cooldown_options_remaining =
+                config.sweep_cooldown_options;
+        }
+        if (config.training_enabled) {
+            ++character_action_selections[
+                character_index(config.character)
+            ];
+            ++matchup_action_selections[
+                character_index(config.character)
+            ][opponent_index(config.opponent_character)];
+        }
         return {selected, std::move(source)};
     }
 
@@ -1790,16 +1862,8 @@ struct ReinforcementAgent::Implementation {
             input ? read_value<std::uint32_t>(input) : 0U;
         if (
             !input ||
-            !(
-                (
-                    magic == kCheckpointMagic &&
-                    checkpoint_version == kCheckpointVersion
-                ) ||
-                (
-                    magic == kCheckpointMagicV4 &&
-                    checkpoint_version == kLegacyCheckpointVersion
-                )
-            )
+            magic != kCheckpointMagic ||
+            checkpoint_version != kCheckpointVersion
         ) {
             throw std::runtime_error(
                 "invalid shared reinforcement checkpoint header"
@@ -1847,7 +1911,7 @@ struct ReinforcementAgent::Implementation {
         for (std::uint64_t& value : character_action_selections) {
             value = read_value<std::uint64_t>(input);
         }
-        if (checkpoint_version >= kCheckpointVersion) {
+        if (checkpoint_version == kCheckpointVersion) {
             for (auto& character : matchup_action_selections) {
                 for (std::uint64_t& value : character) {
                     value = read_value<std::uint64_t>(input);
@@ -1985,6 +2049,8 @@ struct ReinforcementAgent::Implementation {
     std::size_t impact_credit_steps_remaining = 0;
     std::size_t impact_credit_steps_total = 0;
     std::size_t disable_cloud_cooldown_options_remaining = 0;
+    std::size_t throw_cooldown_options_remaining = 0;
+    std::size_t sweep_cooldown_options_remaining = 0;
     std::string active_selection_source;
     float active_selected_q = 0.0f;
     bool active_commands_mirrored = false;
@@ -2027,6 +2093,12 @@ struct ReinforcementAgent::Implementation {
     float current_episode_return = 0.0f;
     float last_training_loss = 0.0f;
     bool checkpoint_loaded = false;
+    ExplorationMode exploration_mode = ExplorationMode::automatic;
+    float exploration_value = 0.0f;
+    std::array<
+        std::array<std::uint64_t, kOpponentCharacterFeatureCount>,
+        kControlledCharacterCount
+    > exploration_selection_origin{};
 };
 
 ReinforcementAgent::ReinforcementAgent(ReinforcementAgentConfig config)
@@ -2073,6 +2145,8 @@ ReinforcementDecision ReinforcementAgent::step(
         .player_x = std::clamp(input.player_x, 0.0f, 1.0f),
         .opponent_x = std::clamp(input.opponent_x, 0.0f, 1.0f),
         .spatial_valid = input.spatial_valid,
+        .player_on_ground = input.player_on_ground,
+        .opponent_on_ground = input.opponent_on_ground,
         .opponent_attacking = input.opponent_attacking,
     };
     if (
@@ -2121,6 +2195,8 @@ ReinforcementDecision ReinforcementAgent::step(
         state.current_episode_id = input.episode_id;
         state.current_episode_return = 0.0f;
         state.disable_cloud_cooldown_options_remaining = 0;
+        state.throw_cooldown_options_remaining = 0;
+        state.sweep_cooldown_options_remaining = 0;
         const std::size_t player =
             character_index(state.config.character);
         const std::size_t opponent =
@@ -2180,21 +2256,25 @@ ReinforcementDecision ReinforcementAgent::step(
 
     if (input.episode_ended) {
         state.disable_cloud_cooldown_options_remaining = 0;
+        state.throw_cooldown_options_remaining = 0;
+        state.sweep_cooldown_options_remaining = 0;
         const std::size_t player =
             character_index(state.config.character);
         const std::size_t opponent =
             opponent_index(state.config.opponent_character);
-        ++state.character_episodes_completed[player];
-        ++state.matchup_episodes_completed[player][opponent];
-        if (input.episode_won) {
-            ++state.matchup_wins[player][opponent];
-        }
-        const bool new_best =
-            state.current_episode_return >
-            state.character_best_episode_return[player];
-        if (new_best) {
-            state.character_best_episode_return[player] =
-                state.current_episode_return;
+        bool new_best = false;
+        if (state.config.training_enabled) {
+            ++state.character_episodes_completed[player];
+            ++state.matchup_episodes_completed[player][opponent];
+            if (input.episode_won) {
+                ++state.matchup_wins[player][opponent];
+            }
+            new_best = state.current_episode_return >
+                state.character_best_episode_return[player];
+            if (new_best) {
+                state.character_best_episode_return[player] =
+                    state.current_episode_return;
+            }
         }
         const std::uint64_t completed_episodes = std::accumulate(
             state.character_episodes_completed.begin(),
@@ -2318,6 +2398,10 @@ ReinforcementDecision ReinforcementAgent::step(
             state.impact_credit_steps_total;
         decision.disable_cloud_cooldown_remaining =
             state.disable_cloud_cooldown_options_remaining;
+        decision.throw_cooldown_remaining =
+            state.throw_cooldown_options_remaining;
+        decision.sweep_cooldown_remaining =
+            state.sweep_cooldown_options_remaining;
         decision.commands_mirrored = state.active_commands_mirrored;
         decision.selected_q = state.active_selected_q;
         ++state.option_elapsed_steps;
@@ -2390,6 +2474,49 @@ void ReinforcementAgent::configure_session(
         std::move(best_checkpoint_path);
 }
 
+void ReinforcementAgent::configure_encounter_stage(
+    OpponentCharacter opponent_character
+) {
+    opponent_index(opponent_character);
+    auto& state = *implementation_;
+    state.config.opponent_character = opponent_character;
+}
+
+void ReinforcementAgent::set_agent_mode(AgentMode mode) {
+    auto& state = *implementation_;
+    const bool training = mode == AgentMode::training;
+    if (state.config.training_enabled == training) {
+        return;
+    }
+    state.config.training_enabled = training;
+    state.config.checkpoint_writes_enabled = training;
+    state.greedy_training_episode = false;
+    if (state.recurrent_backend != nullptr) {
+        state.recurrent_backend->set_training_enabled(training);
+    }
+}
+
+void ReinforcementAgent::set_exploration(
+    ExplorationMode mode,
+    float value,
+    bool reset_matchup_counter
+) {
+    if (!std::isfinite(value) || value < 0.0f || value > 1.0f) {
+        throw std::invalid_argument("exploration value must be within 0..1");
+    }
+    auto& state = *implementation_;
+    state.exploration_mode = mode;
+    state.exploration_value = value;
+    if (reset_matchup_counter ||
+        mode == ExplorationMode::automatic_from_value) {
+        const std::size_t player = character_index(state.config.character);
+        const std::size_t opponent =
+            opponent_index(state.config.opponent_character);
+        state.exploration_selection_origin[player][opponent] =
+            state.matchup_action_selections[player][opponent];
+    }
+}
+
 void ReinforcementAgent::suspend() {
     auto& state = *implementation_;
     state.active_option.reset();
@@ -2419,6 +2546,8 @@ void ReinforcementAgent::reset_episode(bool save_checkpoint) {
     state.active_commands_mirrored = false;
     state.greedy_training_episode = false;
     state.disable_cloud_cooldown_options_remaining = 0;
+    state.throw_cooldown_options_remaining = 0;
+    state.sweep_cooldown_options_remaining = 0;
     state.current_episode_return = 0.0f;
     state.current_episode_id = 0;
     if (state.recurrent_backend != nullptr) {

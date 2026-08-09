@@ -39,6 +39,7 @@ add_library(
         src/RepeatedFrameDetector.cpp
         src/ReinforcementAgent.cpp
         src/ResNet50FeatureExtractor.cu
+        src/ServerProtocolV21.cpp
         src/StreamProtocol.cpp
         src/TemporalAgent.cpp
         src/TemporalLstm.cu
@@ -133,6 +134,19 @@ if (BUILD_TESTING)
     add_test(
             NAME gameagent_stream_protocol
             COMMAND test_gameagent_stream_protocol
+    )
+
+    add_executable(
+            test_gameagent_server_protocol_v21
+            tests/test_server_protocol_v21.cpp
+    )
+    target_link_libraries(
+            test_gameagent_server_protocol_v21
+            PRIVATE GameAgentMockCore
+    )
+    add_test(
+            NAME gameagent_server_protocol_v21
+            COMMAND test_gameagent_server_protocol_v21
     )
 
     add_executable(

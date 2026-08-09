@@ -424,7 +424,7 @@ int main() {
                 session_ack.value("training_reset_trigger", "") ==
                     "round_lost_or_non_fight_timeout" &&
                 session_ack.value("agent_mode", "") == "mock_teacher" &&
-                session_ack.value("mock_move_count", 0U) == 14U,
+                session_ack.value("mock_move_count", 0U) == 18U,
             "Scorpion versus Shao Kahn session was not acknowledged"
         );
         const nlohmann::json second_action = send_one_frame_and_receive_action(second_client, 1U);

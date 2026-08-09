@@ -137,6 +137,12 @@ public:
     FightControlSnapshot observe(const BufferedFrame& frame);
     FightControlSnapshot consume(std::int64_t now_ms);
     [[nodiscard]] FightControlSnapshot snapshot(std::int64_t now_ms) const;
+    // V2.1 uses client semantic encounter events for episode boundaries. In
+    // Endurance this prevents the first empty/refilled opponent bar from being
+    // mistaken for a terminal round or healing.
+    void set_external_encounter_lifecycle(bool enabled);
+    void advance_encounter_stage(float stage_bonus = 15.0f);
+    void finish_encounter(bool won);
     void reset();
 
 private:
@@ -163,6 +169,8 @@ private:
     std::size_t terminal_frames_ = 0;
     std::int64_t last_intro_increase_ms_ = 0;
     bool episode_active_ = false;
+    bool external_encounter_lifecycle_ = false;
+    bool awaiting_opponent_refill_ = false;
     float pending_reward_ = 0.0f;
     float pending_terminal_reward_ = 0.0f;
     float pending_damage_dealt_ = 0.0f;

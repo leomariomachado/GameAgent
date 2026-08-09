@@ -6,11 +6,139 @@
 #include <array>
 #include <bit>
 #include <cctype>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 
 namespace gameagent {
 namespace {
+
+MessageMetadata parse_message_metadata(
+    const nlohmann::json& request,
+    std::string_view type
+) {
+    if (!request.contains("protocol_version") ||
+        !request["protocol_version"].is_number_integer() ||
+        request["protocol_version"].get<int>() !=
+            static_cast<int>(kServerProtocolVersion)) {
+        throw std::invalid_argument(
+            std::string(type) + " protocol_version must be 2"
+        );
+    }
+    if (!request.contains("request_id") ||
+        !request["request_id"].is_number_unsigned() ||
+        request["request_id"].get<std::uint64_t>() == 0) {
+        throw std::invalid_argument(
+            std::string(type) + " request_id must be a positive uint64"
+        );
+    }
+    if (!request.contains("timestamp_ms") ||
+        !request["timestamp_ms"].is_number_integer() ||
+        request["timestamp_ms"].get<std::int64_t>() <= 0) {
+        throw std::invalid_argument(
+            std::string(type) + " timestamp_ms must be positive"
+        );
+    }
+    return {
+        .request_id = request["request_id"].get<std::uint64_t>(),
+        .timestamp_ms = request["timestamp_ms"].get<std::int64_t>(),
+    };
+}
+
+std::uint64_t positive_u64(
+    const nlohmann::json& request,
+    std::string_view field,
+    std::string_view type
+) {
+    const std::string key(field);
+    if (!request.contains(key) || !request[key].is_number_unsigned() ||
+        request[key].get<std::uint64_t>() == 0) {
+        throw std::invalid_argument(
+            std::string(type) + " " + key + " must be a positive uint64"
+        );
+    }
+    return request[key].get<std::uint64_t>();
+}
+
+std::string required_string(
+    const nlohmann::json& request,
+    std::string_view field,
+    std::string_view type,
+    std::size_t maximum = 64U
+) {
+    const std::string key(field);
+    if (!request.contains(key) || !request[key].is_string()) {
+        throw std::invalid_argument(
+            std::string(type) + " " + key + " must be a string"
+        );
+    }
+    std::string value = request[key].get<std::string>();
+    if (value.empty() || value.size() > maximum) {
+        throw std::invalid_argument(
+            std::string(type) + " " + key + " has invalid length"
+        );
+    }
+    return value;
+}
+
+EncounterConfiguration parse_encounter_configuration(
+    const nlohmann::json& request,
+    std::string_view type
+) {
+    const nlohmann::json& source =
+        request.contains("encounter") ? request["encounter"] : request;
+    if (!source.is_object()) {
+        throw std::invalid_argument("encounter must be an object");
+    }
+    const auto parsed_type = parse_encounter_type(
+        required_string(source, "encounter_type", type)
+    );
+    if (!parsed_type.has_value()) {
+        throw std::invalid_argument("unsupported encounter_type");
+    }
+    if (!source.contains("opponents") ||
+        !source["opponents"].is_array()) {
+        throw std::invalid_argument("encounter opponents must be an array");
+    }
+    const auto& opponents = source["opponents"];
+    if (opponents.empty() ||
+        opponents.size() > kMaximumEncounterOpponents) {
+        throw std::invalid_argument("encounter requires 1..4 opponents");
+    }
+    EncounterConfiguration configuration;
+    configuration.type = *parsed_type;
+    configuration.opponent_count = static_cast<std::uint8_t>(
+        source.value<std::size_t>("opponent_count", opponents.size())
+    );
+    configuration.current_stage = static_cast<std::uint8_t>(
+        source.value<std::size_t>("current_stage", 0U)
+    );
+    if (configuration.opponent_count != opponents.size()) {
+        throw std::invalid_argument(
+            "opponent_count must match opponents array size"
+        );
+    }
+    for (std::size_t index = 0; index < opponents.size(); ++index) {
+        if (!opponents[index].is_string()) {
+            throw std::invalid_argument("encounter opponents must be strings");
+        }
+        const auto opponent = parse_opponent_character(
+            opponents[index].get<std::string>()
+        );
+        if (!opponent.has_value() ||
+            *opponent == OpponentCharacter::unknown) {
+            throw std::invalid_argument("unsupported encounter opponent");
+        }
+        configuration.opponents[index] = *opponent;
+    }
+    configuration.validate();
+    if (configuration.current_stage != 0U) {
+        throw std::invalid_argument(
+            "configure_session encounter current_stage must be 0"
+        );
+    }
+    return configuration;
+}
 
 std::uint32_t read_u32_be(std::span<const std::uint8_t> bytes) {
     return (static_cast<std::uint32_t>(bytes[0]) << 24U) |
@@ -253,6 +381,215 @@ ClientTextMessage parse_client_text_message(std::string_view payload) {
     }
 
     const std::string type = request.value("type", "frame");
+    if (type == "configure_session") {
+        const MessageMetadata metadata =
+            parse_message_metadata(request, type);
+        std::optional<std::string> player_side;
+        std::optional<std::string> initial_facing;
+        if (request.contains("player_side")) {
+            player_side = required_string(request, "player_side", type);
+            if (*player_side != "left" && *player_side != "right") {
+                throw std::invalid_argument(
+                    "configure_session player_side must be left or right"
+                );
+            }
+        }
+        if (request.contains("initial_facing")) {
+            initial_facing = required_string(
+                request, "initial_facing", type
+            );
+            if (*initial_facing != "left" && *initial_facing != "right") {
+                throw std::invalid_argument(
+                    "configure_session initial_facing must be left or right"
+                );
+            }
+        }
+        return ConfigureSessionRequest{
+            .metadata = metadata,
+            .player_character = required_string(
+                request, "player_character", type, 32U
+            ),
+            .player_side = std::move(player_side),
+            .initial_facing = std::move(initial_facing),
+            .encounter = parse_encounter_configuration(request, type),
+        };
+    }
+
+    if (type == "update_encounter_stage") {
+        const MessageMetadata metadata =
+            parse_message_metadata(request, type);
+        const std::size_t stage = request.value<std::size_t>(
+            "current_stage", kMaximumEncounterOpponents
+        );
+        if (stage >= kMaximumEncounterOpponents) {
+            throw std::invalid_argument(
+                "update_encounter_stage current_stage must be 0..3"
+            );
+        }
+        const auto opponent = parse_opponent_character(
+            required_string(request, "current_opponent", type)
+        );
+        if (!opponent.has_value() ||
+            *opponent == OpponentCharacter::unknown) {
+            throw std::invalid_argument(
+                "update_encounter_stage current_opponent is unsupported"
+            );
+        }
+        return UpdateEncounterStageRequest{
+            .metadata = metadata,
+            .episode_id = positive_u64(request, "episode_id", type),
+            .stage_transition_id = positive_u64(
+                request, "stage_transition_id", type
+            ),
+            .current_stage = static_cast<std::uint8_t>(stage),
+            .current_opponent = *opponent,
+        };
+    }
+
+    if (type == "encounter_event") {
+        const MessageMetadata metadata =
+            parse_message_metadata(request, type);
+        const auto event = parse_encounter_event(
+            required_string(request, "event", type)
+        );
+        if (!event.has_value() || *event == EncounterEvent::none) {
+            throw std::invalid_argument("unsupported encounter event");
+        }
+        const std::size_t stage = request.value<std::size_t>(
+            "encounter_stage", kMaximumEncounterOpponents
+        );
+        if (stage >= kMaximumEncounterOpponents) {
+            throw std::invalid_argument(
+                "encounter_event encounter_stage must be 0..3"
+            );
+        }
+        std::uint64_t transition_id = 0;
+        if (*event == EncounterEvent::stage_completed ||
+            *event == EncounterEvent::stage_started) {
+            transition_id = positive_u64(
+                request, "stage_transition_id", type
+            );
+        } else if (request.contains("stage_transition_id")) {
+            transition_id = request["stage_transition_id"].get<std::uint64_t>();
+        }
+        return EncounterEventRequest{
+            .metadata = metadata,
+            .episode_id = positive_u64(request, "episode_id", type),
+            .stage_transition_id = transition_id,
+            .event = *event,
+            .encounter_stage = static_cast<std::uint8_t>(stage),
+        };
+    }
+
+    if (type == "set_agent_mode") {
+        const MessageMetadata metadata =
+            parse_message_metadata(request, type);
+        const auto mode = parse_agent_mode(
+            required_string(request, "mode", type)
+        );
+        if (!mode.has_value()) {
+            throw std::invalid_argument("unsupported agent mode");
+        }
+        return SetAgentModeRequest{
+            .metadata = metadata,
+            .mode = *mode,
+            .reset_evaluation_session = request.value(
+                "reset_evaluation_session", false
+            ),
+            .apply_on_next_episode = request.value(
+                "apply_on_next_episode", true
+            ),
+        };
+    }
+
+    if (type == "set_exploration") {
+        const MessageMetadata metadata =
+            parse_message_metadata(request, type);
+        const auto mode = parse_exploration_mode(
+            required_string(request, "mode", type)
+        );
+        if (!mode.has_value()) {
+            throw std::invalid_argument("unsupported exploration mode");
+        }
+        const float value = request.value("value", 0.0f);
+        if (!std::isfinite(value) || value < 0.0f || value > 1.0f) {
+            throw std::invalid_argument(
+                "set_exploration value must be within 0..1"
+            );
+        }
+        return SetExplorationRequest{
+            .metadata = metadata,
+            .mode = *mode,
+            .value = value,
+            .reset_matchup_counter = request.value(
+                "reset_matchup_counter", false
+            ),
+        };
+    }
+
+    if (type == "request_reset") {
+        const MessageMetadata metadata =
+            parse_message_metadata(request, type);
+        const auto reason = parse_reset_reason(
+            required_string(request, "reason", type)
+        );
+        if (!reason.has_value() || *reason == ResetReason::none) {
+            throw std::invalid_argument("unsupported reset reason");
+        }
+        return RequestReset{
+            .metadata = metadata,
+            .episode_id = positive_u64(request, "episode_id", type),
+            .reason = *reason,
+        };
+    }
+
+    if (type == "reset_ack") {
+        const MessageMetadata metadata =
+            parse_message_metadata(request, type);
+        if (!request.contains("command_executed") ||
+            !request["command_executed"].is_boolean()) {
+            throw std::invalid_argument(
+                "reset_ack command_executed must be boolean"
+            );
+        }
+        return ResetAck{
+            .metadata = metadata,
+            .reset_id = positive_u64(request, "reset_id", type),
+            .episode_id = positive_u64(request, "episode_id", type),
+            .command_executed = request["command_executed"].get<bool>(),
+            .executed_timestamp_ms = static_cast<std::int64_t>(
+                positive_u64(request, "executed_timestamp_ms", type)
+            ),
+        };
+    }
+
+    if (type == "reset_ready") {
+        const MessageMetadata metadata =
+            parse_message_metadata(request, type);
+        if (!request.contains("stable_initial_state") ||
+            !request["stable_initial_state"].is_boolean()) {
+            throw std::invalid_argument(
+                "reset_ready stable_initial_state must be boolean"
+            );
+        }
+        return ResetReady{
+            .metadata = metadata,
+            .reset_id = positive_u64(request, "reset_id", type),
+            .stable_initial_state =
+                request["stable_initial_state"].get<bool>(),
+            .first_stable_frame_id = positive_u64(
+                request, "first_stable_frame_id", type
+            ),
+        };
+    }
+
+    if (type == "reset_failed") {
+        return ResetFailed{
+            .metadata = parse_message_metadata(request, type),
+            .reset_id = positive_u64(request, "reset_id", type),
+            .reason = required_string(request, "reason", type, 512U),
+        };
+    }
     if (type == "session_config") {
         if (!request.contains("protocol_version") ||
             !request["protocol_version"].is_number_integer() ||

@@ -186,7 +186,7 @@ int main() {
 
         gameagent::ReinforcementAgent subzero(config);
         require(
-            subzero.option_names().size() == 23,
+            subzero.option_names().size() == 27,
             "Sub-Zero did not receive its action head"
         );
         const double initial_shared_checksum =
@@ -295,7 +295,7 @@ int main() {
         );
         require(
             inherited.action_selections == 0 &&
-                scorpion.option_names().size() == 25,
+                scorpion.option_names().size() == 29,
             "Scorpion exploration/head was not kept character-specific"
         );
 
@@ -347,10 +347,10 @@ int main() {
         const std::vector<
             std::pair<gameagent::FighterCharacter, std::size_t>
         > heads{
-            {gameagent::FighterCharacter::subzero, 23U},
-            {gameagent::FighterCharacter::noob_saibot, 21U},
-            {gameagent::FighterCharacter::scorpion, 25U},
-            {gameagent::FighterCharacter::sindel, 26U},
+            {gameagent::FighterCharacter::subzero, 27U},
+            {gameagent::FighterCharacter::noob_saibot, 25U},
+            {gameagent::FighterCharacter::scorpion, 29U},
+            {gameagent::FighterCharacter::sindel, 30U},
         };
         for (const auto& [character, expected_options] : heads) {
             auto head_config = config;
@@ -411,9 +411,19 @@ int main() {
                     evaluation_before.training_updates &&
                 evaluation_after.replay_size ==
                     evaluation_before.replay_size &&
+                evaluation_after.action_selections ==
+                    evaluation_before.action_selections &&
+                evaluation_after.matchup_action_selections ==
+                    evaluation_before.matchup_action_selections &&
+                evaluation_after.episodes_completed ==
+                    evaluation_before.episodes_completed &&
+                evaluation_after.matchup_episodes_completed ==
+                    evaluation_before.matchup_episodes_completed &&
+                evaluation_after.matchup_wins ==
+                    evaluation_before.matchup_wins &&
                 evaluation_after.shared_parameter_checksum ==
                     evaluation_before.shared_parameter_checksum,
-            "read-only evaluation changed training state"
+            "read-only evaluation changed learner or scheduler state"
         );
         require(
             read_file(latest) == checkpoint_before &&
@@ -469,7 +479,9 @@ int main() {
 
         auto neutral_config = config;
         neutral_config.resume = false;
-        neutral_config.training_enabled = false;
+        // Tactical sampling tests intentionally exercise epsilon=1. Runtime
+        // V2.1 evaluation is always epsilon=0 and is covered separately.
+        neutral_config.training_enabled = true;
         neutral_config.checkpoint_writes_enabled = false;
         neutral_config.epsilon_start = 1.0f;
         neutral_config.epsilon_final = 1.0f;
@@ -525,8 +537,12 @@ int main() {
         std::size_t selected_options = 0;
         std::size_t cloud_options = 0;
         std::size_t teleport_options = 0;
+        std::size_t throw_options = 0;
+        std::size_t sweep_options = 0;
         std::optional<std::size_t> last_cloud_option;
         std::optional<std::size_t> last_teleport_option;
+        std::optional<std::size_t> last_throw_option;
+        std::optional<std::size_t> last_sweep_option;
         bool observed_unrestricted_teleport = false;
         bool observed_delayed_credit = false;
         decision_id = 2000;
@@ -584,13 +600,82 @@ int main() {
                 last_teleport_option = selected_options;
                 ++teleport_options;
             }
+            const bool is_throw =
+                cooldown_decision.option_name == "Agarrão" ||
+                cooldown_decision.option_name.rfind(
+                    "Agarrão [Espelho", 0
+                ) == 0;
+            if (is_throw) {
+                if (last_throw_option.has_value()) {
+                    require(
+                        selected_options >= *last_throw_option + 3U,
+                        "DQN selected another throw during cooldown"
+                    );
+                }
+                last_throw_option = selected_options;
+                ++throw_options;
+            }
+            const bool is_sweep =
+                cooldown_decision.option_name.rfind("Rasteira", 0) == 0;
+            if (is_sweep) {
+                if (last_sweep_option.has_value()) {
+                    require(
+                        selected_options >= *last_sweep_option + 2U,
+                        "DQN selected another sweep during cooldown"
+                    );
+                }
+                last_sweep_option = selected_options;
+                ++sweep_options;
+            }
             ++selected_options;
         }
         require(
             selected_options == 600 && cloud_options > 10 &&
                 teleport_options > 10 && observed_unrestricted_teleport &&
+                throw_options > 10 && sweep_options > 10 &&
                 observed_delayed_credit,
             "DQN cooldown/credit test did not sample enough options"
+        );
+
+        auto grounded_mask_config = cooldown_config;
+        grounded_mask_config.random_seed = 88217;
+        gameagent::ReinforcementAgent grounded_mask_agent(
+            grounded_mask_config
+        );
+        selected_options = 0;
+        decision_id = 12000;
+        while (selected_options < 200U && decision_id < 24000U) {
+            const auto masked = grounded_mask_agent.step({
+                .state = state_a,
+                .action_allowed = true,
+                .episode_started = decision_id == 12000U,
+                .episode_id = 51,
+                .frame_id = decision_id,
+                .decision_id = decision_id,
+                .fighter_distance = 0.08f,
+                .player_x = 0.20f,
+                .opponent_x = 0.28f,
+                .spatial_valid = true,
+                .player_on_ground = false,
+                .opponent_on_ground = true,
+            });
+            ++decision_id;
+            if (masked.option_step != 1U) {
+                continue;
+            }
+            require(
+                masked.option_name != "Agarrão" &&
+                    masked.option_name.rfind(
+                        "Agarrão [Espelho", 0
+                    ) != 0 &&
+                    masked.option_name.rfind("Rasteira", 0) != 0,
+                "ground-only action was allowed while the player was airborne"
+            );
+            ++selected_options;
+        }
+        require(
+            selected_options == 200U,
+            "ground-only tactical mask did not complete its sample"
         );
 
         auto facing_config = cooldown_config;

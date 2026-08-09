@@ -34,6 +34,8 @@ struct WebSocketServerOptions {
     bool reinforcement_trainable_resnet = false;
     bool training_reset_state_enabled = true;
     std::chrono::milliseconds training_reset_non_fight_timeout{5000};
+    std::chrono::milliseconds reset_ack_timeout{5000};
+    std::chrono::milliseconds reset_ready_timeout{10000};
     std::chrono::milliseconds repeated_frame_pause_timeout{2000};
     std::chrono::milliseconds repeated_frame_reset_timeout{3000};
     bool player_is_left = true;
@@ -44,7 +46,7 @@ struct WebSocketServerOptions {
     std::size_t temporal_hidden_size = 256;
     int temporal_device_id = 0;
     std::filesystem::path reinforcement_checkpoint_directory =
-        "/workspace/gameagent/rl_checkpoints";
+        "/workspace/gameagent/rl_v21";
     std::filesystem::path recurrent_service_script =
         "/tmp/GameAgent/scripts/recurrent_dqn_service.py";
     std::size_t reinforcement_network_hidden_size = 128;
@@ -83,6 +85,8 @@ struct WebSocketServerOptions {
     bool reinforcement_suppress_neutral_during_fight = true;
     float reinforcement_combo_max_distance = 0.22f;
     float reinforcement_close_attack_max_distance = 0.24f;
+    float reinforcement_throw_max_distance = 0.12f;
+    float reinforcement_sweep_max_distance = 0.26f;
     float reinforcement_projectile_preferred_min_distance = 0.28f;
     float reinforcement_projectile_q_preference_margin = 1.0f;
     float reinforcement_disable_cloud_min_distance = 0.12f;
@@ -91,6 +95,8 @@ struct WebSocketServerOptions {
     float reinforcement_defense_max_distance = 0.32f;
     bool reinforcement_dynamic_facing = true;
     std::size_t reinforcement_disable_cloud_cooldown_options = 2;
+    std::size_t reinforcement_throw_cooldown_options = 2;
+    std::size_t reinforcement_sweep_cooldown_options = 1;
     std::size_t reinforcement_melee_impact_credit_steps = 2;
     std::size_t reinforcement_teleport_impact_credit_steps = 4;
     std::size_t reinforcement_projectile_impact_credit_min_steps = 4;

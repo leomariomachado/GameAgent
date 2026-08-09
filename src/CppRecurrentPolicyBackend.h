@@ -57,6 +57,7 @@ public:
         std::span<const std::uint8_t> next_action_mask
     );
     void reset();
+    void set_training_enabled(bool enabled);
     void save(
         const std::filesystem::path& path = {},
         bool include_replay = false

@@ -31,6 +31,7 @@ fi
   test_gameagent_mock_protocol \
   test_gameagent_http_server \
   test_gameagent_stream_protocol \
+  test_gameagent_server_protocol_v21 \
   test_gameagent_frame_buffer \
   test_gameagent_repeated_frame_detector \
   test_gameagent_websocket_server \

@@ -17,7 +17,9 @@ namespace gameagent {
 // flag were the original context. The remaining values make the fight state
 // explicit instead of forcing the recurrent policy to rediscover every
 // temporal/spatial relationship from pixels alone.
-inline constexpr std::size_t kReinforcementContextFeatureCount = 30;
+// V2.1 adds six encounter features to the existing 30 combat/controller
+// values: encounter type one-hot, stage, opponent count and remaining count.
+inline constexpr std::size_t kReinforcementContextFeatureCount = 36;
 inline constexpr std::size_t kCombatStateFeatureCount = 15;
 
 struct CombatStateConfig {

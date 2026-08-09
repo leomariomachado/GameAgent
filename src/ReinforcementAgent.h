@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MockAgent.h"
+#include "ServerProtocolV21.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -49,6 +50,8 @@ struct ReinforcementAgentConfig {
     bool suppress_neutral_during_fight = true;
     float combo_max_distance = 0.22f;
     float close_attack_max_distance = 0.24f;
+    float throw_max_distance = 0.12f;
+    float sweep_max_distance = 0.26f;
     float projectile_preferred_min_distance = 0.28f;
     float projectile_q_preference_margin = 1.0f;
     float disable_cloud_min_distance = 0.12f;
@@ -57,6 +60,8 @@ struct ReinforcementAgentConfig {
     float defense_max_distance = 0.32f;
     bool dynamic_facing = true;
     std::size_t disable_cloud_cooldown_options = 2;
+    std::size_t throw_cooldown_options = 2;
+    std::size_t sweep_cooldown_options = 1;
     // Damage arrives at different delays for melee, teleport and projectile
     // options. These post-program settle windows keep the option responsible
     // for the corresponding health change.
@@ -123,6 +128,8 @@ struct ReinforcementStepInput {
     float player_x = 0.25f;
     float opponent_x = 0.75f;
     bool spatial_valid = false;
+    bool player_on_ground = true;
+    bool opponent_on_ground = true;
     bool opponent_attacking = false;
 };
 
@@ -141,6 +148,8 @@ struct ReinforcementDecision {
     std::size_t impact_credit_step = 0;
     std::size_t impact_credit_steps = 0;
     std::size_t disable_cloud_cooldown_remaining = 0;
+    std::size_t throw_cooldown_remaining = 0;
+    std::size_t sweep_cooldown_remaining = 0;
     bool commands_mirrored = false;
     bool greedy_training_episode = false;
     float episode_return = 0.0f;
@@ -232,6 +241,17 @@ public:
         OpponentCharacter opponent_character,
         FighterFacing facing,
         std::filesystem::path best_checkpoint_path
+    );
+    // Switches the active opponent between Endurance stages without clearing
+    // the episode return, replay, optimizer or recurrent history.
+    void configure_encounter_stage(OpponentCharacter opponent_character);
+    // Runtime control used by V2.1. Evaluation is read-only and epsilon zero;
+    // returning to training resumes the same learner state.
+    void set_agent_mode(AgentMode mode);
+    void set_exploration(
+        ExplorationMode mode,
+        float value,
+        bool reset_matchup_counter
     );
     // Cancels the in-flight option without creating a replay transition or
     // changing episode return/epsilon. Used when the visual stream freezes.

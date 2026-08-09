@@ -253,6 +253,16 @@ int main(int argc, char** argv) {
                 ),
                 "training reset non-fight timeout"
             ));
+        server_options.reset_ack_timeout =
+            std::chrono::milliseconds(parse_positive_size(
+                environment_or("GAMEAGENT_RESET_ACK_TIMEOUT_MS", "5000"),
+                "reset acknowledgement timeout"
+            ));
+        server_options.reset_ready_timeout =
+            std::chrono::milliseconds(parse_positive_size(
+                environment_or("GAMEAGENT_RESET_READY_TIMEOUT_MS", "10000"),
+                "reset ready timeout"
+            ));
         server_options.repeated_frame_pause_timeout =
             std::chrono::milliseconds(parse_positive_size(
                 environment_or(
@@ -356,6 +366,20 @@ int main(int argc, char** argv) {
                 ),
                 "RL close-attack maximum distance", 0.01f, 1.0f
             );
+        server_options.reinforcement_throw_max_distance =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_THROW_MAX_DISTANCE", "0.12"
+                ),
+                "RL throw maximum distance", 0.01f, 1.0f
+            );
+        server_options.reinforcement_sweep_max_distance =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_SWEEP_MAX_DISTANCE", "0.26"
+                ),
+                "RL sweep maximum distance", 0.01f, 1.0f
+            );
         server_options.reinforcement_projectile_preferred_min_distance =
             parse_float_range(
                 environment_or(
@@ -408,6 +432,20 @@ int main(int argc, char** argv) {
                     "GAMEAGENT_RL_DISABLE_CLOUD_COOLDOWN_OPTIONS", "2"
                 ),
                 "RL disable-cloud cooldown options"
+            );
+        server_options.reinforcement_throw_cooldown_options =
+            parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_RL_THROW_COOLDOWN_OPTIONS", "2"
+                ),
+                "RL throw cooldown options"
+            );
+        server_options.reinforcement_sweep_cooldown_options =
+            parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_RL_SWEEP_COOLDOWN_OPTIONS", "1"
+                ),
+                "RL sweep cooldown options"
             );
         server_options.reinforcement_melee_impact_credit_steps =
             parse_positive_size(

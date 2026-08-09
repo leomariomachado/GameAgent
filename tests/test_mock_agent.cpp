@@ -126,7 +126,7 @@ int main() {
         const auto right_facing = gameagent::make_sub_zero_mock_moves(
             gameagent::FighterFacing::right
         );
-        require(right_facing.size() == 8, "expected eight Sub-Zero moves");
+        require(right_facing.size() == 10, "expected ten Sub-Zero moves");
         require(
             find_move(right_facing, "Congelar").states ==
                 std::vector<std::vector<int>>{{7}, {9}, {2}, {}, {}},
@@ -177,6 +177,17 @@ int main() {
                 },
             "crouching uppercut sequence is incorrect"
         );
+        require(
+            find_move(right_facing, "Agarrão").states ==
+                    std::vector<std::vector<int>>{
+                        {9}, {9, 2}, {9, 2}, {}, {}
+                    } &&
+                find_move(right_facing, "Rasteira").states ==
+                    std::vector<std::vector<int>>{
+                        {8}, {8, 3}, {8, 3}, {}, {}
+                    },
+            "shared ground throw/sweep sequences are incorrect"
+        );
 
         const auto left_facing = gameagent::make_sub_zero_mock_moves(
             gameagent::FighterFacing::left
@@ -205,7 +216,7 @@ int main() {
             gameagent::FighterFacing::right
         );
         require(
-            curriculum.size() == 12,
+            curriculum.size() == 16,
             "Sub-Zero curriculum size is incorrect"
         );
         require(
@@ -219,6 +230,8 @@ int main() {
             "Chuva de Gelo (Frente)",
             "Chuva de Gelo (Perto)",
             "4 Golpes",
+            "Agarrão",
+            "Rasteira",
             "Salto para frente com chute alto",
         };
         for (const auto& name : spatial_programs) {
@@ -275,7 +288,7 @@ int main() {
             gameagent::FighterCharacter::noob_saibot,
             gameagent::FighterFacing::right
         );
-        require(noob.size() == 10, "Noob Saibot curriculum size is incorrect");
+        require(noob.size() == 14, "Noob Saibot curriculum size is incorrect");
         require(
             find_move(noob, "Arremesso de Sombra").states ==
                 std::vector<std::vector<int>>{
@@ -298,7 +311,7 @@ int main() {
             gameagent::FighterCharacter::scorpion,
             gameagent::FighterFacing::right
         );
-        require(scorpion.size() == 14, "Scorpion curriculum size is incorrect");
+        require(scorpion.size() == 18, "Scorpion curriculum size is incorrect");
         require(
             find_move(scorpion, "Arpão").states ==
                 std::vector<std::vector<int>>{
@@ -321,7 +334,7 @@ int main() {
             gameagent::FighterCharacter::sindel,
             gameagent::FighterFacing::right
         );
-        require(sindel.size() == 15, "Sindel curriculum size is incorrect");
+        require(sindel.size() == 19, "Sindel curriculum size is incorrect");
         require(
             find_move(sindel, "Bola de Fogo").states ==
                 std::vector<std::vector<int>>{
@@ -349,6 +362,19 @@ int main() {
                     },
                 "shared crouching uppercut is missing"
             );
+            require(
+                find_move(*profile, "Agarrão").states ==
+                        std::vector<std::vector<int>>{
+                            {9}, {9, 2}, {9, 2}, {}, {}
+                        } &&
+                    find_move(*profile, "Rasteira").states ==
+                        std::vector<std::vector<int>>{
+                            {8}, {8, 3}, {8, 3}, {}, {}
+                        },
+                "shared ground throw/sweep is missing"
+            );
+            require_mirrored_pair(*profile, "Agarrão", 9, 8);
+            require_mirrored_pair(*profile, "Rasteira", 9, 8);
             require_mirrored_pair(
                 *profile,
                 "Salto para frente com chute alto",

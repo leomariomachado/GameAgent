@@ -631,7 +631,8 @@ std::vector<float> make_reinforcement_state(
     const TemporalAgentOutput& temporal,
     const FightControlSnapshot& fight,
     const CombatStateSnapshot& combat,
-    const std::optional<AppliedActionRecord>& latest_applied
+    const std::optional<AppliedActionRecord>& latest_applied,
+    const EncounterConfiguration& encounter
 ) {
     std::vector<float> state;
     state.reserve(
@@ -689,6 +690,16 @@ std::vector<float> make_reinforcement_state(
     state.push_back(std::clamp(
         combat.opponent_action_confidence, 0.0f, 1.0f
     ));
+    state.push_back(encounter.type == EncounterType::normal ? 1.0f : 0.0f);
+    state.push_back(encounter.type == EncounterType::endurance ? 1.0f : 0.0f);
+    state.push_back(encounter.type == EncounterType::boss ? 1.0f : 0.0f);
+    state.push_back(static_cast<float>(encounter.current_stage) / 3.0f);
+    state.push_back(static_cast<float>(encounter.opponent_count) / 4.0f);
+    state.push_back(
+        static_cast<float>(
+            encounter.opponent_count - encounter.current_stage - 1U
+        ) / 3.0f
+    );
     if (
         state.size() !=
         temporal.lstm.hidden.size() +
@@ -783,6 +794,9 @@ void handle_websocket_connection(
             ? std::optional<std::string>("right")
             : std::optional<std::string>("left"),
     };
+    EncounterConfiguration encounter_configuration;
+    bool v21_session = false;
+    MessageMetadata configure_session_metadata;
     bool explicit_session_configuration = false;
     std::optional<WebSocketFrame> pending_first_frame;
     while (!stop_requested.load()) {
@@ -820,6 +834,24 @@ void handle_websocket_connection(
                         std::move(message)
                     );
                     explicit_session_configuration = true;
+                    break;
+                }
+                if (std::holds_alternative<ConfigureSessionRequest>(message)) {
+                    ConfigureSessionRequest request =
+                        std::get<ConfigureSessionRequest>(std::move(message));
+                    session.player_character = request.player_character;
+                    session.opponent_character = std::string(
+                        opponent_character_slug(
+                            request.encounter.current_opponent()
+                        )
+                    );
+                    session.player_side = std::move(request.player_side);
+                    session.initial_facing =
+                        std::move(request.initial_facing);
+                    encounter_configuration = request.encounter;
+                    configure_session_metadata = request.metadata;
+                    explicit_session_configuration = true;
+                    v21_session = true;
                     break;
                 }
             } catch (const std::exception& error) {
@@ -882,6 +914,25 @@ void handle_websocket_connection(
     session.opponent_character = std::string(
         opponent_character_slug(opponent_character)
     );
+    if (!v21_session) {
+        encounter_configuration.type = EncounterType::normal;
+        encounter_configuration.opponent_count = 1;
+        encounter_configuration.current_stage = 0;
+        encounter_configuration.opponents[0] = opponent_character;
+    }
+    ServerSessionV21 protocol_session(
+        options.reinforcement_training_enabled
+            ? AgentMode::training
+            : AgentMode::evaluation,
+        options.reinforcement_epsilon_final
+    );
+    if (v21_session) {
+        protocol_session.configure(encounter_configuration);
+    }
+    std::mutex protocol_session_mutex;
+    std::atomic<OpponentCharacter> active_opponent_character{
+        opponent_character
+    };
     const bool player_is_left =
         session.player_side.value_or(
             options.player_is_left ? "left" : "right"
@@ -1003,6 +1054,10 @@ void handle_websocket_connection(
                             options.reinforcement_combo_max_distance,
                         .close_attack_max_distance =
                             options.reinforcement_close_attack_max_distance,
+                        .throw_max_distance =
+                            options.reinforcement_throw_max_distance,
+                        .sweep_max_distance =
+                            options.reinforcement_sweep_max_distance,
                         .projectile_preferred_min_distance =
                             options
                                 .reinforcement_projectile_preferred_min_distance,
@@ -1022,6 +1077,10 @@ void handle_websocket_connection(
                         .disable_cloud_cooldown_options =
                             options
                                 .reinforcement_disable_cloud_cooldown_options,
+                        .throw_cooldown_options =
+                            options.reinforcement_throw_cooldown_options,
+                        .sweep_cooldown_options =
+                            options.reinforcement_sweep_cooldown_options,
                         .melee_impact_credit_steps =
                             options.reinforcement_melee_impact_credit_steps,
                         .teleport_impact_credit_steps =
@@ -1123,7 +1182,11 @@ void handle_websocket_connection(
     if (explicit_session_configuration) {
         if (!writer.send_json({
                 {"protocol_version", kActionProtocolVersion},
-                {"type", "session_config_ack"},
+                {"type", v21_session
+                    ? "configure_session_ack"
+                    : "session_config_ack"},
+                {"request_id", configure_session_metadata.request_id},
+                {"timestamp_ms", epoch_milliseconds()},
                 {"player_character",
                  fighter_character_slug(player_character)},
                 {"player_character_name",
@@ -1141,6 +1204,16 @@ void handle_websocket_connection(
                 {"opponent_vocabulary_size",
                  kOpponentCharacterFeatureCount},
                 {"opponent_embedding_size", 16U},
+                {"architecture_version", kServerArchitectureVersion},
+                {"encounter_type",
+                 encounter_type_slug(encounter_configuration.type)},
+                {"encounter_stage",
+                 encounter_configuration.current_stage},
+                {"opponent_count",
+                 encounter_configuration.opponent_count},
+                {"remaining_opponents",
+                 encounter_configuration.opponent_count -
+                    encounter_configuration.current_stage - 1U},
                 {"player_side", player_is_left ? "left" : "right"},
                 {"initial_facing",
                  facing == FighterFacing::right ? "right" : "left"},
@@ -1345,6 +1418,8 @@ void handle_websocket_connection(
          options.reinforcement_combo_max_distance},
         {"close_attack_max_distance",
          options.reinforcement_close_attack_max_distance},
+        {"throw_max_distance", options.reinforcement_throw_max_distance},
+        {"sweep_max_distance", options.reinforcement_sweep_max_distance},
         {"projectile_preferred_min_distance",
          options.reinforcement_projectile_preferred_min_distance},
         {"projectile_q_preference_margin",
@@ -1360,6 +1435,10 @@ void handle_websocket_connection(
         {"dynamic_facing", options.reinforcement_dynamic_facing},
         {"disable_cloud_cooldown_options",
          options.reinforcement_disable_cloud_cooldown_options},
+        {"throw_cooldown_options",
+         options.reinforcement_throw_cooldown_options},
+        {"sweep_cooldown_options",
+         options.reinforcement_sweep_cooldown_options},
         {"melee_impact_credit_steps",
          options.reinforcement_melee_impact_credit_steps},
         {"teleport_impact_credit_steps",
@@ -1473,6 +1552,7 @@ void handle_websocket_connection(
             .round_loss_penalty =
                 options.reinforcement_round_loss_penalty,
         });
+        fight_tracker->set_external_encounter_lifecycle(v21_session);
         combat_tracker = std::make_unique<CombatStateTracker>(
             CombatStateConfig{
                 .player_side = player_is_left
@@ -1533,6 +1613,12 @@ void handle_websocket_connection(
     std::atomic<std::uint64_t> repeated_frame_reset_frame_id{0};
     Clock::time_point next_debug_capture = Clock::time_point::min();
     std::atomic_bool workers_stopping{false};
+    std::mutex control_queue_mutex;
+    std::deque<ClientTextMessage> control_queue;
+    const auto enqueue_control_message = [&](ClientTextMessage message) {
+        std::lock_guard lock(control_queue_mutex);
+        control_queue.push_back(std::move(message));
+    };
 
     std::mutex temporal_queue_mutex;
     std::condition_variable temporal_queue_changed;
@@ -1619,7 +1705,9 @@ void handle_websocket_connection(
                     ),
                 .opponent_character =
                     std::string(
-                        opponent_character_slug(opponent_character)
+                        opponent_character_slug(
+                            active_opponent_character.load()
+                        )
                     ),
                 .training_capture = training_capture,
             };
@@ -1669,6 +1757,53 @@ void handle_websocket_connection(
         std::optional<std::string>
             pending_training_reset_detected_reason;
         std::size_t pending_training_reset_attempt = 0;
+        std::optional<ResetReason> pending_terminal_reset_reason;
+        std::uint64_t telemetry_request_id = 1;
+        std::uint64_t evaluation_session_id =
+            options.reinforcement_training_enabled ? 0U : 1U;
+        EncounterEvent latest_encounter_event = EncounterEvent::none;
+        bool opponent_health_delta_ignored = false;
+        float latest_stage_bonus = 0.0f;
+        auto next_telemetry_sample = Clock::time_point::min();
+        EpisodeStatistics episode_statistics;
+        std::map<std::string, ModeStatistics> mode_statistics;
+        ResetStatistics reset_statistics;
+        const auto statistics_key = [&](AgentMode mode) {
+            std::ostringstream key;
+            key << agent_mode_slug(mode) << ':'
+                << fighter_character_slug(player_character) << ':'
+                << encounter_type_slug(encounter_configuration.type) << ':';
+            for (std::size_t index = 0;
+                 index < encounter_configuration.opponent_count;
+                 ++index) {
+                if (index != 0) {
+                    key << ',';
+                }
+                key << opponent_character_slug(
+                    encounter_configuration.opponents[index]
+                );
+            }
+            return key.str();
+        };
+        const auto send_telemetry_marker = [&](std::string marker_type,
+                                                std::uint64_t episode_id,
+                                                float value,
+                                                std::string label) {
+            nlohmann::json marker{
+                {"protocol_version", kServerProtocolVersion},
+                {"request_id", telemetry_request_id++},
+                {"timestamp_ms", epoch_milliseconds()},
+                {"type", "telemetry_marker"},
+                {"episode_id", episode_id},
+                {"marker_type", std::move(marker_type)},
+                {"value", value},
+                {"label", std::move(label)},
+            };
+            writer.send_json(marker);
+            marker["event"] = "telemetry_marker";
+            marker["connection_id"] = connection_id;
+            metrics.write(marker);
+        };
         std::uint64_t handled_repeated_frame_reset_generation = 0;
         bool inference_repeated_frame_paused = false;
         auto next_training_reset_retry = Clock::time_point::min();
@@ -1705,12 +1840,525 @@ void handle_websocket_connection(
                 );
                 const auto latest_applied =
                     latest_applied_record(action_history);
+                latest_encounter_event = EncounterEvent::none;
+                opponent_health_delta_ignored = false;
+                latest_stage_bonus = 0.0f;
+                bool stage_completed_this_tick = false;
+                std::deque<ClientTextMessage> control_messages;
+                {
+                    std::lock_guard lock(control_queue_mutex);
+                    control_messages.swap(control_queue);
+                }
+                for (ClientTextMessage& control_message : control_messages) {
+                    if (std::holds_alternative<
+                            UpdateEncounterStageRequest
+                        >(control_message)) {
+                        const auto& request = std::get<
+                            UpdateEncounterStageRequest
+                        >(control_message);
+                        EncounterTransition transition;
+                        {
+                            std::lock_guard lock(protocol_session_mutex);
+                            transition = protocol_session.apply_stage_update(
+                                request
+                            );
+                        }
+                        if (transition.accepted && !transition.duplicate) {
+                            fight_tracker->advance_encounter_stage(
+                                transition.stage_bonus
+                            );
+                            active_opponent_character.store(
+                                transition.current_opponent
+                            );
+                            encounter_configuration.current_stage =
+                                request.current_stage;
+                            reinforcement_agent->configure_encounter_stage(
+                                transition.current_opponent
+                            );
+                            latest_encounter_event =
+                                EncounterEvent::stage_completed;
+                            stage_completed_this_tick = true;
+                            latest_stage_bonus = transition.stage_bonus;
+                            opponent_health_delta_ignored = true;
+                            std::cout
+                                << "\n[RL][ENCOUNTER] episode="
+                                << request.episode_id
+                                << " type=endurance stage="
+                                << static_cast<unsigned>(
+                                       request.current_stage + 1U
+                                   )
+                                << '/'
+                                << static_cast<unsigned>(
+                                       encounter_configuration.opponent_count
+                                   )
+                                << " previous="
+                                << opponent_character_slug(
+                                       transition.previous_opponent
+                                   )
+                                << " current="
+                                << opponent_character_slug(
+                                       transition.current_opponent
+                                   )
+                                << " health_delta_skipped=true stage_bonus="
+                                << transition.stage_bonus << "\n\n"
+                                << std::flush;
+                            send_telemetry_marker(
+                                "stage_completed",
+                                request.episode_id,
+                                transition.stage_bonus,
+                                std::string(opponent_character_slug(
+                                    transition.current_opponent
+                                ))
+                            );
+                        }
+                        writer.send_json({
+                            {"protocol_version", kServerProtocolVersion},
+                            {"request_id", request.metadata.request_id},
+                            {"timestamp_ms", epoch_milliseconds()},
+                            {"type", transition.accepted
+                                ? "encounter_stage_changed"
+                                : "error"},
+                            {"accepted", transition.accepted},
+                            {"duplicate", transition.duplicate},
+                            {"episode_id", request.episode_id},
+                            {"stage_transition_id",
+                             request.stage_transition_id},
+                            {"encounter_stage",
+                             request.current_stage},
+                            {"current_opponent",
+                             opponent_character_slug(
+                                 transition.current_opponent
+                             )},
+                            {"stage_bonus", transition.stage_bonus},
+                            {"opponent_health_delta_ignored",
+                             transition.opponent_health_delta_ignored},
+                            {"message", transition.message},
+                        });
+                        continue;
+                    }
+                    if (std::holds_alternative<EncounterEventRequest>(
+                            control_message
+                        )) {
+                        const auto& request =
+                            std::get<EncounterEventRequest>(control_message);
+                        EncounterTransition transition;
+                        {
+                            std::lock_guard lock(protocol_session_mutex);
+                            transition = protocol_session.apply_encounter_event(
+                                request
+                            );
+                        }
+                        if (transition.accepted && !transition.duplicate) {
+                            latest_encounter_event = request.event;
+                            if (request.event ==
+                                EncounterEvent::stage_completed) {
+                                fight_tracker->advance_encounter_stage(
+                                    transition.stage_bonus
+                                );
+                                active_opponent_character.store(
+                                    transition.current_opponent
+                                );
+                                encounter_configuration.current_stage =
+                                    static_cast<std::uint8_t>(
+                                        request.encounter_stage + 1U
+                                    );
+                                reinforcement_agent
+                                    ->configure_encounter_stage(
+                                        transition.current_opponent
+                                    );
+                                latest_stage_bonus = transition.stage_bonus;
+                                opponent_health_delta_ignored = true;
+                                stage_completed_this_tick = true;
+                            } else if (transition.terminal) {
+                                fight_tracker->finish_encounter(
+                                    transition.won
+                                );
+                                pending_terminal_reset_reason =
+                                    transition.won
+                                        ? ResetReason::encounter_completed
+                                        : ResetReason::player_defeated;
+                            }
+                            send_telemetry_marker(
+                                std::string(encounter_event_slug(request.event)),
+                                request.episode_id,
+                                transition.stage_bonus,
+                                std::string(opponent_character_slug(
+                                    transition.current_opponent
+                                ))
+                            );
+                        }
+                        writer.send_json({
+                            {"protocol_version", kServerProtocolVersion},
+                            {"request_id", request.metadata.request_id},
+                            {"timestamp_ms", epoch_milliseconds()},
+                            {"type", transition.accepted
+                                ? "encounter_event_ack"
+                                : "error"},
+                            {"accepted", transition.accepted},
+                            {"duplicate", transition.duplicate},
+                            {"episode_id", request.episode_id},
+                            {"event", encounter_event_slug(request.event)},
+                            {"terminal", transition.terminal},
+                            {"stage_bonus", transition.stage_bonus},
+                            {"message", transition.message},
+                        });
+                        continue;
+                    }
+                    if (std::holds_alternative<SetAgentModeRequest>(
+                            control_message
+                        )) {
+                        const auto& request =
+                            std::get<SetAgentModeRequest>(control_message);
+                        ModeChangeResult result;
+                        {
+                            std::lock_guard lock(protocol_session_mutex);
+                            result = protocol_session.request_agent_mode(
+                                request
+                            );
+                        }
+                        if (!result.pending) {
+                            reinforcement_agent->set_agent_mode(
+                                result.effective_mode
+                            );
+                            if (result.effective_mode ==
+                                    AgentMode::evaluation &&
+                                request.reset_evaluation_session) {
+                                ++evaluation_session_id;
+                            }
+                        }
+                        if (result.changed || result.pending) {
+                            send_telemetry_marker(
+                                "mode_changed",
+                                episode_statistics.episode_id,
+                                result.effective_mode == AgentMode::evaluation
+                                    ? 0.0f
+                                    : reinforcement_agent->stats().epsilon,
+                                result.pending
+                                    ? std::string("pending:") +
+                                        std::string(agent_mode_slug(request.mode))
+                                    : std::string(agent_mode_slug(
+                                        result.effective_mode
+                                    ))
+                            );
+                        }
+                        writer.send_json({
+                            {"protocol_version", kServerProtocolVersion},
+                            {"request_id", request.metadata.request_id},
+                            {"timestamp_ms", epoch_milliseconds()},
+                            {"type", "agent_mode_changed"},
+                            {"effective_mode",
+                             agent_mode_slug(result.effective_mode)},
+                            {"pending", result.pending},
+                            {"pending_mode", result.pending_mode.has_value()
+                                ? agent_mode_slug(*result.pending_mode)
+                                : "none"},
+                            {"effective_epsilon",
+                             result.effective_mode == AgentMode::evaluation
+                                ? 0.0f
+                                : reinforcement_agent->stats().epsilon},
+                            {"weights_frozen",
+                             result.effective_mode == AgentMode::evaluation},
+                            {"replay_frozen",
+                             result.effective_mode == AgentMode::evaluation},
+                            {"scheduler_frozen",
+                             result.effective_mode == AgentMode::evaluation},
+                        });
+                        continue;
+                    }
+                    if (std::holds_alternative<SetExplorationRequest>(
+                            control_message
+                        )) {
+                        const auto& request =
+                            std::get<SetExplorationRequest>(control_message);
+                        ExplorationChangeResult result;
+                        {
+                            std::lock_guard lock(protocol_session_mutex);
+                            result = protocol_session.set_exploration(request);
+                        }
+                        if (result.accepted) {
+                            reinforcement_agent->set_exploration(
+                                result.mode,
+                                result.value,
+                                result.matchup_counter_reset
+                            );
+                            send_telemetry_marker(
+                                "epsilon_changed",
+                                episode_statistics.episode_id,
+                                reinforcement_agent->stats().epsilon,
+                                std::string(exploration_mode_slug(result.mode))
+                            );
+                        }
+                        const bool evaluation = [&] {
+                            std::lock_guard lock(protocol_session_mutex);
+                            return protocol_session.mode() ==
+                                AgentMode::evaluation;
+                        }();
+                        writer.send_json({
+                            {"protocol_version", kServerProtocolVersion},
+                            {"request_id", request.metadata.request_id},
+                            {"timestamp_ms", epoch_milliseconds()},
+                            {"type", result.accepted
+                                ? "exploration_changed"
+                                : "error"},
+                            {"exploration_mode",
+                             exploration_mode_slug(result.mode)},
+                            {"configured_value", result.value},
+                            {"effective_epsilon", evaluation
+                                ? 0.0f
+                                : reinforcement_agent->stats().epsilon},
+                            {"reset_matchup_counter",
+                             result.matchup_counter_reset},
+                        });
+                        continue;
+                    }
+                    if (std::holds_alternative<RequestReset>(
+                            control_message
+                        )) {
+                        const auto& request =
+                            std::get<RequestReset>(control_message);
+                        const std::uint64_t reset_id =
+                            last_training_reset_id.fetch_add(1U) + 1U;
+                        ResetTransition result;
+                        {
+                            std::lock_guard lock(protocol_session_mutex);
+                            result = protocol_session.request_reset(
+                                request.reason,
+                                request.episode_id,
+                                reset_id,
+                                epoch_milliseconds(),
+                                false
+                            );
+                        }
+                        if (result.accepted) {
+                            reinforcement_agent->suspend();
+                            ++reset_statistics.resets_requested;
+                            if (request.reason == ResetReason::manual) {
+                                ++reset_statistics.manual_resets;
+                            }
+                            if (request.reason ==
+                                ResetReason::invalid_game_state) {
+                                ++reset_statistics.invalid_state_resets;
+                            }
+                            pending_training_reset_request = nlohmann::json{
+                                {"protocol_version", kServerProtocolVersion},
+                                {"request_id", request.metadata.request_id},
+                                {"timestamp_ms", epoch_milliseconds()},
+                                {"type", "reset_episode"},
+                                {"reset_id", reset_id},
+                                {"episode_id", request.episode_id},
+                                {"reason", reset_reason_slug(request.reason)},
+                                {"state", "requested"},
+                                {"load_save_state", true},
+                                {"discard_inflight_action", true},
+                                {"settle_delay_ms", 0},
+                            };
+                            pending_training_reset_attempt = 0;
+                            next_training_reset_retry =
+                                Clock::time_point::min();
+                            send_telemetry_marker(
+                                "reset_requested",
+                                request.episode_id,
+                                static_cast<float>(reset_id),
+                                std::string(reset_reason_slug(request.reason))
+                            );
+                        }
+                        writer.send_json({
+                            {"protocol_version", kServerProtocolVersion},
+                            {"request_id", request.metadata.request_id},
+                            {"timestamp_ms", epoch_milliseconds()},
+                            {"type", result.accepted
+                                ? "request_reset_accepted"
+                                : "error"},
+                            {"reset_id", result.reset_id},
+                            {"episode_id", request.episode_id},
+                            {"aborted", result.episode_aborted},
+                            {"message", result.message},
+                        });
+                        continue;
+                    }
+                    if (std::holds_alternative<ResetAck>(control_message)) {
+                        const auto& acknowledgement =
+                            std::get<ResetAck>(control_message);
+                        ResetTransition result;
+                        {
+                            std::lock_guard lock(protocol_session_mutex);
+                            result = protocol_session.acknowledge_reset(
+                                acknowledgement
+                            );
+                        }
+                        if (result.accepted && !result.duplicate) {
+                            send_telemetry_marker(
+                                "reset_executed",
+                                acknowledgement.episode_id,
+                                static_cast<float>(acknowledgement.reset_id),
+                                "client command executed"
+                            );
+                        }
+                        writer.send_json({
+                            {"protocol_version", kServerProtocolVersion},
+                            {"request_id",
+                             acknowledgement.metadata.request_id},
+                            {"timestamp_ms", epoch_milliseconds()},
+                            {"type", result.accepted
+                                ? "reset_acknowledged"
+                                : "error"},
+                            {"reset_id", acknowledgement.reset_id},
+                            {"state", reset_state_slug(result.state)},
+                            {"duplicate", result.duplicate},
+                            {"message", result.message},
+                        });
+                        continue;
+                    }
+                    if (std::holds_alternative<ResetReady>(control_message)) {
+                        const auto& ready =
+                            std::get<ResetReady>(control_message);
+                        ResetTransition result;
+                        AgentMode effective_mode;
+                        {
+                            std::lock_guard lock(protocol_session_mutex);
+                            result = protocol_session.mark_reset_ready(ready);
+                            effective_mode = protocol_session.mode();
+                        }
+                        if (result.accepted && !result.duplicate) {
+                            ++reset_statistics.resets_completed;
+                            if (pending_training_reset_request.has_value()) {
+                                const float latency = static_cast<float>(
+                                    epoch_milliseconds() -
+                                    pending_training_reset_request
+                                        ->value<std::int64_t>(
+                                            "timestamp_ms",
+                                            epoch_milliseconds()
+                                        )
+                                );
+                                reset_statistics.last_reset_latency_ms =
+                                    latency;
+                                const float count = static_cast<float>(
+                                    reset_statistics.resets_completed
+                                );
+                                reset_statistics.mean_reset_latency_ms +=
+                                    (latency -
+                                     reset_statistics.mean_reset_latency_ms) /
+                                    count;
+                            }
+                            reinforcement_agent->reset_episode(false);
+                            reinforcement_agent->set_agent_mode(effective_mode);
+                            temporal_agent->reset();
+                            fight_tracker->reset();
+                            fight_tracker->set_external_encounter_lifecycle(
+                                true
+                            );
+                            if (training_reset_tracker != nullptr) {
+                                training_reset_tracker->reset();
+                            }
+                            pending_training_reset_request.reset();
+                            pending_training_reset_detected_reason.reset();
+                            pending_training_reset_attempt = 0;
+                            active_opponent_character.store(
+                                encounter_configuration.opponents[0]
+                            );
+                            encounter_configuration.current_stage = 0;
+                            reinforcement_agent->configure_encounter_stage(
+                                encounter_configuration.opponents[0]
+                            );
+                            send_telemetry_marker(
+                                "reset_ready",
+                                result.new_episode_id,
+                                static_cast<float>(ready.reset_id),
+                                "stable initial state"
+                            );
+                        }
+                        writer.send_json({
+                            {"protocol_version", kServerProtocolVersion},
+                            {"request_id", ready.metadata.request_id},
+                            {"timestamp_ms", epoch_milliseconds()},
+                            {"type", result.accepted
+                                ? "episode_started"
+                                : "error"},
+                            {"episode_id", result.new_episode_id},
+                            {"previous_episode_id", result.episode_id},
+                            {"reset_id", ready.reset_id},
+                            {"effective_mode", agent_mode_slug(effective_mode)},
+                            {"effective_epsilon",
+                             effective_mode == AgentMode::evaluation
+                                ? 0.0f
+                                : reinforcement_agent->stats().epsilon},
+                            {"message", result.message},
+                        });
+                        continue;
+                    }
+                    if (std::holds_alternative<ResetFailed>(control_message)) {
+                        const auto& failure =
+                            std::get<ResetFailed>(control_message);
+                        ResetTransition result;
+                        {
+                            std::lock_guard lock(protocol_session_mutex);
+                            result = protocol_session.mark_reset_failed(
+                                failure
+                            );
+                        }
+                        if (result.accepted) {
+                            ++reset_statistics.resets_failed;
+                        }
+                        writer.send_json({
+                            {"protocol_version", kServerProtocolVersion},
+                            {"request_id", failure.metadata.request_id},
+                            {"timestamp_ms", epoch_milliseconds()},
+                            {"type", result.accepted
+                                ? "reset_failed_ack"
+                                : "error"},
+                            {"reset_id", failure.reset_id},
+                            {"state", reset_state_slug(result.state)},
+                            {"message", result.message},
+                        });
+                    }
+                }
+                if (v21_session) {
+                    ResetTransition timeout;
+                    {
+                        std::lock_guard lock(protocol_session_mutex);
+                        timeout = protocol_session.check_reset_timeout(
+                            decision_tick_ms,
+                            options.reset_ack_timeout.count(),
+                            options.reset_ready_timeout.count()
+                        );
+                    }
+                    if (timeout.accepted &&
+                        timeout.state == ResetState::failed) {
+                        ++reset_statistics.resets_failed;
+                        ++reset_statistics.reset_timeouts;
+                        writer.send_json({
+                            {"protocol_version", kServerProtocolVersion},
+                            {"request_id", telemetry_request_id++},
+                            {"timestamp_ms", decision_tick_ms},
+                            {"type", "reset_failed"},
+                            {"reset_id", timeout.reset_id},
+                            {"episode_id", timeout.episode_id},
+                            {"reason", timeout.message},
+                        });
+                    }
+                }
                 FightControlSnapshot fight;
                 CombatStateSnapshot combat;
                 std::optional<TrainingResetTrigger>
                     training_reset_trigger;
                 if (fight_tracker != nullptr) {
                     fight = fight_tracker->consume(decision_tick_ms);
+                    if (v21_session) {
+                        std::lock_guard lock(protocol_session_mutex);
+                        if (fight.episode_started &&
+                            protocol_session.episode_id() == 0) {
+                            protocol_session.begin_episode(
+                                std::max<std::uint64_t>(
+                                    1U, fight.episode_id
+                                ),
+                                decision_tick_ms
+                            );
+                        }
+                        if (protocol_session.episode_id() != 0) {
+                            fight.episode_id =
+                                protocol_session.episode_id();
+                        }
+                    }
                     if (combat_tracker != nullptr) {
                         combat =
                             combat_tracker->consume(decision_tick_ms);
@@ -1765,6 +2413,7 @@ void handle_websocket_connection(
                     }
                 }
                 if (
+                    !v21_session &&
                     pending_training_reset_request.has_value() &&
                     last_training_reset_ack_id.load() >=
                         pending_training_reset_request
@@ -1775,10 +2424,18 @@ void handle_websocket_connection(
                     pending_training_reset_detected_reason.reset();
                     pending_training_reset_attempt = 0;
                 }
-                const bool training_reset_pending =
-                    pending_training_reset_request.has_value() ||
-                    last_training_reset_id.load() >
-                        last_training_reset_ack_id.load();
+                const bool protocol_reset_pending = [&] {
+                    if (!v21_session) {
+                        return false;
+                    }
+                    std::lock_guard lock(protocol_session_mutex);
+                    return protocol_session.decisions_blocked();
+                }();
+                const bool training_reset_pending = v21_session
+                    ? protocol_reset_pending
+                    : pending_training_reset_request.has_value() ||
+                        last_training_reset_id.load() >
+                            last_training_reset_ack_id.load();
                 std::optional<TemporalAgentOutput> temporal_output;
                 const bool temporal_control_allowed =
                     (
@@ -1813,7 +2470,8 @@ void handle_websocket_connection(
                             *temporal_output,
                             fight,
                             combat,
-                            latest_applied
+                            latest_applied,
+                            encounter_configuration
                         );
                     }
                     const float total_reward =
@@ -1852,7 +2510,8 @@ void handle_websocket_connection(
                             .terminal = fight.terminal,
                             .episode_won =
                                 fight.episode_ended &&
-                                fight.transition_reason == "round_won",
+                                (fight.transition_reason == "round_won" ||
+                                 fight.transition_reason == "encounter_won"),
                             .episode_id = fight.episode_id,
                             .frame_id = fight.frame_id,
                             .decision_id = current_decision_id,
@@ -1860,6 +2519,8 @@ void handle_websocket_connection(
                             .player_x = combat.player_x,
                             .opponent_x = combat.opponent_x,
                             .spatial_valid = combat.spatial_valid,
+                            .player_on_ground = combat.player_on_ground,
+                            .opponent_on_ground = combat.opponent_on_ground,
                             .opponent_attacking =
                                 combat.opponent_attacking,
                         });
@@ -1882,6 +2543,57 @@ void handle_websocket_connection(
                     commands = mock_decision.commands;
                 }
                 if (reinforcement_agent != nullptr) {
+                    AgentMode effective_mode =
+                        options.reinforcement_training_enabled
+                            ? AgentMode::training
+                            : AgentMode::evaluation;
+                    if (v21_session) {
+                        std::lock_guard lock(protocol_session_mutex);
+                        effective_mode = protocol_session.mode();
+                    }
+                    if (fight.episode_started ||
+                        episode_statistics.episode_id != fight.episode_id) {
+                        episode_statistics = EpisodeStatistics{
+                            .episode_id = fight.episode_id,
+                            .mode = effective_mode,
+                            .best_step_reward =
+                                -std::numeric_limits<float>::infinity(),
+                            .worst_step_reward =
+                                std::numeric_limits<float>::infinity(),
+                            .started_timestamp_ms = decision_tick_ms,
+                        };
+                    }
+                    if (!training_reset_pending &&
+                        episode_statistics.episode_id != 0) {
+                        const float step_reward = reinforcement_step_ok
+                            ? reinforcement_decision.reward_consumed
+                            : fight.reward + combat.shaping_reward;
+                        episode_statistics.reward_sum += step_reward;
+                        episode_statistics.episode_return =
+                            reinforcement_decision.episode_return;
+                        episode_statistics.best_step_reward = std::max(
+                            episode_statistics.best_step_reward, step_reward
+                        );
+                        episode_statistics.worst_step_reward = std::min(
+                            episode_statistics.worst_step_reward, step_reward
+                        );
+                        episode_statistics.damage_dealt += fight.damage_dealt;
+                        episode_statistics.damage_received += fight.damage_taken;
+                        ++episode_statistics.decisions;
+                        const bool exploratory =
+                            reinforcement_decision.selection_source.starts_with(
+                                "epsilon_"
+                            );
+                        episode_statistics.exploratory_decisions +=
+                            exploratory ? 1U : 0U;
+                        episode_statistics.greedy_decisions +=
+                            exploratory ? 0U : 1U;
+                        episode_statistics.epsilon_sum +=
+                            reinforcement_decision.epsilon;
+                        if (stage_completed_this_tick) {
+                            ++episode_statistics.stages_completed;
+                        }
+                    }
                     reward_log_accumulator += reinforcement_step_ok
                         ? reinforcement_decision.reward_consumed
                         : fight.reward + combat.shaping_reward;
@@ -1927,7 +2639,9 @@ void handle_websocket_connection(
                             << " character="
                             << fighter_character_slug(player_character)
                             << " opponent="
-                            << opponent_character_slug(opponent_character)
+                            << opponent_character_slug(
+                                   active_opponent_character.load()
+                               )
                             << " connection=" << connection_id
                             << " episode=" << fight.episode_id
                             << " phase=" << fight_phase_name(fight.phase)
@@ -2042,16 +2756,164 @@ void handle_websocket_connection(
                     frame_ids.push_back(frame->frame_id);
                 }
 
+                std::optional<nlohmann::json> episode_summary;
+                std::optional<nlohmann::json> evaluation_summary;
+                if (reinforcement_agent != nullptr &&
+                    fight.episode_ended && episode_statistics.episode_id != 0) {
+                    episode_statistics.won =
+                        fight.transition_reason == "round_won" ||
+                        fight.transition_reason == "encounter_won";
+                    episode_statistics.lost =
+                        fight.transition_reason == "round_lost" ||
+                        fight.transition_reason == "encounter_lost";
+                    ModeStatistics& aggregate = mode_statistics[
+                        statistics_key(episode_statistics.mode)
+                    ];
+                    ++aggregate.episodes;
+                    aggregate.wins += episode_statistics.won ? 1U : 0U;
+                    aggregate.losses += episode_statistics.lost ? 1U : 0U;
+                    aggregate.aborted += episode_statistics.aborted ? 1U : 0U;
+                    aggregate.stage_completions +=
+                        episode_statistics.stages_completed;
+                    aggregate.episode_return_sum +=
+                        episode_statistics.episode_return;
+                    aggregate.damage_dealt_sum +=
+                        episode_statistics.damage_dealt;
+                    aggregate.damage_received_sum +=
+                        episode_statistics.damage_received;
+                    if (aggregate.episodes == 1U) {
+                        aggregate.best_episode_return =
+                            episode_statistics.episode_return;
+                        aggregate.worst_episode_return =
+                            episode_statistics.episode_return;
+                    } else {
+                        aggregate.best_episode_return = std::max(
+                            aggregate.best_episode_return,
+                            episode_statistics.episode_return
+                        );
+                        aggregate.worst_episode_return = std::min(
+                            aggregate.worst_episode_return,
+                            episode_statistics.episode_return
+                        );
+                    }
+                    std::vector<std::string> opponent_slugs;
+                    for (std::size_t index = 0;
+                         index < encounter_configuration.opponent_count;
+                         ++index) {
+                        opponent_slugs.emplace_back(opponent_character_slug(
+                            encounter_configuration.opponents[index]
+                        ));
+                    }
+                    const std::uint64_t duration_ms = static_cast<std::uint64_t>(
+                        std::max<std::int64_t>(
+                            0,
+                            now_ms -
+                                episode_statistics.started_timestamp_ms
+                        )
+                    );
+                    aggregate.episode_duration_ms_sum +=
+                        static_cast<double>(duration_ms);
+                    episode_summary = nlohmann::json{
+                        {"protocol_version", kServerProtocolVersion},
+                        {"request_id", telemetry_request_id++},
+                        {"timestamp_ms", now_ms},
+                        {"type", "episode_summary"},
+                        {"mode", agent_mode_slug(episode_statistics.mode)},
+                        {"episode_id", episode_statistics.episode_id},
+                        {"encounter_type",
+                         encounter_type_slug(encounter_configuration.type)},
+                        {"controlled_character",
+                         fighter_character_slug(player_character)},
+                        {"opponents", opponent_slugs},
+                        {"won", episode_statistics.won},
+                        {"lost", episode_statistics.lost},
+                        {"aborted", episode_statistics.aborted},
+                        {"stages_completed",
+                         episode_statistics.stages_completed},
+                        {"opponent_count",
+                         encounter_configuration.opponent_count},
+                        {"episode_return",
+                         episode_statistics.episode_return},
+                        {"total_damage_dealt",
+                         episode_statistics.damage_dealt},
+                        {"total_damage_received",
+                         episode_statistics.damage_received},
+                        {"action_selections",
+                         episode_statistics.decisions},
+                        {"exploratory_selections",
+                         episode_statistics.exploratory_decisions},
+                        {"mean_epsilon",
+                         episode_statistics.decisions == 0
+                            ? 0.0
+                            : episode_statistics.epsilon_sum /
+                                static_cast<double>(
+                                    episode_statistics.decisions
+                                )},
+                        {"duration_ms", duration_ms},
+                    };
+                    if (episode_statistics.mode == AgentMode::evaluation) {
+                        evaluation_summary = nlohmann::json{
+                            {"protocol_version", kServerProtocolVersion},
+                            {"request_id", telemetry_request_id++},
+                            {"timestamp_ms", now_ms},
+                            {"type", "evaluation_summary"},
+                            {"session_id", evaluation_session_id},
+                            {"episodes", aggregate.episodes},
+                            {"wins", aggregate.wins},
+                            {"losses", aggregate.losses},
+                            {"win_rate", aggregate.episodes == 0
+                                ? 0.0
+                                : static_cast<double>(aggregate.wins) /
+                                    static_cast<double>(aggregate.episodes)},
+                            {"mean_return", aggregate.episodes == 0
+                                ? 0.0
+                                : aggregate.episode_return_sum /
+                                    static_cast<double>(aggregate.episodes)},
+                            {"best_return",
+                             aggregate.best_episode_return},
+                            {"mean_damage_dealt", aggregate.episodes == 0
+                                ? 0.0
+                                : aggregate.damage_dealt_sum /
+                                    static_cast<double>(aggregate.episodes)},
+                            {"mean_damage_received", aggregate.episodes == 0
+                                ? 0.0
+                                : aggregate.damage_received_sum /
+                                    static_cast<double>(aggregate.episodes)},
+                            {"mean_episode_duration_ms",
+                             aggregate.episodes == 0
+                                ? 0.0
+                                : aggregate.episode_duration_ms_sum /
+                                    static_cast<double>(aggregate.episodes)},
+                        };
+                    }
+                }
+
                 nlohmann::json response{
                     {"protocol_version", kActionProtocolVersion},
+                    {"request_id", telemetry_request_id++},
                     {"type", "action"},
                     {"action_mode", kActionMode},
                     {"player_character",
                      fighter_character_slug(player_character)},
                     {"opponent_character",
-                     opponent_character_slug(opponent_character)},
+                     opponent_character_slug(
+                         active_opponent_character.load()
+                     )},
                     {"opponent_character_name",
-                     opponent_character_name(opponent_character)},
+                     opponent_character_name(
+                         active_opponent_character.load()
+                     )},
+                    {"encounter_type",
+                     encounter_type_slug(encounter_configuration.type)},
+                    {"encounter_event",
+                     encounter_event_slug(latest_encounter_event)},
+                    {"encounter_stage",
+                     encounter_configuration.current_stage},
+                    {"opponent_count",
+                     encounter_configuration.opponent_count},
+                    {"remaining_opponents",
+                     encounter_configuration.opponent_count -
+                        encounter_configuration.current_stage - 1U},
                     {"commands", commands},
                     {"mock_move", mock_decision.move_name},
                     {"mock_step", mock_decision.step_index},
@@ -2097,7 +2959,34 @@ void handle_websocket_connection(
                 if (reinforcement_agent != nullptr) {
                     const ReinforcementAgentStats rl_stats =
                         reinforcement_agent->stats();
-                    response["agent_mode"] = "reinforcement_learning";
+                    AgentMode effective_mode =
+                        options.reinforcement_training_enabled
+                            ? AgentMode::training
+                            : AgentMode::evaluation;
+                    ExplorationMode effective_exploration =
+                        ExplorationMode::automatic;
+                    ResetState effective_reset_state = ResetState::idle;
+                    std::uint64_t effective_reset_id = 0;
+                    bool mode_change_pending = false;
+                    if (v21_session) {
+                        std::lock_guard lock(protocol_session_mutex);
+                        effective_mode = protocol_session.mode();
+                        effective_exploration =
+                            protocol_session.exploration_mode();
+                        effective_reset_state =
+                            protocol_session.reset_state();
+                        effective_reset_id =
+                            protocol_session.active_reset_id();
+                        mode_change_pending =
+                            protocol_session.pending_mode().has_value();
+                    }
+                    response["agent_mode"] = v21_session
+                        ? agent_mode_slug(effective_mode)
+                        : "reinforcement_learning";
+                    response["agent_controller"] =
+                        "reinforcement_learning";
+                    response["exploration_mode"] =
+                        exploration_mode_slug(effective_exploration);
                     response["control_enabled"] =
                         fight.action_allowed && temporal_output.has_value() &&
                         reinforcement_step_ok && !training_reset_pending &&
@@ -2116,6 +3005,28 @@ void handle_websocket_connection(
                         : fight.reward + combat.shaping_reward;
                     response["terminal_reward"] =
                         fight.terminal_reward;
+                    response["reward_breakdown"] = {
+                        {"damage_dealt", fight.damage_dealt},
+                        {"damage_received", fight.damage_taken},
+                        {"stage_bonus", latest_stage_bonus},
+                        {"victory_bonus",
+                         fight.transition_reason == "encounter_won"
+                            ? fight.terminal_reward : 0.0f},
+                        {"defeat_penalty",
+                         fight.transition_reason == "encounter_lost"
+                            ? -fight.terminal_reward : 0.0f},
+                        {"idle_penalty", combat.idle_penalty},
+                        {"useless_action_penalty", combat.corner_penalty},
+                        {"neutral_penalty",
+                         reinforcement_decision.neutral_penalty},
+                        {"opponent_health_delta_ignored",
+                         opponent_health_delta_ignored},
+                        {"step_total", reinforcement_step_ok
+                            ? reinforcement_decision.reward_consumed
+                            : fight.reward + combat.shaping_reward},
+                        {"episode_return",
+                         reinforcement_decision.episode_return},
+                    };
                     response["rl_option"] =
                         reinforcement_decision.option_name;
                     response["rl_option_index"] =
@@ -2161,6 +3072,10 @@ void handle_websocket_connection(
                     response_metrics["rl_disable_cloud_cooldown_remaining"] =
                         reinforcement_decision
                             .disable_cloud_cooldown_remaining;
+                    response_metrics["rl_throw_cooldown_remaining"] =
+                        reinforcement_decision.throw_cooldown_remaining;
+                    response_metrics["rl_sweep_cooldown_remaining"] =
+                        reinforcement_decision.sweep_cooldown_remaining;
                     response_metrics["combat_state_version"] = 2U;
                     response_metrics["combat_spatial_valid"] =
                         combat.spatial_valid;
@@ -2254,6 +3169,36 @@ void handle_websocket_connection(
                         .winning_sample_fraction;
                     response_metrics["rl_training_performed"] =
                         reinforcement_decision.training_performed;
+                    response_metrics["weights_frozen"] =
+                        effective_mode == AgentMode::evaluation;
+                    response_metrics["replay_frozen"] =
+                        effective_mode == AgentMode::evaluation;
+                    response_metrics["scheduler_frozen"] =
+                        effective_mode == AgentMode::evaluation;
+                    response_metrics["mode_change_pending"] =
+                        mode_change_pending;
+                    response_metrics["reset_state"] =
+                        reset_state_slug(effective_reset_state);
+                    response_metrics["active_reset_id"] =
+                        effective_reset_id;
+                    response_metrics["resets_requested"] =
+                        reset_statistics.resets_requested;
+                    response_metrics["resets_completed"] =
+                        reset_statistics.resets_completed;
+                    response_metrics["resets_failed"] =
+                        reset_statistics.resets_failed;
+                    response_metrics["reset_timeouts"] =
+                        reset_statistics.reset_timeouts;
+                    response_metrics["last_reset_latency_ms"] =
+                        reset_statistics.last_reset_latency_ms;
+                    response_metrics["mean_reset_latency_ms"] =
+                        reset_statistics.mean_reset_latency_ms;
+                    response_metrics["evaluation_session_id"] =
+                        evaluation_session_id;
+                    response_metrics["replay_capacity"] =
+                        options.reinforcement_replay_capacity;
+                    response_metrics["winning_replay_capacity"] =
+                        options.reinforcement_winning_replay_capacity;
                     response_metrics["rl_checkpoint_saved"] =
                         reinforcement_decision.checkpoint_saved;
                     response_metrics["rl_trainable_lstm"] =
@@ -2373,7 +3318,207 @@ void handle_websocket_connection(
                         "decision_suppressed_for_training_reset";
                 }
                 metrics.write(metric_record);
+                if (episode_summary.has_value()) {
+                    writer.send_json(*episode_summary);
+                    nlohmann::json summary_metric = *episode_summary;
+                    summary_metric["event"] = "episode_summary";
+                    summary_metric["connection_id"] = connection_id;
+                    metrics.write(summary_metric);
+                }
+                if (evaluation_summary.has_value()) {
+                    writer.send_json(*evaluation_summary);
+                    nlohmann::json summary_metric = *evaluation_summary;
+                    summary_metric["event"] = "evaluation_summary";
+                    summary_metric["connection_id"] = connection_id;
+                    metrics.write(summary_metric);
+                }
+                const auto telemetry_now = Clock::now();
+                if (v21_session && reinforcement_agent != nullptr &&
+                    telemetry_now >= next_telemetry_sample) {
+                    const ReinforcementAgentStats stats =
+                        reinforcement_agent->stats();
+                    AgentMode telemetry_mode = AgentMode::training;
+                    ExplorationMode telemetry_exploration =
+                        ExplorationMode::automatic;
+                    float telemetry_exploration_value =
+                        options.reinforcement_new_matchup_epsilon_start;
+                    ResetState telemetry_reset_state = ResetState::idle;
+                    std::uint64_t telemetry_reset_id = 0;
+                    bool telemetry_mode_pending = false;
+                    {
+                        std::lock_guard lock(protocol_session_mutex);
+                        telemetry_mode = protocol_session.mode();
+                        telemetry_exploration =
+                            protocol_session.exploration_mode();
+                        telemetry_exploration_value =
+                            protocol_session.exploration_value();
+                        telemetry_reset_state =
+                            protocol_session.reset_state();
+                        telemetry_reset_id =
+                            protocol_session.active_reset_id();
+                        telemetry_mode_pending =
+                            protocol_session.pending_mode().has_value();
+                    }
+                    float epsilon_initial =
+                        options.reinforcement_new_matchup_epsilon_start;
+                    if (telemetry_exploration ==
+                            ExplorationMode::manual_fixed ||
+                        telemetry_exploration ==
+                            ExplorationMode::automatic_from_value) {
+                        epsilon_initial = telemetry_exploration_value;
+                    }
+                    const float epsilon_minimum =
+                        options.reinforcement_epsilon_final;
+                    const float epsilon_span =
+                        epsilon_initial - epsilon_minimum;
+                    const float epsilon_decay_progress =
+                        telemetry_exploration ==
+                                ExplorationMode::manual_fixed
+                            ? 0.0f
+                            : epsilon_span <= 0.0f
+                                ? 1.0f
+                                : std::clamp(
+                                    (epsilon_initial - stats.epsilon) /
+                                        epsilon_span,
+                                    0.0f,
+                                    1.0f
+                                );
+                    const auto evaluation_iterator = mode_statistics.find(
+                        statistics_key(AgentMode::evaluation)
+                    );
+                    const ModeStatistics empty_evaluation_statistics;
+                    const ModeStatistics& evaluation_statistics =
+                        evaluation_iterator == mode_statistics.end()
+                            ? empty_evaluation_statistics
+                            : evaluation_iterator->second;
+                    nlohmann::json telemetry{
+                        {"protocol_version", kServerProtocolVersion},
+                        {"request_id", telemetry_request_id++},
+                        {"timestamp_ms", now_ms},
+                        {"type", "telemetry"},
+                        {"episode_id", fight.episode_id},
+                        {"decision_id", current_decision_id},
+                        {"agent_mode", agent_mode_slug(telemetry_mode)},
+                        {"exploration_mode",
+                         exploration_mode_slug(telemetry_exploration)},
+                        {"encounter_type",
+                         encounter_type_slug(encounter_configuration.type)},
+                        {"encounter_event",
+                         encounter_event_slug(latest_encounter_event)},
+                        {"controlled_character",
+                         fighter_character_slug(player_character)},
+                        {"current_opponent", opponent_character_slug(
+                            active_opponent_character.load()
+                        )},
+                        {"encounter_stage",
+                         encounter_configuration.current_stage},
+                        {"opponent_count",
+                         encounter_configuration.opponent_count},
+                        {"remaining_opponents",
+                         encounter_configuration.opponent_count -
+                            encounter_configuration.current_stage - 1U},
+                        {"epsilon", stats.epsilon},
+                        {"epsilon_initial", epsilon_initial},
+                        {"epsilon_minimum", epsilon_minimum},
+                        {"epsilon_decay_progress",
+                         epsilon_decay_progress},
+                        {"reward", response["reward_breakdown"]},
+                        {"option_name", reinforcement_decision.option_name},
+                        {"selection_source",
+                         reinforcement_decision.selection_source},
+                        {"selected_q", reinforcement_decision.selected_q},
+                        {"allowed_options",
+                         reinforcement_decision.allowed_options},
+                        {"training_loss", stats.last_training_loss},
+                        {"predicted_q_mean", stats.last_predicted_q_mean},
+                        {"td_target_mean", stats.last_td_target_mean},
+                        {"bootstrap_mean", stats.last_bootstrap_mean},
+                        {"q_target_gap", stats.last_q_target_gap},
+                        {"abs_td_error", stats.last_abs_td_error},
+                        {"critic_disagreement",
+                         stats.last_critic_disagreement},
+                        {"training_updates", stats.training_updates},
+                        {"replay_size", stats.replay_size},
+                        {"replay_capacity",
+                         options.reinforcement_replay_capacity},
+                        {"winning_replay_size", stats.winning_replay_size},
+                        {"winning_replay_capacity",
+                         options.reinforcement_winning_replay_capacity},
+                        {"training_episodes",
+                         stats.matchup_episodes_completed},
+                        {"training_wins", stats.matchup_wins},
+                        {"evaluation_session_id", evaluation_session_id},
+                        {"evaluation_episodes",
+                         evaluation_statistics.episodes},
+                        {"evaluation_wins", evaluation_statistics.wins},
+                        {"reset_state",
+                         reset_state_slug(telemetry_reset_state)},
+                        {"active_reset_id", telemetry_reset_id},
+                        {"weights_frozen",
+                         telemetry_mode == AgentMode::evaluation},
+                        {"replay_frozen",
+                         telemetry_mode == AgentMode::evaluation},
+                        {"scheduler_frozen",
+                         telemetry_mode == AgentMode::evaluation},
+                        {"mode_change_pending", telemetry_mode_pending},
+                    };
+                    writer.send_json(telemetry);
+                    telemetry["event"] = "telemetry";
+                    telemetry["connection_id"] = connection_id;
+                    metrics.write(telemetry);
+                    nlohmann::json telemetry_sample{
+                        {"protocol_version", kServerProtocolVersion},
+                        {"request_id", telemetry_request_id++},
+                        {"timestamp_ms", now_ms},
+                        {"type", "telemetry_sample"},
+                        {"episode_id", fight.episode_id},
+                        {"decision_id", current_decision_id},
+                        {"epsilon", reinforcement_decision.epsilon},
+                        {"step_reward",
+                         reinforcement_decision.reward_consumed},
+                        {"episode_return",
+                         reinforcement_decision.episode_return},
+                        {"cumulative_damage_dealt",
+                         episode_statistics.damage_dealt},
+                        {"cumulative_damage_received",
+                         episode_statistics.damage_received},
+                        {"training_loss", stats.last_training_loss},
+                        {"abs_td_error", stats.last_abs_td_error},
+                        {"selected_q", reinforcement_decision.selected_q},
+                        {"predicted_q_mean",
+                         stats.last_predicted_q_mean},
+                        {"replay_size", stats.replay_size},
+                    };
+                    writer.send_json(telemetry_sample);
+                    telemetry_sample["event"] = "telemetry_sample";
+                    telemetry_sample["connection_id"] = connection_id;
+                    metrics.write(telemetry_sample);
+                    next_telemetry_sample = telemetry_now +
+                        std::chrono::milliseconds(100);
+                }
+                if (v21_session && reinforcement_step_ok &&
+                    reinforcement_decision.checkpoint_saved) {
+                    send_telemetry_marker(
+                        "checkpoint_saved",
+                        fight.episode_id,
+                        static_cast<float>(
+                            reinforcement_decision.training_updates
+                        ),
+                        reinforcement_agent->config()
+                            .checkpoint_path.string()
+                    );
+                }
                 bool created_training_reset = false;
+                if (v21_session && pending_terminal_reset_reason.has_value() &&
+                    !training_reset_trigger.has_value()) {
+                    training_reset_trigger = TrainingResetTrigger{
+                        .episode_id = fight.episode_id,
+                        .frame_id = fight.frame_id,
+                        .reason = std::string(
+                            reset_reason_slug(*pending_terminal_reset_reason)
+                        ),
+                    };
+                }
                 if (
                     training_reset_trigger.has_value() &&
                     !pending_training_reset_request.has_value()
@@ -2400,36 +3545,105 @@ void handle_websocket_connection(
                         compatibility_recovery
                             ? "round_lost"
                             : training_reset_trigger->reason;
-                    pending_training_reset_request = nlohmann::json{
-                        {"protocol_version", kActionProtocolVersion},
-                        {"type", "training_reset_state"},
-                        {"reset_id", reset_id},
-                        {"episode_id", compatible_episode_id},
-                        {"frame_id", training_reset_trigger->frame_id},
-                        {"timestamp_ms", requested_at_ms},
-                        {"reason", compatible_reason},
-                        {"requested_operation",
-                         "load_training_state"},
-                        {"player_character",
-                         fighter_character_slug(player_character)},
-                        {"opponent_character",
-                         opponent_character_slug(opponent_character)},
-                        {"release_controls", true},
-                        {"cancel_pending_sequence", true},
-                        {"ack_required", true},
-                    };
+                    if (v21_session) {
+                        ResetReason reason =
+                            pending_terminal_reset_reason.value_or(
+                                compatibility_recovery
+                                    ? ResetReason::stream_stalled
+                                    : ResetReason::invalid_game_state
+                            );
+                        const bool terminal_committed =
+                            pending_terminal_reset_reason.has_value() &&
+                            fight.episode_ended && fight.terminal;
+                        ResetTransition reset_transition;
+                        {
+                            std::lock_guard lock(protocol_session_mutex);
+                            reset_transition = protocol_session.request_reset(
+                                reason,
+                                compatible_episode_id,
+                                reset_id,
+                                requested_at_ms,
+                                terminal_committed
+                            );
+                        }
+                        if (!reset_transition.accepted) {
+                            writer.send_json({
+                                {"protocol_version", kServerProtocolVersion},
+                                {"request_id", telemetry_request_id++},
+                                {"timestamp_ms", requested_at_ms},
+                                {"type", "error"},
+                                {"message", reset_transition.message},
+                            });
+                        } else {
+                            ++reset_statistics.resets_requested;
+                            if (reason == ResetReason::invalid_game_state) {
+                                ++reset_statistics.invalid_state_resets;
+                            }
+                            if (reset_transition.episode_aborted) {
+                                reinforcement_agent->suspend();
+                            }
+                            pending_training_reset_request = nlohmann::json{
+                                {"protocol_version", kServerProtocolVersion},
+                                {"request_id", telemetry_request_id++},
+                                {"timestamp_ms", requested_at_ms},
+                                {"type", "reset_episode"},
+                                {"reset_id", reset_id},
+                                {"episode_id", compatible_episode_id},
+                                {"frame_id",
+                                 training_reset_trigger->frame_id},
+                                {"reason", reset_reason_slug(reason)},
+                                {"state", "requested"},
+                                {"load_save_state", true},
+                                {"discard_inflight_action", true},
+                                {"settle_delay_ms", 0},
+                            };
+                        }
+                    } else {
+                        pending_training_reset_request = nlohmann::json{
+                            {"protocol_version", kActionProtocolVersion},
+                            {"type", "training_reset_state"},
+                            {"reset_id", reset_id},
+                            {"episode_id", compatible_episode_id},
+                            {"frame_id", training_reset_trigger->frame_id},
+                            {"timestamp_ms", requested_at_ms},
+                            {"reason", compatible_reason},
+                            {"requested_operation",
+                             "load_training_state"},
+                            {"player_character",
+                             fighter_character_slug(player_character)},
+                            {"opponent_character",
+                             opponent_character_slug(
+                                 active_opponent_character.load()
+                             )},
+                            {"release_controls", true},
+                            {"cancel_pending_sequence", true},
+                            {"ack_required", true},
+                        };
+                    }
                     pending_training_reset_detected_reason =
                         training_reset_trigger->reason;
                     pending_training_reset_attempt = 0;
                     next_training_reset_retry = Clock::time_point::min();
                     created_training_reset = true;
+                    if (v21_session &&
+                        pending_training_reset_request.has_value()) {
+                        send_telemetry_marker(
+                            "reset_requested",
+                            compatible_episode_id,
+                            static_cast<float>(reset_id),
+                            pending_training_reset_request->at("reason")
+                                .get<std::string>()
+                        );
+                    }
+                    pending_terminal_reset_reason.reset();
                 }
                 const auto reset_send_now = Clock::now();
                 if (
                     pending_training_reset_request.has_value() &&
                     (
                         created_training_reset ||
-                        reset_send_now >= next_training_reset_retry
+                        (!v21_session &&
+                         reset_send_now >= next_training_reset_retry)
                     )
                 ) {
                     nlohmann::json reset_request =
@@ -2444,6 +3658,13 @@ void handle_websocket_connection(
                         connected.store(false);
                         shutdown(socket, SHUT_RDWR);
                         break;
+                    }
+                    if (v21_session) {
+                        std::lock_guard lock(protocol_session_mutex);
+                        protocol_session.mark_reset_command_sent(
+                            reset_request.at("reset_id")
+                                .get<std::uint64_t>()
+                        );
                     }
                     next_training_reset_retry =
                         reset_send_now + training_reset_retry_interval;
@@ -2488,7 +3709,9 @@ void handle_websocket_connection(
                               << " character="
                               << fighter_character_slug(player_character)
                               << " opponent="
-                              << opponent_character_slug(opponent_character)
+                              << opponent_character_slug(
+                                     active_opponent_character.load()
+                                 )
                               << " decision=" << decision_id
                               << " frame_id=" << latest->frame_id
                               << " latency_ms=" << latency_ms
@@ -2938,6 +4161,58 @@ void handle_websocket_connection(
                         });
                         continue;
                     }
+                    if (
+                        std::holds_alternative<UpdateEncounterStageRequest>(
+                            client_message
+                        ) ||
+                        std::holds_alternative<EncounterEventRequest>(
+                            client_message
+                        ) ||
+                        std::holds_alternative<SetAgentModeRequest>(
+                            client_message
+                        ) ||
+                        std::holds_alternative<SetExplorationRequest>(
+                            client_message
+                        ) ||
+                        std::holds_alternative<RequestReset>(client_message) ||
+                        std::holds_alternative<ResetAck>(client_message) ||
+                        std::holds_alternative<ResetReady>(client_message) ||
+                        std::holds_alternative<ResetFailed>(client_message)
+                    ) {
+                        if (!v21_session) {
+                            writer.send_json({
+                                {"protocol_version", kActionProtocolVersion},
+                                {"type", "error"},
+                                {"timestamp_ms", received_ms},
+                                {"message",
+                                 "V2.1 control messages require configure_session"},
+                            });
+                        } else if (reinforcement_agent == nullptr ||
+                                   fight_tracker == nullptr) {
+                            writer.send_json({
+                                {"protocol_version", kServerProtocolVersion},
+                                {"timestamp_ms", received_ms},
+                                {"type", "error"},
+                                {"message",
+                                 "V2.1 agent controls require reinforcement learning to be enabled"},
+                            });
+                        } else {
+                            enqueue_control_message(std::move(client_message));
+                        }
+                        continue;
+                    }
+                    if (std::holds_alternative<ConfigureSessionRequest>(
+                            client_message
+                        )) {
+                        writer.send_json({
+                            {"protocol_version", kActionProtocolVersion},
+                            {"type", "configure_session_error"},
+                            {"timestamp_ms", received_ms},
+                            {"message",
+                             "configure_session is accepted only before the first frame; reconnect to change encounter"},
+                        });
+                        continue;
+                    }
                     processing_frame_message = true;
                     FrameEnvelope envelope = std::move(
                         std::get<FrameEnvelope>(client_message)
@@ -2999,7 +4274,7 @@ void handle_websocket_connection(
         {"player_character",
          fighter_character_slug(player_character)},
         {"opponent_character",
-         opponent_character_slug(opponent_character)},
+         opponent_character_slug(active_opponent_character.load())},
         {"timestamp_ms", epoch_milliseconds()},
         {"frames_received", received_frames.load()},
         {"frames_dropped", buffer.dropped_total()},
@@ -3070,6 +4345,8 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
         options_.decision_interval.count() <= 0 || options_.failsafe_timeout.count() <= 0 ||
         options_.reinforcement_reward_log_interval.count() <= 0 ||
         options_.training_reset_non_fight_timeout.count() <= 0 ||
+        options_.reset_ack_timeout.count() <= 0 ||
+        options_.reset_ready_timeout.count() <= 0 ||
         options_.repeated_frame_pause_timeout.count() <= 0 ||
         options_.repeated_frame_reset_timeout.count() <= 0 ||
         options_.debug_capture_interval.count() <= 0 ||
@@ -3173,6 +4450,11 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
          options_.reinforcement_combo_max_distance > 1.0f ||
          options_.reinforcement_close_attack_max_distance <= 0.0f ||
          options_.reinforcement_close_attack_max_distance > 1.0f ||
+         options_.reinforcement_throw_max_distance <= 0.0f ||
+         options_.reinforcement_throw_max_distance >
+             options_.reinforcement_close_attack_max_distance ||
+         options_.reinforcement_sweep_max_distance <= 0.0f ||
+         options_.reinforcement_sweep_max_distance > 1.0f ||
          options_.reinforcement_projectile_preferred_min_distance <= 0.0f ||
          options_.reinforcement_projectile_preferred_min_distance > 1.0f ||
          options_.reinforcement_projectile_q_preference_margin < 0.0f ||
@@ -3185,6 +4467,8 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
          options_.reinforcement_defense_max_distance <= 0.0f ||
          options_.reinforcement_defense_max_distance > 1.0f ||
          options_.reinforcement_disable_cloud_cooldown_options == 0 ||
+         options_.reinforcement_throw_cooldown_options == 0 ||
+         options_.reinforcement_sweep_cooldown_options == 0 ||
          options_.reinforcement_projectile_impact_credit_min_steps == 0 ||
          options_.reinforcement_projectile_impact_credit_max_steps <
              options_.reinforcement_projectile_impact_credit_min_steps ||
@@ -3431,6 +4715,10 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                      options_.reinforcement_combo_max_distance},
                     {"close_attack_max_distance",
                      options_.reinforcement_close_attack_max_distance},
+                    {"throw_max_distance",
+                     options_.reinforcement_throw_max_distance},
+                    {"sweep_max_distance",
+                     options_.reinforcement_sweep_max_distance},
                     {"projectile_preferred_min_distance",
                      options_
                          .reinforcement_projectile_preferred_min_distance},
@@ -3440,6 +4728,10 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                     {"disable_cloud_cooldown_options",
                      options_
                          .reinforcement_disable_cloud_cooldown_options},
+                    {"throw_cooldown_options",
+                     options_.reinforcement_throw_cooldown_options},
+                    {"sweep_cooldown_options",
+                     options_.reinforcement_sweep_cooldown_options},
                     {"dynamic_facing",
                      options_.reinforcement_dynamic_facing},
                     {"melee_impact_credit_steps",

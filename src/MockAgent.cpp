@@ -19,9 +19,16 @@ constexpr int kDown = 7;
 constexpr int kLeft = 8;
 constexpr int kRight = 9;
 constexpr std::size_t kDisableCloudCooldownMoves = 2;
+constexpr std::size_t kSharedCloseMoveCooldownMoves = 1;
 
 bool is_disable_cloud_move(std::string_view name) {
     return name.rfind("Nuvem de Desativação", 0) == 0;
+}
+
+bool is_shared_close_move(std::string_view name) {
+    return name == "Agarrão" ||
+        name.rfind("Agarrão [Espelho", 0) == 0 ||
+        name.rfind("Rasteira", 0) == 0;
 }
 
 struct OpponentCharacterRecord {
@@ -183,6 +190,8 @@ std::vector<MockMoveDefinition> with_shared_combat_moves(
 ) {
     const int forward =
         facing == FighterFacing::right ? kRight : kLeft;
+    const int back =
+        facing == FighterFacing::right ? kLeft : kRight;
     moves.push_back(make_move(
         "Uppercut agachado",
         {
@@ -194,6 +203,28 @@ std::vector<MockMoveDefinition> with_shared_combat_moves(
             {},
         },
         "uppercut"
+    ));
+    moves.push_back(make_move(
+        "Agarrão",
+        {
+            {forward},
+            {forward, kBLowPunch},
+            {forward, kBLowPunch},
+            {},
+            {},
+        },
+        "throw"
+    ));
+    moves.push_back(make_move(
+        "Rasteira",
+        {
+            {back},
+            {back, kALowKick},
+            {back, kALowKick},
+            {},
+            {},
+        },
+        "sweep"
     ));
     moves.push_back(make_move(
         "Salto para frente com chute alto",
@@ -614,8 +645,10 @@ void MockAgent::select_next_move() {
     weights.reserve(moves_.size());
     for (const auto& move : moves_) {
         weights.push_back(
-            disable_cloud_cooldown_moves_remaining_ > 0 &&
-                    is_disable_cloud_move(move.name)
+            (disable_cloud_cooldown_moves_remaining_ > 0 &&
+             is_disable_cloud_move(move.name)) ||
+                    (shared_close_move_cooldown_moves_remaining_ > 0 &&
+                     is_shared_close_move(move.name))
                 ? 0.0
                 : std::max(0.0f, move.curriculum_weight)
         );
@@ -628,9 +661,16 @@ void MockAgent::select_next_move() {
     if (disable_cloud_cooldown_moves_remaining_ > 0) {
         --disable_cloud_cooldown_moves_remaining_;
     }
+    if (shared_close_move_cooldown_moves_remaining_ > 0) {
+        --shared_close_move_cooldown_moves_remaining_;
+    }
     if (is_disable_cloud_move(move.name)) {
         disable_cloud_cooldown_moves_remaining_ =
             kDisableCloudCooldownMoves;
+    }
+    if (is_shared_close_move(move.name)) {
+        shared_close_move_cooldown_moves_remaining_ =
+            kSharedCloseMoveCooldownMoves;
     }
     active_states_ = move.states;
     active_phases_ = move.phases;
@@ -681,6 +721,7 @@ void MockAgent::reset_sequence() {
     active_phases_.clear();
     active_step_ = 0;
     disable_cloud_cooldown_moves_remaining_ = 0;
+    shared_close_move_cooldown_moves_remaining_ = 0;
 }
 
 }  // namespace gameagent

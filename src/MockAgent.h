@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ActionHistory.h"
+#include "CharacterTypes.h"
 #include "FrameBuffer.h"
 
 #include <cstddef>
@@ -14,56 +15,6 @@
 #include <vector>
 
 namespace gameagent {
-
-enum class FighterFacing {
-    right,
-    left,
-};
-
-enum class FighterCharacter {
-    subzero,
-    scorpion,
-    noob_saibot,
-    sindel,
-};
-
-// Complete UMK3 identity vocabulary used to condition a controlled
-// character's policy on the current opponent. The four FighterCharacter
-// values above remain the only profiles with scripted curricula.
-enum class OpponentCharacter : std::uint8_t {
-    unknown = 0,
-    cyrax,
-    ermac,
-    jade,
-    jax,
-    kabal,
-    kano,
-    kitana,
-    kung_lao,
-    liu_kang,
-    mileena,
-    motaro,
-    nightwolf,
-    noob_saibot,
-    rain,
-    reptile,
-    scorpion,
-    sektor,
-    shang_tsung,
-    shao_kahn,
-    sheeva,
-    sindel,
-    smoke,
-    human_smoke,
-    sonya,
-    stryker,
-    subzero,
-    classic_subzero,
-    count,
-};
-
-inline constexpr std::size_t kOpponentCharacterFeatureCount =
-    static_cast<std::size_t>(OpponentCharacter::count);
 
 struct MockMoveDefinition {
     std::string name;
@@ -92,19 +43,6 @@ std::vector<MockMoveDefinition> make_character_curriculum(
     FighterCharacter character,
     FighterFacing facing
 );
-std::optional<FighterCharacter> parse_fighter_character(
-    std::string_view value
-);
-std::string_view fighter_character_slug(FighterCharacter character);
-std::string_view fighter_character_name(FighterCharacter character);
-std::vector<std::string> supported_fighter_characters();
-std::optional<OpponentCharacter> parse_opponent_character(
-    std::string_view value
-);
-std::string_view opponent_character_slug(OpponentCharacter character);
-std::string_view opponent_character_name(OpponentCharacter character);
-std::vector<std::string> supported_opponent_characters();
-
 class MockAgent {
 public:
     explicit MockAgent(
@@ -130,6 +68,7 @@ private:
     std::vector<std::string> active_phases_;
     std::size_t active_step_ = 0;
     std::size_t disable_cloud_cooldown_moves_remaining_ = 0;
+    std::size_t shared_close_move_cooldown_moves_remaining_ = 0;
 };
 
 }  // namespace gameagent

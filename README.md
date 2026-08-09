@@ -1,5 +1,10 @@
 # GameAgent streaming WebSocket server
 
+The formal server-side encounter, evaluation, telemetry and transactional-reset
+contract is documented in [docs/server_protocol_v21.md](docs/server_protocol_v21.md).
+The dependency-free smoke client is
+[`scripts/test_server_protocol_v21.py`](scripts/test_server_protocol_v21.py).
+
 The current stage runs a persistent, low-latency WebSocket server. It receives
 JPEG frames continuously, decodes them into RGB images, retains only a bounded
 window of the newest frames, and returns command-state vectors through the same
@@ -126,8 +131,8 @@ Every profile is built by the same pipeline:
 
 Sub-Zero no longer receives conditional freeze follow-ups, hand-authored
 running plans, extra exploration programs, or a pretrained temporal policy.
-Its six declared base moves produce nine unique scripted variants after
-mirroring. Noob Saibot, Scorpion, and Sindel produce 7, 11, and 12 scripted
+After the four shared combat moves and directional mirrors are included,
+Sub-Zero, Noob Saibot, Scorpion and Sindel expose 16, 14, 18 and 19 scripted
 variants respectively. Different counts reflect their declared move lists, not
 different learning privileges.
 
@@ -160,6 +165,10 @@ selected head chooses among high-level options:
 - a coordinated forward jump-kick (and its F/B mirror), shared by all
   controlled characters;
 - a shared crouching uppercut that holds Down before pressing Down+Y;
+- a grounded throw (`Forward+low punch`) restricted to very close range and
+  protected by a two-alternative-option cooldown;
+- a grounded sweep (`Back+low kick`) restricted to short range and protected
+  by a one-alternative-option cooldown;
 - a two-option cooldown after Noob Saibot's disable cloud; both F/B
   variants are masked in mock exploration, DQN exploitation and Double-DQN
   successor targets while the projectile can still turn against its owner;
@@ -655,6 +664,8 @@ With Sub-Zero facing right, the exact sequences are:
 | Chuva de Gelo — Perto (`D, B, F, Y`) | `[7] → [8] → [9] → [0] → [] → []` |
 | 3 Golpes (`Y, Y, D+B`) | `[0] → [] → [0] → [] → [7,2] → [] → []` |
 | 4 Golpes (`X, X, B+X, F+A`) | `[1] → [] → [1] → [] → [8,1] → [] → [9,3] → [] → []` |
+| Agarrão (`F+B`) | `[9] → [9,2] → [9,2] → [] → []` |
+| Rasteira (`B+A`) | `[8] → [8,3] → [8,3] → [] → []` |
 
 Here `B` in the final position of a special move means the B/low-punch button
 (`2`); `B` used as a direction means Back. A plus sign means simultaneous
@@ -665,7 +676,7 @@ specification, plus an equal-weight Forward/Back mirror for every unique
 directional program. Repeated directions contain an explicit neutral state
 between taps, aerial variants begin with Up states, and combinations such as
 `B+X` or `D+Y` are emitted atomically in one `commands` vector. Their current
-curriculum sizes are respectively 11, 7, and 12 variants.
+curriculum sizes are respectively 18, 14, and 19 variants.
 
 The command mapping remains:
 
@@ -779,6 +790,10 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_RL_SUPPRESS_NEUTRAL` | `1` | mask `Neutro` during spatially valid active fights without changing the action head |
 | `GAMEAGENT_RL_COMBO_MAX_DISTANCE` | `0.22` | maximum normalized fighter distance at which close scripted combos are legal |
 | `GAMEAGENT_RL_CLOSE_ATTACK_MAX_DISTANCE` | `0.24` | maximum distance for primitive punches, kicks and uppercuts |
+| `GAMEAGENT_RL_THROW_MAX_DISTANCE` | `0.12` | maximum normalized distance for the shared grounded throw |
+| `GAMEAGENT_RL_SWEEP_MAX_DISTANCE` | `0.26` | maximum normalized distance for the shared grounded sweep |
+| `GAMEAGENT_RL_THROW_COOLDOWN_OPTIONS` | `2` | alternative option selections required before another throw |
+| `GAMEAGENT_RL_SWEEP_COOLDOWN_OPTIONS` | `1` | alternative option selections required before another sweep |
 | `GAMEAGENT_RL_PROJECTILE_MIN_DISTANCE` | `0.28` | minimum distance for ordinary projectiles and distance at which they are preferred |
 | `GAMEAGENT_RL_PROJECTILE_Q_MARGIN` | `1.0` | maximum Q disadvantage accepted when preferring a projectile at distance; halved under an observed attack |
 | `GAMEAGENT_RL_DISABLE_CLOUD_MIN_DISTANCE` / `MAX_DISTANCE` | `0.12` / `0.55` | empirically useful range for Noob Saibot's disable cloud |
@@ -795,8 +810,8 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_RL_IDLE_PENALTY_PER_SECOND` | `0.01` | small penalty per second after 1.5 seconds without movement, commands or damage |
 | `GAMEAGENT_RL_CORNER_PENALTY_PER_SECOND` | `0.02` | small penalty per second after 1.0 second near a screen edge |
 | `GAMEAGENT_RL_RECURRENT_SERVICE` | `/tmp/GameAgent/scripts/recurrent_dqn_service.py` | PyTorch/CUDA compatibility backend, used only with `GAMEAGENT_RL_BACKEND=python` |
-| `GAMEAGENT_RL_CPP_AUTO_MIGRATE` | `1` | convert a same-directory legacy `.pt` checkpoint once when the native checkpoint is absent |
-| `GAMEAGENT_RL_CHECKPOINT_DIR` | `/workspace/gameagent/rl_checkpoints` | shared latest policy/replay plus per-character best snapshots |
+| `GAMEAGENT_RL_CPP_AUTO_MIGRATE` | `0` | V2.1 rejects automatic migration from the previous action-head architecture |
+| `GAMEAGENT_RL_CHECKPOINT_DIR` | `/workspace/gameagent/rl_v21` | shared latest policy/replay plus per-character best snapshots |
 | `GAMEAGENT_TRAINING_RESET_STATE` | `1` | request a client-side save-state load once after each `round_lost` |
 | `GAMEAGENT_TRAINING_RESET_NON_FIGHT_TIMEOUT_MS` | `5000` | request recovery after this many continuous milliseconds outside `active_fight` |
 | `GAMEAGENT_REPEATED_FRAME_PAUSE_MS` | `2000` | release controls and suspend RL when decoded RGB pixels remain identical |

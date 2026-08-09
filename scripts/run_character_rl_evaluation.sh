@@ -16,10 +16,10 @@ else
   exit 1
 fi
 if [[ "${TRAINABLE_LSTM}" == "1" ]]; then
-  SOURCE_CHECKPOINT="${GAMEAGENT_EVALUATION_SOURCE_CHECKPOINT:-/workspace/gameagent/rl_checkpoints/${RECURRENT_FILENAME}}"
-  SOURCE_METADATA="${GAMEAGENT_EVALUATION_SOURCE_METADATA:-/workspace/gameagent/rl_checkpoints/shared_recurrent_metadata_latest.garl}"
+  SOURCE_CHECKPOINT="${GAMEAGENT_EVALUATION_SOURCE_CHECKPOINT:-/workspace/gameagent/rl_v21/${RECURRENT_FILENAME}}"
+  SOURCE_METADATA="${GAMEAGENT_EVALUATION_SOURCE_METADATA:-/workspace/gameagent/rl_v21/shared_recurrent_metadata_latest.garl}"
 else
-  SOURCE_CHECKPOINT="${GAMEAGENT_EVALUATION_SOURCE_CHECKPOINT:-/workspace/gameagent/rl_checkpoints/shared_policy_latest.garl}"
+  SOURCE_CHECKPOINT="${GAMEAGENT_EVALUATION_SOURCE_CHECKPOINT:-/workspace/gameagent/rl_v21/shared_policy_latest.garl}"
   SOURCE_METADATA=""
 fi
 RUN_LABEL="${GAMEAGENT_EVALUATION_NAME:-evaluation_$(date -u +%Y%m%dT%H%M%SZ)_p$$}"

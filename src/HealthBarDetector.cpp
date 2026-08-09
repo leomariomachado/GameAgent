@@ -223,6 +223,7 @@ void FightStateTracker::end_episode_locked(
         pending_terminal_ = pending_terminal_ || terminal;
     }
     episode_active_ = false;
+    awaiting_opponent_refill_ = false;
     latest_.action_allowed = false;
     latest_.episode_ended = true;
     latest_.terminal = terminal;
@@ -276,17 +277,44 @@ FightControlSnapshot FightStateTracker::observe(const BufferedFrame& frame) {
     float previous_player = player_health;
     float previous_opponent = opponent_health;
     bool health_increased = false;
+    bool player_health_increased = false;
+    bool opponent_health_increased = false;
     if (has_previous_reading_) {
         previous_player = selected_health(previous_reading_, config_.player_side);
         previous_opponent = other_health(previous_reading_, config_.player_side);
-        health_increased =
-            player_health > previous_player + config_.health_increase_tolerance ||
+        player_health_increased =
+            player_health > previous_player + config_.health_increase_tolerance;
+        opponent_health_increased =
             opponent_health > previous_opponent + config_.health_increase_tolerance;
+        health_increased =
+            player_health_increased || opponent_health_increased;
     }
     previous_reading_ = reading;
     has_previous_reading_ = true;
 
     if (latest_.phase == FightPhase::active_fight) {
+        if (
+            external_encounter_lifecycle_ &&
+            awaiting_opponent_refill_ &&
+            opponent_health_increased &&
+            !player_health_increased
+        ) {
+            // The new Endurance opponent legitimately starts with a full bar.
+            // Rebase the detector and do not generate damage/reward/terminal.
+            filtered_opponent_health_ = opponent_health;
+            filtered_player_health_ = std::min(
+                filtered_player_health_, player_health
+            );
+            awaiting_opponent_refill_ = false;
+            terminal_frames_ = 0;
+            latest_.player_health = filtered_player_health_;
+            latest_.opponent_health = filtered_opponent_health_;
+            latest_.action_allowed = true;
+            latest_.transition_reason =
+                "endurance_opponent_health_refill_ignored";
+            pending_transition_reason_ = latest_.transition_reason;
+            return latest_;
+        }
         if (health_increased) {
             end_episode_locked(false, "health_refill_or_state_load");
             latest_.phase = FightPhase::round_intro;
@@ -335,7 +363,8 @@ FightControlSnapshot FightStateTracker::observe(const BufferedFrame& frame) {
             terminal_frames_ = 0;
             latest_.action_allowed = true;
         }
-        if (terminal_frames_ >= config_.terminal_frames) {
+        if (terminal_frames_ >= config_.terminal_frames &&
+            !external_encounter_lifecycle_) {
             const bool won = opponent_empty && !player_empty;
             const bool lost = player_empty && !opponent_empty;
             const float terminal_reward =
@@ -417,6 +446,49 @@ FightControlSnapshot FightStateTracker::observe(const BufferedFrame& frame) {
     return latest_;
 }
 
+void FightStateTracker::set_external_encounter_lifecycle(bool enabled) {
+    std::lock_guard lock(mutex_);
+    external_encounter_lifecycle_ = enabled;
+    awaiting_opponent_refill_ = false;
+}
+
+void FightStateTracker::advance_encounter_stage(float stage_bonus) {
+    if (!std::isfinite(stage_bonus)) {
+        throw std::invalid_argument("stage bonus must be finite");
+    }
+    std::lock_guard lock(mutex_);
+    if (!external_encounter_lifecycle_) {
+        throw std::logic_error(
+            "cannot advance stage without an external encounter"
+        );
+    }
+    pending_reward_ += stage_bonus;
+    latest_.reward += stage_bonus;
+    latest_.terminal = false;
+    latest_.episode_ended = false;
+    latest_.action_allowed = false;
+    latest_.transition_reason = "endurance_stage_completed";
+    pending_transition_reason_ = latest_.transition_reason;
+    awaiting_opponent_refill_ = true;
+    terminal_frames_ = 0;
+}
+
+void FightStateTracker::finish_encounter(bool won) {
+    std::lock_guard lock(mutex_);
+    if (!external_encounter_lifecycle_ || !episode_active_) {
+        return;
+    }
+    const float terminal_reward = won
+        ? config_.round_win_bonus
+        : -config_.round_loss_penalty;
+    pending_reward_ += terminal_reward;
+    pending_terminal_reward_ += terminal_reward;
+    latest_.reward += terminal_reward;
+    latest_.terminal_reward = terminal_reward;
+    end_episode_locked(true, won ? "encounter_won" : "encounter_lost");
+    latest_.phase = FightPhase::round_end;
+}
+
 FightControlSnapshot FightStateTracker::make_snapshot_locked(
     std::int64_t now_ms
 ) const {
@@ -483,6 +555,7 @@ void FightStateTracker::reset() {
     terminal_frames_ = 0;
     last_intro_increase_ms_ = 0;
     episode_active_ = false;
+    awaiting_opponent_refill_ = false;
     pending_reward_ = 0.0f;
     pending_terminal_reward_ = 0.0f;
     pending_damage_dealt_ = 0.0f;

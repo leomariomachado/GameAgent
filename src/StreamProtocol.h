@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ServerProtocolV21.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -46,7 +48,16 @@ using ClientTextMessage = std::variant<
     FrameEnvelope,
     ActionAcknowledgement,
     TrainingResetAcknowledgement,
-    SessionConfiguration
+    SessionConfiguration,
+    ConfigureSessionRequest,
+    UpdateEncounterStageRequest,
+    EncounterEventRequest,
+    SetAgentModeRequest,
+    SetExplorationRequest,
+    RequestReset,
+    ResetAck,
+    ResetReady,
+    ResetFailed
 >;
 
 FrameEnvelope parse_binary_frame_envelope(std::span<const std::uint8_t> payload);
