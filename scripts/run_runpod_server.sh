@@ -271,11 +271,10 @@ if [[ "${GAMEAGENT_REINFORCEMENT_LEARNING}" == "1" ]]; then
       fi
       echo "RL recurrent checkpoint: ${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_recurrent_latest.pt"
     elif [[ "${GAMEAGENT_RL_BACKEND}" == "cpp" ]]; then
-      if [[ "${GAMEAGENT_RL_TRAINABLE_RESNET}" == "1" ]]; then
-        echo "Native C++ backend currently requires GAMEAGENT_RL_TRAINABLE_RESNET=0." >&2
-        exit 1
-      fi
       echo "RL recurrent checkpoint: ${GAMEAGENT_RL_CHECKPOINT_DIR}/shared_recurrent_latest.baseai.ckpt"
+      if [[ "${GAMEAGENT_RL_TRAINABLE_RESNET}" == "1" ]]; then
+        echo "RL native stage4 checkpoint: ${GAMEAGENT_RL_CHECKPOINT_DIR}/resnet50_stage4_latest.baseai.ckpt"
+      fi
     else
       echo "GAMEAGENT_RL_BACKEND must be cpp or python." >&2
       exit 1

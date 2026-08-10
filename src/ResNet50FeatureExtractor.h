@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -23,7 +24,15 @@ struct ResNet50CheckpointReport {
     float verification_max_abs = 0.0f;
 };
 
-// Frozen ImageNet ResNet50 used only as a visual feature extractor.
+struct ResNet50NamedDeviceTensor {
+    std::string name;
+    float* data = nullptr;
+    float* gradient = nullptr;
+    std::size_t size = 0;
+};
+
+// ImageNet ResNet50 visual feature extractor. Inference remains batch-1; an
+// independent instance can train stage 4 and synchronize only that stage.
 //
 // Input:
 //   RGB8 image of any positive size.
@@ -45,7 +54,8 @@ public:
 
     explicit ResNet50FeatureExtractor(
         int device_id = 0,
-        bool verify_checkpoint_copy = true
+        bool verify_checkpoint_copy = true,
+        std::size_t batch_size = 1
     );
     ~ResNet50FeatureExtractor();
 
@@ -62,12 +72,35 @@ public:
         const base::data::image::Image& image
     );
 
+    // Native stage-4 fine-tuning path. The model is allocated at the batch
+    // size passed to the constructor. Missing rows are filled by repeating
+    // the final image, and callers must provide zero feature gradients for
+    // those rows during backward.
+    const __half* extract_batch_device(
+        std::span<const base::data::image::Image> images,
+        bool stage4_training
+    );
+
+    void zero_stage4_grad();
+    void backward_stage4(const float* device_feature_gradient);
+    void sync_stage4_weights();
+    void copy_stage4_from(ResNet50FeatureExtractor& source);
+
+    [[nodiscard]]
+    std::vector<ResNet50NamedDeviceTensor> stage4_state_tensors();
+
+    [[nodiscard]]
+    std::vector<ResNet50NamedDeviceTensor> stage4_parameters();
+
     // Downloads an already-computed device feature without running the
-    // backbone a second time. This is used by the trainable recurrent RL
-    // backend to keep the ResNet50 frozen while retaining the temporal
-    // observations required for BPTT.
+    // backbone a second time.
     std::vector<float> download_device_feature(
         const __half* device_feature
+    );
+
+    std::vector<float> download_device_features(
+        const __half* device_features,
+        std::size_t count
     );
 
     // Convenience path for the current GameAgent prototype and its tests.
@@ -79,13 +112,19 @@ public:
     [[nodiscard]] bool loaded() const;
     [[nodiscard]] int device_id() const;
     [[nodiscard]] cudaStream_t stream() const;
+    [[nodiscard]] std::size_t batch_size() const;
 
 private:
     void release() noexcept;
-    void prepare_input(const base::data::image::Image& image);
+    void prepare_input(
+        const base::data::image::Image& image,
+        float* destination,
+        std::size_t destination_count
+    );
 
     int device_id_ = 0;
     bool verify_checkpoint_copy_ = true;
+    std::size_t batch_size_ = 1;
     bool loaded_ = false;
     cudaStream_t stream_ = nullptr;
     float* device_input_float_ = nullptr;

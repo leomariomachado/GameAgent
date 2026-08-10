@@ -26,9 +26,9 @@ struct TemporalAgentConfig {
     std::uint32_t initialization_seed = 0x4c53544dU;
     bool verify_resnet50_checkpoint = true;
     bool frozen_lstm_inference_enabled = true;
-    // When enabled, the PyTorch recurrent service owns the ResNet50 forward
-    // and backward graph. C++ forwards the original in-memory JPEG and does
-    // not allocate a second frozen BaseAI backbone.
+    // When enabled, the recurrent backend owns the ResNet50 forward/backward
+    // graph. The temporal bridge forwards the original in-memory JPEG and
+    // does not allocate another frozen backbone.
     bool external_visual_encoder = false;
 };
 
@@ -41,9 +41,9 @@ struct TemporalObservationResult {
 struct TemporalAgentOutput {
     TemporalLstmOutput lstm;
     std::optional<TemporalActionPrediction> action_prediction;
-    // Frozen ResNet50 feature for the newest camera frame and the controller
-    // state used by this decision tick. The recurrent RL service retains a
-    // bounded sequence of these values and performs BPTT on the GPU.
+    // Visual observation for the newest camera frame and controller state.
+    // With an external trainable encoder the JPEG is forwarded in memory;
+    // otherwise this contains the frozen 2048-value feature.
     std::vector<float> visual_feature;
     std::vector<std::uint8_t> visual_jpeg;
     std::uint64_t visual_frame_id = 0;
@@ -56,7 +56,7 @@ struct TemporalAgentOutput {
 
 // End-to-end temporal feature path:
 //
-// decoded RGB frame -> frozen ResNet50 -> cached FP16[2048]
+// decoded RGB frame -> ResNet50 -> cached/forwarded visual observation
 //                   + latest client-confirmed command -> GPU LSTM
 //
 // A loaded policy may predict active/release plus controller state for

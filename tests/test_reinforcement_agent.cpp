@@ -274,6 +274,61 @@ int main() {
             "returning matchup did not restore its exploration progress"
         );
 
+        // The server reuses one agent across WebSocket sessions. Exercise
+        // both shrinking and growing action heads so stale option indices can
+        // never survive a character/opponent switch.
+        auto switching_config = config;
+        switching_config.resume = false;
+        switching_config.checkpoint_writes_enabled = false;
+        switching_config.epsilon_start = 1.0f;
+        switching_config.epsilon_final = 1.0f;
+        switching_config.new_matchup_epsilon_start = 1.0f;
+        switching_config.scripted_exploration_probability = 1.0f;
+        switching_config.character = gameagent::FighterCharacter::sindel;
+        switching_config.opponent_character =
+            gameagent::OpponentCharacter::kitana;
+        gameagent::ReinforcementAgent switching_agent(switching_config);
+        const std::vector<gameagent::FighterCharacter> switching_characters{
+            gameagent::FighterCharacter::sindel,
+            gameagent::FighterCharacter::noob_saibot,
+            gameagent::FighterCharacter::scorpion,
+            gameagent::FighterCharacter::subzero,
+        };
+        std::uint64_t switching_decision_id = 10'000;
+        for (std::size_t pass = 0; pass < 16; ++pass) {
+            const auto character = switching_characters[
+                pass % switching_characters.size()
+            ];
+            const auto opponent = pass % 2 == 0
+                ? gameagent::OpponentCharacter::scorpion
+                : gameagent::OpponentCharacter::kitana;
+            switching_agent.configure_session(
+                character,
+                opponent,
+                gameagent::FighterFacing::right,
+                directory / "switching_best.garl"
+            );
+            const auto names = switching_agent.option_names();
+            for (std::size_t sample = 0; sample < 64; ++sample) {
+                const auto switched = switching_agent.step({
+                    .state = state_a,
+                    .action_allowed = true,
+                    .episode_started = sample == 0,
+                    .episode_id = 500 + pass,
+                    .frame_id = switching_decision_id,
+                    .decision_id = switching_decision_id,
+                });
+                ++switching_decision_id;
+                require(
+                    switched.option_index < names.size() &&
+                        switched.option_name ==
+                            names.at(switched.option_index),
+                    "session switch selected an option from another character"
+                );
+                switching_agent.suspend();
+            }
+        }
+
         auto scorpion_config = config;
         scorpion_config.character =
             gameagent::FighterCharacter::scorpion;

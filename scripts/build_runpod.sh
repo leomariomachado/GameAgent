@@ -45,6 +45,7 @@ fi
   test_gameagent_cpp_recurrent_backend \
   test_gameagent_cpp_recurrent_parity \
   test_gameagent_cpp_recurrent_training_parity \
+  test_gameagent_cpp_trainable_resnet \
   benchmark_gameagent_cpp_recurrent_backend \
   -j"${BUILD_JOBS}"
 

@@ -89,6 +89,22 @@ if (BUILD_TESTING)
             PRIVATE GameAgentMockCore
     )
     add_executable(
+            test_gameagent_cpp_trainable_resnet
+            tests/test_cpp_trainable_resnet.cu
+    )
+    target_link_libraries(
+            test_gameagent_cpp_trainable_resnet
+            PRIVATE GameAgentMockCore
+    )
+    add_test(
+            NAME gameagent_cpp_trainable_resnet
+            COMMAND test_gameagent_cpp_trainable_resnet
+    )
+    set_tests_properties(
+            gameagent_cpp_trainable_resnet
+            PROPERTIES SKIP_RETURN_CODE 77
+    )
+    add_executable(
             benchmark_gameagent_cpp_recurrent_backend
             tests/benchmark_cpp_recurrent_backend.cu
     )

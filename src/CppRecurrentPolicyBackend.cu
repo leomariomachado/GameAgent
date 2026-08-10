@@ -1,4 +1,5 @@
 #include "CppRecurrentPolicyBackend.h"
+#include "ResNet50FeatureExtractor.h"
 
 #include "checkpoint/checkpoint.h"
 #include "optim/optimizer/adamw.h"
@@ -8,6 +9,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#include <stb_image.h>
 
 #include <algorithm>
 #include <array>
@@ -180,6 +182,11 @@ struct SequenceSnapshot {
     std::vector<__half> values;
 };
 
+struct EncodedVisualFrame {
+    std::uint64_t frame_id = 0;
+    std::vector<std::uint8_t> jpeg;
+};
+
 struct Transition {
     std::shared_ptr<const SequenceSnapshot> state_sequence;
     std::vector<float> state_context;
@@ -194,6 +201,7 @@ struct Transition {
     std::size_t character = 0;
     std::size_t opponent = 0;
     float selected_q = 0.0f;
+    std::shared_ptr<EncodedVisualFrame> state_jpeg;
 };
 
 struct ActiveTransition {
@@ -203,6 +211,7 @@ struct ActiveTransition {
     std::size_t character = 0;
     std::size_t opponent = 0;
     float selected_q = 0.0f;
+    std::shared_ptr<EncodedVisualFrame> state_jpeg;
 };
 
 struct BatchHost {
@@ -245,6 +254,7 @@ struct ForwardWorkspace {
     base::Tensor d_hidden_previous;
     base::Tensor d_cell_previous;
     base::Tensor gradient_q;
+    base::Tensor d_sequence;
 
     void allocate(
         const RecurrentPolicyBackendConfig& config,
@@ -327,6 +337,10 @@ struct ForwardWorkspace {
         gradient_q = base::Tensor::zeros(
             {batch_capacity}, base::DType::F32, device_id
         );
+        d_sequence = base::Tensor::zeros(
+            {step_capacity * batch_capacity * input_size},
+            base::DType::F32, device_id
+        );
     }
 };
 
@@ -353,6 +367,61 @@ __global__ void projection_kernel(
         sum += row_weight[column] * visual[column];
     }
     output[row] = tanhf(sum);
+}
+
+__global__ void projection_half_batch_kernel(
+    const __half* visual,
+    const float* weights,
+    const float* bias,
+    float* output,
+    int batch,
+    int visual_size,
+    int projection_size
+) {
+    const int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (index >= batch * projection_size) {
+        return;
+    }
+    const int row = index / projection_size;
+    const int output_index = index - row * projection_size;
+    float sum = bias[output_index];
+    const float* row_weight = weights +
+        static_cast<std::size_t>(output_index) * visual_size;
+    const __half* row_visual = visual +
+        static_cast<std::size_t>(row) * visual_size;
+    for (int column = 0; column < visual_size; ++column) {
+        sum += row_weight[column] * __half2float(row_visual[column]);
+    }
+    output[index] = tanhf(sum);
+}
+
+__global__ void projection_feature_gradient_kernel(
+    const float* projected_gradient,
+    const float* projected,
+    const float* projection_weight,
+    float* feature_gradient,
+    int batch,
+    int projection_size,
+    int visual_size
+) {
+    const int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (index >= batch * visual_size) {
+        return;
+    }
+    const int row = index / visual_size;
+    const int feature = index - row * visual_size;
+    float sum = 0.0f;
+    for (int output = 0; output < projection_size; ++output) {
+        const float activation = projected[
+            static_cast<std::size_t>(row) * projection_size + output
+        ];
+        sum += projected_gradient[
+            static_cast<std::size_t>(row) * projection_size + output
+        ] * (1.0f - activation * activation) * projection_weight[
+            static_cast<std::size_t>(output) * visual_size + feature
+        ];
+    }
+    feature_gradient[index] = sum;
 }
 
 __global__ void lstm_state_kernel(
@@ -802,6 +871,32 @@ void backward_network(
     std::size_t opponent_embedding_size
 );
 
+base::data::image::Image decode_jpeg(
+    std::span<const std::uint8_t> encoded
+) {
+    if (encoded.empty() ||
+        encoded.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("invalid native ResNet JPEG payload");
+    }
+    int width = 0;
+    int height = 0;
+    int source_channels = 0;
+    unsigned char* pixels = stbi_load_from_memory(
+        encoded.data(), static_cast<int>(encoded.size()),
+        &width, &height, &source_channels, 3
+    );
+    if (pixels == nullptr || width <= 0 || height <= 0) {
+        if (pixels != nullptr) {
+            stbi_image_free(pixels);
+        }
+        throw std::runtime_error("native ResNet JPEG decode failed");
+    }
+    base::data::image::Image image(width, height, 3);
+    std::memcpy(image.data(), pixels, image.size_bytes());
+    stbi_image_free(pixels);
+    return image;
+}
+
 }  // namespace
 
 struct CppRecurrentPolicyBackend::Implementation {
@@ -933,12 +1028,21 @@ struct CppRecurrentPolicyBackend::Implementation {
                 "invalid native recurrent policy configuration"
             );
         }
-        if (config.trainable_resnet) {
+        if (config.trainable_resnet &&
+            (config.visual_size !=
+                    static_cast<std::size_t>(
+                        ResNet50FeatureExtractor::kFeatureSize
+                    ) ||
+             config.resnet50_checkpoint_path.empty() ||
+             !std::filesystem::is_regular_file(
+                 config.resnet50_checkpoint_path
+             ) ||
+             config.resnet_learning_rate <= 0.0f ||
+             config.resnet_batch_size == 0 ||
+             config.resnet_update_interval == 0 ||
+             config.resnet_replay_images == 0)) {
             throw std::invalid_argument(
-                "the native backend currently trains LSTM/DQN with the "
-                "BaseAI ResNet50 feature extractor frozen; use "
-                "GAMEAGENT_RL_BACKEND=python only when stage-4 ResNet "
-                "fine-tuning is explicitly required"
+                "invalid native trainable ResNet50 stage4 configuration"
             );
         }
     }
@@ -1018,6 +1122,61 @@ struct CppRecurrentPolicyBackend::Implementation {
             config.learning_rate,
             kAdamWeightDecay
         );
+        if (config.trainable_resnet) {
+            visual_encoder = std::make_unique<ResNet50FeatureExtractor>(
+                config.device_id, true, config.resnet_batch_size
+            );
+            inference_visual_encoder =
+                std::make_unique<ResNet50FeatureExtractor>(
+                    config.device_id, false, 1
+                );
+            const auto stage4 = visual_encoder->stage4_parameters();
+            resnet_first_moments.resize(stage4.size());
+            resnet_second_moments.resize(stage4.size());
+            std::vector<base::optim::Parameter> parameters;
+            std::vector<float*> first_moments;
+            std::vector<float*> second_moments;
+            parameters.reserve(stage4.size());
+            first_moments.reserve(stage4.size());
+            second_moments.reserve(stage4.size());
+            for (std::size_t index = 0; index < stage4.size(); ++index) {
+                resnet_first_moments[index] = base::Tensor::zeros(
+                    {stage4[index].size}, base::DType::F32, config.device_id
+                );
+                resnet_second_moments[index] = base::Tensor::zeros(
+                    {stage4[index].size}, base::DType::F32, config.device_id
+                );
+                parameters.push_back({
+                    stage4[index].data,
+                    stage4[index].gradient,
+                    stage4[index].size,
+                });
+                first_moments.push_back(
+                    float_data(resnet_first_moments[index])
+                );
+                second_moments.push_back(
+                    float_data(resnet_second_moments[index])
+                );
+            }
+            resnet_optimizer = std::make_unique<base::optim::AdamW>(
+                std::move(parameters), std::move(first_moments),
+                std::move(second_moments), config.resnet_learning_rate,
+                kAdamWeightDecay
+            );
+            const std::size_t projected =
+                config.resnet_batch_size * config.projection_size;
+            const std::size_t features =
+                config.resnet_batch_size * config.visual_size;
+            resnet_projected = base::Tensor::zeros(
+                {projected}, base::DType::F32, config.device_id
+            );
+            resnet_projected_gradient = base::Tensor::zeros(
+                {projected}, base::DType::F32, config.device_id
+            );
+            resnet_feature_gradient = base::Tensor::zeros(
+                {features}, base::DType::F32, config.device_id
+            );
+        }
     }
 
     void initialize() {
@@ -1032,6 +1191,31 @@ struct CppRecurrentPolicyBackend::Implementation {
         upload(projection_weight, values, stream.raw());
         values.assign(projection_bias.size, 0.0f);
         upload(projection_bias, values, stream.raw());
+        if (visual_encoder != nullptr) {
+            const ResNet50CheckpointReport report =
+                visual_encoder->load_checkpoint(
+                    config.resnet50_checkpoint_path.string()
+                );
+            const ResNet50CheckpointReport inference_report =
+                inference_visual_encoder->load_checkpoint(
+                    config.resnet50_checkpoint_path.string()
+                );
+            stats.resnet_checkpoint_loaded = report.tensor_count == 320;
+            if (inference_report.tensor_count != report.tensor_count ||
+                inference_report.checksum != report.checksum) {
+                throw std::runtime_error(
+                    "native ResNet50 inference/training initialization mismatch"
+                );
+            }
+            const std::filesystem::path stage4_checkpoint =
+                resnet_checkpoint_path();
+            if (config.resume &&
+                std::filesystem::is_regular_file(stage4_checkpoint)) {
+                load_resnet_checkpoint(stage4_checkpoint);
+            }
+            inference_visual_encoder->copy_stage4_from(*visual_encoder);
+            refresh_resnet_checksum();
+        }
         initialize_network(online_a, config, random, stream.raw());
         initialize_network(online_b, config, random, stream.raw());
         copy_network(online_a, target_a, stream.raw());
@@ -1040,12 +1224,12 @@ struct CppRecurrentPolicyBackend::Implementation {
         stats.backend = "cpp";
         stats.device = "cuda:" + std::to_string(config.device_id) +
             "/cpp-baseai";
-        stats.trainable_resnet = false;
-        stats.resnet_checkpoint_loaded =
-            !config.resnet50_checkpoint_path.empty() &&
-            std::filesystem::is_regular_file(
-                config.resnet50_checkpoint_path
-            );
+        stats.trainable_resnet = visual_encoder != nullptr;
+        stats.resnet_checkpoint_loaded = visual_encoder != nullptr ||
+            (!config.resnet50_checkpoint_path.empty() &&
+             std::filesystem::is_regular_file(
+                 config.resnet50_checkpoint_path
+             ));
     }
 
     std::shared_ptr<const SequenceSnapshot> snapshot() const {
@@ -1068,14 +1252,42 @@ struct CppRecurrentPolicyBackend::Implementation {
 
     void observe(
         std::span<const float> visual,
-        std::span<const std::uint8_t>,
-        std::uint64_t,
+        std::span<const std::uint8_t> jpeg,
+        std::uint64_t frame_id,
         std::span<const float> controller,
         std::span<const float> context,
         bool episode_started
     ) {
+        if (episode_started) {
+            reset();
+        }
+        std::span<const float> effective_visual = visual;
+        if (visual_encoder != nullptr) {
+            if (jpeg.empty() || frame_id == 0) {
+                throw std::invalid_argument(
+                    "native trainable ResNet observation requires JPEG/frame_id"
+                );
+            }
+            if (current_visual == nullptr ||
+                current_visual->frame_id != frame_id) {
+                base::data::image::Image image = decode_jpeg(jpeg);
+                const __half* device_feature =
+                    inference_visual_encoder->extract_batch_device(
+                        std::span<const base::data::image::Image>(&image, 1),
+                        false
+                    );
+                cached_visual_feature =
+                    inference_visual_encoder->download_device_feature(
+                        device_feature
+                    );
+                current_visual = std::make_shared<EncodedVisualFrame>();
+                current_visual->frame_id = frame_id;
+                current_visual->jpeg.assign(jpeg.begin(), jpeg.end());
+            }
+            effective_visual = cached_visual_feature;
+        }
         if (
-            visual.size() != config.visual_size ||
+            effective_visual.size() != config.visual_size ||
             controller.size() != config.controller_size ||
             context.size() != config.context_size
         ) {
@@ -1084,7 +1296,7 @@ struct CppRecurrentPolicyBackend::Implementation {
             );
         }
         if (
-            !std::all_of(visual.begin(), visual.end(),
+            !std::all_of(effective_visual.begin(), effective_visual.end(),
                 [](float value) { return std::isfinite(value); }) ||
             !std::all_of(controller.begin(), controller.end(),
                 [](float value) { return std::isfinite(value); }) ||
@@ -1095,11 +1307,9 @@ struct CppRecurrentPolicyBackend::Implementation {
                 "native recurrent observation is not finite"
             );
         }
-        if (episode_started) {
-            reset();
-        }
         check_cuda(cudaMemcpyAsync(
-            float_data(visual_buffer), visual.data(), visual.size_bytes(),
+            float_data(visual_buffer), effective_visual.data(),
+            effective_visual.size_bytes(),
             cudaMemcpyHostToDevice, stream.raw()
         ), "upload native recurrent visual feature");
         const int projection_count =
@@ -1228,6 +1438,7 @@ struct CppRecurrentPolicyBackend::Implementation {
             .character = character,
             .opponent = opponent,
             .selected_q = selected_q,
+            .state_jpeg = current_visual,
         };
     }
 
@@ -1271,7 +1482,30 @@ struct CppRecurrentPolicyBackend::Implementation {
             replay.pop_front();
         }
         replay.push_back(std::move(transition));
+        trim_resnet_replay_images();
         refresh_replay_stats();
+    }
+
+    void trim_resnet_replay_images() {
+        if (!config.trainable_resnet) {
+            return;
+        }
+        std::size_t retained = 0;
+        for (const Transition& value : replay) {
+            retained += value.state_jpeg != nullptr &&
+                !value.state_jpeg->jpeg.empty();
+        }
+        for (Transition& value : replay) {
+            if (retained <= config.resnet_replay_images) {
+                break;
+            }
+            if (value.state_jpeg != nullptr &&
+                !value.state_jpeg->jpeg.empty()) {
+                value.state_jpeg->jpeg.clear();
+                value.state_jpeg->jpeg.shrink_to_fit();
+                --retained;
+            }
+        }
     }
 
     std::size_t append_n_step(Transition transition) {
@@ -1485,8 +1719,86 @@ struct CppRecurrentPolicyBackend::Implementation {
         ) {
             return false;
         }
-        const std::vector<const Transition*> sampled = balanced_sample();
-        const BatchHost current = make_batch(sampled, false, config);
+        std::vector<const Transition*> sampled = balanced_sample();
+        std::size_t resnet_count = 0;
+        std::vector<float> replacement_projection;
+        const bool update_resnet = visual_encoder != nullptr &&
+            (stats.training_updates + 1U) %
+                config.resnet_update_interval == 0U;
+        if (update_resnet) {
+            std::vector<const Transition*> eligible;
+            eligible.reserve(replay.size());
+            for (const Transition& transition : replay) {
+                if (transition.state_jpeg != nullptr &&
+                    !transition.state_jpeg->jpeg.empty()) {
+                    eligible.push_back(&transition);
+                }
+            }
+            if (!eligible.empty()) {
+                std::shuffle(eligible.begin(), eligible.end(), random);
+                resnet_count = std::min({
+                    config.resnet_batch_size,
+                    sampled.size(),
+                    eligible.size(),
+                });
+                std::vector<base::data::image::Image> images;
+                images.reserve(resnet_count);
+                for (std::size_t row = 0; row < resnet_count; ++row) {
+                    sampled[row] = eligible[row];
+                    images.push_back(decode_jpeg(
+                        eligible[row]->state_jpeg->jpeg
+                    ));
+                }
+                const __half* feature =
+                    visual_encoder->extract_batch_device(images, true);
+                check_cuda(
+                    cudaStreamSynchronize(visual_encoder->stream()),
+                    "synchronize native stage4 training forward"
+                );
+                const int projected_count = static_cast<int>(
+                    config.resnet_batch_size * config.projection_size
+                );
+                projection_half_batch_kernel<<<
+                    (projected_count + 255) / 256, 256, 0, stream.raw()
+                >>>(
+                    feature,
+                    projection_weight.values(),
+                    projection_bias.values(),
+                    float_data(resnet_projected),
+                    static_cast<int>(config.resnet_batch_size),
+                    static_cast<int>(config.visual_size),
+                    static_cast<int>(config.projection_size)
+                );
+                check_cuda(
+                    cudaGetLastError(),
+                    "project native trainable ResNet features"
+                );
+                replacement_projection.resize(
+                    resnet_count * config.projection_size
+                );
+                check_cuda(cudaMemcpyAsync(
+                    replacement_projection.data(),
+                    float_data(resnet_projected),
+                    replacement_projection.size() * sizeof(float),
+                    cudaMemcpyDeviceToHost,
+                    stream.raw()
+                ), "download native trainable ResNet projection");
+                stream.synchronize();
+            }
+        }
+        BatchHost current = make_batch(sampled, false, config);
+        for (std::size_t row = 0; row < resnet_count; ++row) {
+            const std::size_t step =
+                static_cast<std::size_t>(current.lengths[row] - 1);
+            float* destination = current.sequence.data() +
+                (step * current.batch + row) * current.input;
+            std::copy_n(
+                replacement_projection.data() +
+                    row * config.projection_size,
+                config.projection_size,
+                destination
+            );
+        }
         const BatchHost next = make_batch(sampled, true, config);
         zero_gradients();
         forward_network(
@@ -1641,6 +1953,9 @@ struct CppRecurrentPolicyBackend::Implementation {
             cublas, stream.raw(), config.character_embedding_size,
             config.opponent_embedding_size
         );
+        if (resnet_count > 0) {
+            train_resnet_stage4(current, resnet_count);
+        }
         clip_gradients();
         optimizer->step(stream.raw());
         ++stats.training_updates;
@@ -1669,6 +1984,119 @@ struct CppRecurrentPolicyBackend::Implementation {
         stats.last_critic_disagreement = disagreement_sum / divisor;
         refresh_parameter_checksum();
         return true;
+    }
+
+    void train_resnet_stage4(
+        const BatchHost& current,
+        std::size_t count
+    ) {
+        if (visual_encoder == nullptr || resnet_optimizer == nullptr ||
+            count == 0 || count > config.resnet_batch_size) {
+            throw std::logic_error("invalid native stage4 training update");
+        }
+        const std::size_t sequence_values =
+            current.steps * current.batch * current.input;
+        std::vector<float> gradient_a(sequence_values);
+        std::vector<float> gradient_b(sequence_values);
+        check_cuda(cudaMemcpyAsync(
+            gradient_a.data(), float_data(training_a.d_sequence),
+            sequence_values * sizeof(float), cudaMemcpyDeviceToHost,
+            stream.raw()
+        ), "download critic A visual gradients");
+        check_cuda(cudaMemcpyAsync(
+            gradient_b.data(), float_data(training_b.d_sequence),
+            sequence_values * sizeof(float), cudaMemcpyDeviceToHost,
+            stream.raw()
+        ), "download critic B visual gradients");
+        stream.synchronize();
+        std::vector<float> projected_gradient(
+            config.resnet_batch_size * config.projection_size, 0.0f
+        );
+        for (std::size_t row = 0; row < count; ++row) {
+            const std::size_t step =
+                static_cast<std::size_t>(current.lengths[row] - 1);
+            const std::size_t source =
+                (step * current.batch + row) * current.input;
+            for (std::size_t column = 0;
+                 column < config.projection_size; ++column) {
+                projected_gradient[row * config.projection_size + column] =
+                    gradient_a[source + column] +
+                    gradient_b[source + column];
+            }
+        }
+        check_cuda(cudaMemcpyAsync(
+            float_data(resnet_projected_gradient),
+            projected_gradient.data(),
+            projected_gradient.size() * sizeof(float),
+            cudaMemcpyHostToDevice,
+            stream.raw()
+        ), "upload native stage4 projection gradients");
+        const std::size_t feature_count =
+            config.resnet_batch_size * config.visual_size;
+        projection_feature_gradient_kernel<<<
+            static_cast<int>((feature_count + 255U) / 256U),
+            256, 0, stream.raw()
+        >>>(
+            float_data(resnet_projected_gradient),
+            float_data(resnet_projected),
+            projection_weight.values(),
+            float_data(resnet_feature_gradient),
+            static_cast<int>(config.resnet_batch_size),
+            static_cast<int>(config.projection_size),
+            static_cast<int>(config.visual_size)
+        );
+        check_cuda(cudaGetLastError(), "backpropagate native projection");
+        stream.synchronize();
+
+        resnet_optimizer->zero_grad(visual_encoder->stream());
+        visual_encoder->zero_stage4_grad();
+        visual_encoder->backward_stage4(
+            float_data(resnet_feature_gradient)
+        );
+        check_cuda(
+            cudaStreamSynchronize(visual_encoder->stream()),
+            "synchronize native stage4 backward"
+        );
+        clip_resnet_gradients();
+        resnet_optimizer->step(stream.raw());
+        stream.synchronize();
+        visual_encoder->sync_stage4_weights();
+        check_cuda(
+            cudaStreamSynchronize(visual_encoder->stream()),
+            "synchronize native stage4 weight copies"
+        );
+        inference_visual_encoder->copy_stage4_from(*visual_encoder);
+        ++stats.resnet_training_updates;
+        refresh_resnet_checksum();
+        cached_visual_feature.clear();
+        current_visual.reset();
+    }
+
+    void clip_resnet_gradients() {
+        double squared_norm = 0.0;
+        const auto parameters = visual_encoder->stage4_parameters();
+        for (const auto& parameter : parameters) {
+            float norm = 0.0f;
+            check_cublas(cublasSnrm2(
+                cublas, static_cast<int>(parameter.size),
+                parameter.gradient, 1, &norm
+            ), "measure native stage4 gradient norm");
+            squared_norm += static_cast<double>(norm) * norm;
+        }
+        const double norm = std::sqrt(squared_norm);
+        if (norm <= config.gradient_clip || norm <= 0.0) {
+            return;
+        }
+        const float scale = static_cast<float>(
+            config.gradient_clip / norm
+        );
+        for (const auto& parameter : parameters) {
+            scale_kernel<<<
+                static_cast<int>((parameter.size + 255U) / 256U),
+                256, 0, stream.raw()
+            >>>(parameter.gradient, parameter.size, scale);
+        }
+        check_cuda(cudaGetLastError(), "clip native stage4 gradients");
     }
 
     RecurrentPolicyCloseResult close_transition(
@@ -1712,6 +2140,7 @@ struct CppRecurrentPolicyBackend::Implementation {
                 .character = active->character,
                 .opponent = active->opponent,
                 .selected_q = active->selected_q,
+                .state_jpeg = active->state_jpeg,
             };
             const std::size_t appended =
                 append_n_step(std::move(transition));
@@ -1815,6 +2244,8 @@ struct CppRecurrentPolicyBackend::Implementation {
     void reset() {
         current_sequence.clear();
         current_context.assign(config.context_size, 0.0f);
+        cached_visual_feature.clear();
+        current_visual.reset();
         active.reset();
         pending_n_step.clear();
         current_episode_transitions.clear();
@@ -1881,18 +2312,48 @@ struct CppRecurrentPolicyBackend::Implementation {
         stats.parameter_checksum = checksum;
     }
 
+    void refresh_resnet_checksum() {
+        if (visual_encoder == nullptr) {
+            stats.resnet_parameter_checksum = 0.0;
+            return;
+        }
+        double checksum = 0.0;
+        std::size_t ordinal = 1;
+        std::vector<std::vector<float>> samples;
+        for (const auto& parameter :
+             visual_encoder->stage4_parameters()) {
+            const std::size_t count =
+                std::min<std::size_t>(256, parameter.size);
+            samples.emplace_back(count);
+            check_cuda(cudaMemcpyAsync(
+                samples.back().data(), parameter.data,
+                count * sizeof(float), cudaMemcpyDeviceToHost,
+                stream.raw()
+            ), "sample native stage4 checksum");
+        }
+        stream.synchronize();
+        for (const auto& sample : samples) {
+            checksum += std::accumulate(
+                sample.begin(), sample.end(), 0.0
+            ) * static_cast<double>(ordinal++);
+        }
+        stats.resnet_parameter_checksum = checksum;
+    }
+
     void refresh_stats() {
         stats.backend = "cpp";
         stats.device = "cuda:" + std::to_string(config.device_id) +
             "/cpp-baseai";
-        stats.trainable_resnet = false;
+        stats.trainable_resnet = visual_encoder != nullptr;
         stats.resnet_checkpoint_loaded =
-            !config.resnet50_checkpoint_path.empty() &&
-            std::filesystem::is_regular_file(
-                config.resnet50_checkpoint_path
-            );
+            visual_encoder != nullptr && visual_encoder->loaded() &&
+            inference_visual_encoder != nullptr &&
+            inference_visual_encoder->loaded();
         refresh_replay_stats();
         refresh_parameter_checksum();
+        if (visual_encoder != nullptr) {
+            refresh_resnet_checksum();
+        }
     }
 
     std::vector<DeviceParameter*> all_model_parameters() {
@@ -1936,6 +2397,242 @@ struct CppRecurrentPolicyBackend::Implementation {
             result.push_back(static_cast<float>(value));
         }
         return result;
+    }
+
+    std::filesystem::path resnet_checkpoint_path() const {
+        return config.checkpoint_path.parent_path() /
+            "resnet50_stage4_latest.baseai.ckpt";
+    }
+
+    void save_resnet_checkpoint(const std::filesystem::path& path) {
+        if (visual_encoder == nullptr || resnet_optimizer == nullptr ||
+            !config.checkpoint_writes_enabled || path.empty()) {
+            return;
+        }
+        struct HostTensor {
+            std::string name;
+            std::vector<float> values;
+        };
+        const auto state_tensors = visual_encoder->stage4_state_tensors();
+        const auto parameters = visual_encoder->stage4_parameters();
+        if (parameters.size() != resnet_first_moments.size() ||
+            parameters.size() != resnet_second_moments.size()) {
+            throw std::logic_error("native stage4 optimizer layout mismatch");
+        }
+        std::vector<HostTensor> model_host;
+        model_host.reserve(state_tensors.size());
+        for (const auto& tensor : state_tensors) {
+            model_host.push_back({tensor.name, std::vector<float>(tensor.size)});
+            check_cuda(cudaMemcpyAsync(
+                model_host.back().values.data(), tensor.data,
+                tensor.size * sizeof(float), cudaMemcpyDeviceToHost,
+                stream.raw()
+            ), "download native stage4 checkpoint tensor");
+        }
+        std::vector<HostTensor> optimizer_host;
+        optimizer_host.reserve(parameters.size() * 2U);
+        for (std::size_t index = 0; index < parameters.size(); ++index) {
+            optimizer_host.push_back({
+                "adam.m." + parameters[index].name,
+                std::vector<float>(parameters[index].size),
+            });
+            check_cuda(cudaMemcpyAsync(
+                optimizer_host.back().values.data(),
+                float_data(resnet_first_moments[index]),
+                parameters[index].size * sizeof(float),
+                cudaMemcpyDeviceToHost, stream.raw()
+            ), "download native stage4 Adam first moment");
+            optimizer_host.push_back({
+                "adam.v." + parameters[index].name,
+                std::vector<float>(parameters[index].size),
+            });
+            check_cuda(cudaMemcpyAsync(
+                optimizer_host.back().values.data(),
+                float_data(resnet_second_moments[index]),
+                parameters[index].size * sizeof(float),
+                cudaMemcpyDeviceToHost, stream.raw()
+            ), "download native stage4 Adam second moment");
+        }
+        stream.synchronize();
+
+        base::checkpoint::CheckpointState state;
+        state.global_step = stats.training_updates;
+        state.best_loss = stats.last_loss;
+        state.optimizer.name = "AdamW-stage4";
+        const base::optim::AdamWState optimizer_state =
+            resnet_optimizer->state();
+        state.optimizer.step = optimizer_state.step;
+        state.optimizer.learning_rate = optimizer_state.learning_rate;
+        state.optimizer.weight_decay = optimizer_state.weight_decay;
+        state.optimizer.beta1 = optimizer_state.beta1;
+        state.optimizer.beta2 = optimizer_state.beta2;
+        state.optimizer.epsilon = optimizer_state.epsilon;
+        for (HostTensor& tensor : model_host) {
+            state.model.tensors.push_back({
+                tensor.name, tensor.values.data(), tensor.values.size(),
+                base::checkpoint::DType::Float32,
+            });
+        }
+        for (HostTensor& tensor : optimizer_host) {
+            state.optimizer.tensors.push_back({
+                tensor.name, tensor.values.data(), tensor.values.size(),
+                base::checkpoint::DType::Float32,
+            });
+        }
+        std::filesystem::create_directories(path.parent_path());
+        const std::filesystem::path temporary = path.string() + ".tmp";
+        if (!base::checkpoint::save_checkpoint(temporary.string(), state)) {
+            throw std::runtime_error(
+                "failed to save native stage4 checkpoint: " +
+                temporary.string()
+            );
+        }
+        std::error_code error;
+        std::filesystem::rename(temporary, path, error);
+        if (error) {
+            std::filesystem::remove(path, error);
+            error.clear();
+            std::filesystem::rename(temporary, path, error);
+        }
+        if (error) {
+            throw std::runtime_error(
+                "failed to publish native stage4 checkpoint: " +
+                error.message()
+            );
+        }
+    }
+
+    void load_resnet_checkpoint(const std::filesystem::path& path) {
+        base::checkpoint::CheckpointState state;
+        if (!base::checkpoint::load_checkpoint_metadata(
+                path.string(), state
+            )) {
+            throw std::runtime_error(
+                "failed to read native stage4 checkpoint metadata: " +
+                path.string()
+            );
+        }
+        auto state_tensors = visual_encoder->stage4_state_tensors();
+        const auto parameters = visual_encoder->stage4_parameters();
+        std::unordered_map<std::string, ResNet50NamedDeviceTensor*> model_map;
+        for (auto& tensor : state_tensors) {
+            model_map.emplace(tensor.name, &tensor);
+        }
+        std::unordered_map<std::string, std::size_t> moment1_map;
+        std::unordered_map<std::string, std::size_t> moment2_map;
+        for (std::size_t index = 0; index < parameters.size(); ++index) {
+            moment1_map.emplace("adam.m." + parameters[index].name, index);
+            moment2_map.emplace("adam.v." + parameters[index].name, index);
+        }
+        std::vector<std::vector<float>> model_host(
+            state.model.tensors.size()
+        );
+        std::vector<std::vector<float>> optimizer_host(
+            state.optimizer.tensors.size()
+        );
+        std::size_t model_seen = 0;
+        std::size_t optimizer_seen = 0;
+        for (std::size_t index = 0; index < state.model.tensors.size();
+             ++index) {
+            auto& tensor = state.model.tensors[index];
+            const auto found = model_map.find(tensor.name);
+            if (found == model_map.end() ||
+                tensor.num_elements != found->second->size ||
+                tensor.dtype != base::checkpoint::DType::Float32) {
+                throw std::runtime_error(
+                    "native stage4 checkpoint model layout mismatch: " +
+                    tensor.name
+                );
+            }
+            model_host[index].resize(tensor.num_elements);
+            tensor.data = model_host[index].data();
+            ++model_seen;
+        }
+        for (std::size_t index = 0; index < state.optimizer.tensors.size();
+             ++index) {
+            auto& tensor = state.optimizer.tensors[index];
+            std::size_t parameter_index = parameters.size();
+            if (const auto found = moment1_map.find(tensor.name);
+                found != moment1_map.end()) {
+                parameter_index = found->second;
+            } else if (const auto found = moment2_map.find(tensor.name);
+                       found != moment2_map.end()) {
+                parameter_index = found->second;
+            }
+            if (parameter_index == parameters.size() ||
+                tensor.num_elements != parameters[parameter_index].size ||
+                tensor.dtype != base::checkpoint::DType::Float32) {
+                throw std::runtime_error(
+                    "native stage4 checkpoint optimizer layout mismatch: " +
+                    tensor.name
+                );
+            }
+            optimizer_host[index].resize(tensor.num_elements);
+            tensor.data = optimizer_host[index].data();
+            ++optimizer_seen;
+        }
+        if (model_seen != state_tensors.size() ||
+            optimizer_seen != parameters.size() * 2U ||
+            !base::checkpoint::load_checkpoint_selective(
+                path.string(), state
+            )) {
+            throw std::runtime_error(
+                "native stage4 checkpoint is incomplete: " + path.string()
+            );
+        }
+        for (std::size_t index = 0; index < state.model.tensors.size();
+             ++index) {
+            const auto found = model_map.find(
+                state.model.tensors[index].name
+            );
+            check_cuda(cudaMemcpyAsync(
+                found->second->data, model_host[index].data(),
+                model_host[index].size() * sizeof(float),
+                cudaMemcpyHostToDevice, stream.raw()
+            ), "upload native stage4 checkpoint tensor");
+        }
+        for (std::size_t index = 0; index < state.optimizer.tensors.size();
+             ++index) {
+            const auto& tensor = state.optimizer.tensors[index];
+            if (const auto found = moment1_map.find(tensor.name);
+                found != moment1_map.end()) {
+                check_cuda(cudaMemcpyAsync(
+                    float_data(resnet_first_moments[found->second]),
+                    optimizer_host[index].data(),
+                    optimizer_host[index].size() * sizeof(float),
+                    cudaMemcpyHostToDevice, stream.raw()
+                ), "upload native stage4 Adam first moment");
+            } else {
+                const auto second_found = moment2_map.find(tensor.name);
+                check_cuda(cudaMemcpyAsync(
+                    float_data(
+                        resnet_second_moments[second_found->second]
+                    ),
+                    optimizer_host[index].data(),
+                    optimizer_host[index].size() * sizeof(float),
+                    cudaMemcpyHostToDevice, stream.raw()
+                ), "upload native stage4 Adam second moment");
+            }
+        }
+        resnet_optimizer->load_state({
+            .step = state.optimizer.step,
+            .learning_rate = state.optimizer.learning_rate > 0.0f
+                ? state.optimizer.learning_rate
+                : config.resnet_learning_rate,
+            .weight_decay = state.optimizer.weight_decay >= 0.0f
+                ? state.optimizer.weight_decay : kAdamWeightDecay,
+            .beta1 = state.optimizer.beta1 > 0.0f
+                ? state.optimizer.beta1 : 0.9f,
+            .beta2 = state.optimizer.beta2 > 0.0f
+                ? state.optimizer.beta2 : 0.999f,
+            .epsilon = state.optimizer.epsilon > 0.0f
+                ? state.optimizer.epsilon : 1.0e-8f,
+        });
+        stats.resnet_training_updates = state.optimizer.step;
+        stream.synchronize();
+        visual_encoder->sync_stage4_weights();
+        check_cuda(cudaStreamSynchronize(visual_encoder->stream()),
+                   "synchronize restored native stage4");
     }
 
     void save_checkpoint(const std::filesystem::path& path) {
@@ -2020,6 +2717,9 @@ struct CppRecurrentPolicyBackend::Implementation {
                 "failed to publish native recurrent checkpoint: " +
                 error.message()
             );
+        }
+        if (visual_encoder != nullptr) {
+            save_resnet_checkpoint(resnet_checkpoint_path());
         }
     }
 
@@ -2189,12 +2889,22 @@ struct CppRecurrentPolicyBackend::Implementation {
     Network target_a;
     Network target_b;
     std::unique_ptr<base::optim::AdamW> optimizer;
+    std::unique_ptr<ResNet50FeatureExtractor> visual_encoder;
+    std::unique_ptr<ResNet50FeatureExtractor> inference_visual_encoder;
+    std::unique_ptr<base::optim::AdamW> resnet_optimizer;
+    std::vector<base::Tensor> resnet_first_moments;
+    std::vector<base::Tensor> resnet_second_moments;
+    base::Tensor resnet_projected;
+    base::Tensor resnet_projected_gradient;
+    base::Tensor resnet_feature_gradient;
     ForwardWorkspace inference_a;
     ForwardWorkspace inference_b;
     ForwardWorkspace training_a;
     ForwardWorkspace training_b;
     ForwardWorkspace temporary;
     std::deque<std::vector<__half>> current_sequence;
+    std::shared_ptr<EncodedVisualFrame> current_visual;
+    std::vector<float> cached_visual_feature;
     std::vector<float> current_context;
     std::optional<ActiveTransition> active;
     std::deque<Transition> pending_n_step;
@@ -2876,6 +3586,11 @@ void backward_network(
         float_data(workspace.gradient_q), gradient_q.data(),
         gradient_q.size() * sizeof(float), cudaMemcpyHostToDevice, stream
     ), "upload recurrent Q gradients");
+    check_cuda(cudaMemsetAsync(
+        float_data(workspace.d_sequence), 0,
+        batch.steps * batch.batch * workspace.input_size * sizeof(float),
+        stream
+    ), "zero recurrent input gradients");
 
     const int batch_size = static_cast<int>(batch.batch);
     const int hidden = static_cast<int>(workspace.hidden_size);
@@ -2998,6 +3713,16 @@ void backward_network(
             batch_size,
             gate_size,
             input
+        );
+        row_gemm(
+            cublas,
+            float_data(workspace.d_gates),
+            network.input_weight.values(),
+            float_data(workspace.d_sequence) +
+                static_cast<std::size_t>(step) * batch_size * input,
+            batch_size,
+            input,
+            gate_size
         );
         row_gemm_at_b(
             cublas,

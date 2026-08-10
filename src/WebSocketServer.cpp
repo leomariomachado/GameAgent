@@ -1115,8 +1115,7 @@ void handle_websocket_connection(
                         .trainable_lstm =
                             options.reinforcement_trainable_lstm,
                         .trainable_resnet =
-                            options.reinforcement_trainable_resnet &&
-                            options.reinforcement_backend == "python",
+                            options.reinforcement_trainable_resnet,
                         .temporal_visual_size =
                             static_cast<std::size_t>(
                                 ResNet50FeatureExtractor::kFeatureSize
@@ -4391,12 +4390,11 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
              options_.reinforcement_backend != "cpp" &&
              options_.reinforcement_backend != "python"
          ) ||
-         (
-             options_.reinforcement_trainable_resnet &&
-             (
-                 !options_.reinforcement_trainable_lstm ||
-                 options_.reinforcement_backend != "python" ||
-                 options_.reinforcement_resnet_learning_rate <= 0.0f ||
+                 (
+                     options_.reinforcement_trainable_resnet &&
+                     (
+                         !options_.reinforcement_trainable_lstm ||
+                         options_.reinforcement_resnet_learning_rate <= 0.0f ||
                  options_.reinforcement_resnet_batch_size == 0 ||
                  options_.reinforcement_resnet_update_interval == 0 ||
                  options_.reinforcement_resnet_replay_images == 0
@@ -4500,8 +4498,7 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
         std::cout << "[TEMPORAL] loading "
                   << (
                       options_.reinforcement_learning_enabled &&
-                              options_.reinforcement_trainable_resnet &&
-                              options_.reinforcement_backend == "python"
+                              options_.reinforcement_trainable_resnet
                           ? "external trainable"
                           : "frozen"
                   )
@@ -4527,8 +4524,7 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                     ),
                 .external_visual_encoder =
                     options_.reinforcement_learning_enabled &&
-                    options_.reinforcement_trainable_resnet &&
-                    options_.reinforcement_backend == "python",
+                    options_.reinforcement_trainable_resnet,
             }
         );
         const auto& report = temporal_agent->checkpoint_report();

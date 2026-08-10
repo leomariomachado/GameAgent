@@ -11,9 +11,8 @@
 namespace gameagent {
 
 struct RecurrentPolicyBackendConfig {
-    // Native C++/CUDA is the production default.  The Python sidecar remains
-    // available as a compatibility/reference backend while checkpoints are
-    // migrated and numerical parity is verified.
+    // Native C++/CUDA is the production default and owns stage-4 fine-tuning,
+    // recurrent training, replay and checkpoint persistence in-process.
     std::string backend = "cpp";
     std::filesystem::path service_script;
     std::filesystem::path checkpoint_path;
@@ -103,9 +102,8 @@ struct RecurrentPolicyCloseResult {
     bool training_performed = false;
 };
 
-// Recurrent policy facade.  The native backend owns the trainable LSTM, twin
-// DQN, replay and BaseAI AdamW state in-process.  The former Python sidecar is
-// retained behind GAMEAGENT_RL_BACKEND=python for parity/fallback only.
+// Recurrent policy facade. The production backend owns the trainable ResNet50
+// stage 4, LSTM, twin DQN, replay and BaseAI AdamW state in-process.
 class RecurrentPolicyBackend {
 public:
     explicit RecurrentPolicyBackend(RecurrentPolicyBackendConfig config);

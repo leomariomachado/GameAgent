@@ -939,7 +939,6 @@ struct ReinforcementAgent::Implementation {
                 config.trainable_resnet &&
                 (
                     !config.trainable_lstm ||
-                    config.recurrent_backend != "python" ||
                     config.resnet50_checkpoint_path.empty() ||
                     config.resnet_learning_rate <= 0.0f ||
                     config.resnet_batch_size == 0 ||
@@ -1018,7 +1017,15 @@ struct ReinforcementAgent::Implementation {
         std::size_t index,
         const ActionContext& context
     ) const {
-        const OptionDefinition& option = options()[index];
+        const auto& current_options = options();
+        if (index >= current_options.size()) {
+            throw std::out_of_range(
+                "reinforcement option index " + std::to_string(index) +
+                " exceeds character action count " +
+                std::to_string(current_options.size())
+            );
+        }
+        const OptionDefinition& option = current_options.at(index);
         if (
             disable_cloud_cooldown_options_remaining > 0 &&
             is_disable_cloud_option(option)
@@ -1129,6 +1136,14 @@ struct ReinforcementAgent::Implementation {
                       config.character,
                       config.opponent_character
                   );
+        const auto& current_options = options();
+        if (values.size() != current_options.size()) {
+            throw std::runtime_error(
+                "reinforcement Q/action size mismatch: q=" +
+                std::to_string(values.size()) + " options=" +
+                std::to_string(current_options.size())
+            );
+        }
         std::uniform_real_distribution<float> probability(0.0f, 1.0f);
         std::size_t selected = 0;
         std::string source = "dqn_exploit";
@@ -1175,7 +1190,9 @@ struct ReinforcementAgent::Implementation {
                     candidates.end(),
                     std::back_inserter(projectiles),
                     [&](std::size_t index) {
-                        return is_projectile_option(options()[index]);
+                        return is_projectile_option(
+                            current_options.at(index)
+                        );
                     }
                 );
                 if (!projectiles.empty()) {
@@ -1225,7 +1242,9 @@ struct ReinforcementAgent::Implementation {
                 ) {
                     if (
                         allowed(index) &&
-                        is_projectile_option(options()[index]) &&
+                        is_projectile_option(
+                            current_options.at(index)
+                        ) &&
                         (
                             projectile == options().size() ||
                             values[index] > values[projectile]
@@ -1255,15 +1274,17 @@ struct ReinforcementAgent::Implementation {
         if (sweep_cooldown_options_remaining > 0) {
             --sweep_cooldown_options_remaining;
         }
-        if (is_disable_cloud_option(options()[selected])) {
+        const OptionDefinition& selected_option =
+            current_options.at(selected);
+        if (is_disable_cloud_option(selected_option)) {
             disable_cloud_cooldown_options_remaining =
                 config.disable_cloud_cooldown_options;
         }
-        if (is_throw_option(options()[selected])) {
+        if (is_throw_option(selected_option)) {
             throw_cooldown_options_remaining =
                 config.throw_cooldown_options;
         }
-        if (is_sweep_option(options()[selected])) {
+        if (is_sweep_option(selected_option)) {
             sweep_cooldown_options_remaining =
                 config.sweep_cooldown_options;
         }
@@ -2223,10 +2244,16 @@ ReinforcementDecision ReinforcementAgent::step(
 
     bool trained = false;
     const auto& options = state.options();
+    if (state.active_option.has_value() &&
+        *state.active_option >= options.size()) {
+        throw std::runtime_error(
+            "active reinforcement option is invalid for current character"
+        );
+    }
     const bool option_program_complete =
         state.active_option.has_value() &&
         state.active_step >=
-            options[*state.active_option].states.size();
+            options.at(*state.active_option).states.size();
     const bool option_complete =
         option_program_complete &&
         state.impact_credit_steps_remaining == 0;
@@ -2331,7 +2358,7 @@ ReinforcementDecision ReinforcementAgent::step(
             state.option_elapsed_steps = 0;
             state.impact_credit_steps_total =
                 impact_credit_steps(
-                    options[selected], action_context, state.config
+                    options.at(selected), action_context, state.config
                 );
             state.impact_credit_steps_remaining =
                 state.impact_credit_steps_total;
@@ -2366,7 +2393,7 @@ ReinforcementDecision ReinforcementAgent::step(
             }
         }
         const std::size_t selected = *state.active_option;
-        const OptionDefinition& option = options[selected];
+        const OptionDefinition& option = options.at(selected);
         if (state.active_step < option.states.size()) {
             decision.commands = option.states[state.active_step];
             if (state.active_commands_mirrored) {
@@ -2472,6 +2499,7 @@ void ReinforcementAgent::configure_session(
     state.config.facing = facing;
     state.config.best_checkpoint_path =
         std::move(best_checkpoint_path);
+    state.rebuild_current_option_sets();
 }
 
 void ReinforcementAgent::configure_encounter_stage(

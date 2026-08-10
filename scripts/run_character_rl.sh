@@ -10,14 +10,9 @@ export GAMEAGENT_TEMPORAL_MODEL=1
 export GAMEAGENT_REINFORCEMENT_LEARNING=1
 export GAMEAGENT_RL_BACKEND="${GAMEAGENT_RL_BACKEND:-cpp}"
 export GAMEAGENT_RL_TRAINABLE_LSTM="${GAMEAGENT_RL_TRAINABLE_LSTM:-1}"
-if [[ "${GAMEAGENT_RL_BACKEND}" == "cpp" ]]; then
-  # The native backend trains the LSTM and twin DQN in-process and consumes
-  # the pretrained BaseAI ResNet50 features. Stage-4 fine-tuning remains in
-  # the Python compatibility backend until its C++ backward is validated.
-  export GAMEAGENT_RL_TRAINABLE_RESNET="${GAMEAGENT_RL_TRAINABLE_RESNET:-0}"
-else
-  export GAMEAGENT_RL_TRAINABLE_RESNET="${GAMEAGENT_RL_TRAINABLE_RESNET:-1}"
-fi
+# The production path is fully native: ResNet50 stage 4, LSTM and twin DQN
+# train in C++/CUDA. Every new stage-4 state starts from the ImageNet file.
+export GAMEAGENT_RL_TRAINABLE_RESNET="${GAMEAGENT_RL_TRAINABLE_RESNET:-1}"
 export GAMEAGENT_RL_TRAINING="${GAMEAGENT_RL_TRAINING:-1}"
 export GAMEAGENT_RL_RESUME="${GAMEAGENT_RL_RESUME:-1}"
 export GAMEAGENT_PLAYER_SIDE="${GAMEAGENT_PLAYER_SIDE:-left}"

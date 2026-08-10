@@ -140,7 +140,7 @@ void print_help(const char* executable) {
         << "  --debug-capture-ms MS   Debug JPEG interval (default: 3000)\n"
         << "  --collect-training-data Save every accepted frame for offline training\n"
         << "  --training-capture-dir P Training JPEG/metadata directory\n"
-        << "  --temporal-model        Enable frozen ResNet50 + GPU LSTM features\n"
+        << "  --temporal-model        Enable ResNet50 + GPU LSTM features\n"
         << "  --reinforcement-learning Enable recurrent semi-Markov Double DQN control\n"
         << "  --rl-evaluation         Run RL without updating weights\n"
         << "  --rl-checkpoint-dir P   Shared RL policy checkpoint directory\n"
@@ -860,7 +860,11 @@ int main(int argc, char** argv) {
             << "modelo temporal: "
             << (
                 server_options.temporal_model_enabled
-                    ? "ResNet50 congelada + LSTM GPU"
+                    ? (
+                        server_options.reinforcement_trainable_resnet
+                            ? "ResNet50 stage4 treinavel + LSTM GPU (C++/CUDA)"
+                            : "ResNet50 congelada + LSTM GPU"
+                    )
                     : "desabilitado"
             )
             << '\n'
