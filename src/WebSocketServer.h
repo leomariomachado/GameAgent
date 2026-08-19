@@ -20,6 +20,11 @@ struct WebSocketServerOptions {
     std::size_t persistence_queue_capacity = 256;
     std::chrono::milliseconds decision_interval{50};
     std::chrono::milliseconds failsafe_timeout{200};
+    bool timed_sequences_enabled = true;
+    std::chrono::milliseconds sequence_input_hold{75};
+    std::chrono::milliseconds sequence_neutral_hold{40};
+    std::chrono::milliseconds sequence_final_release{100};
+    std::size_t sequence_actionable_ticks = 2;
     std::chrono::milliseconds reinforcement_reward_log_interval{5000};
     std::optional<std::string> api_token;
     std::optional<std::uint32_t> random_seed;

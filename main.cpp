@@ -133,6 +133,9 @@ void print_help(const char* executable) {
         << "  --persistence-queue N   Async JPEG write queue (default: 256)\n"
         << "  --interval-ms MS        Decision interval (default: 50)\n"
         << "  --failsafe-ms MS        Client release timeout advertised by server (default: 200)\n"
+        << "  GAMEAGENT_TIMED_SEQUENCES=1 enables atomic timed move programs\n"
+        << "  GAMEAGENT_SEQUENCE_INPUT_HOLD_MS=75 sets pressed-step duration\n"
+        << "  GAMEAGENT_SEQUENCE_NEUTRAL_HOLD_MS=40 sets neutral-gap duration\n"
         << "  --max-jpeg-mb MB        Maximum JPEG size (default: 8)\n"
         << "  --metrics-path PATH     JSONL metrics path\n"
         << "  --capture-dir PATH      Optional frame capture directory\n"
@@ -187,6 +190,32 @@ int main(int argc, char** argv) {
         server_options.failsafe_timeout = std::chrono::milliseconds(parse_positive_size(
             environment_or("GAMEAGENT_FAILSAFE_TIMEOUT_MS", "200"), "failsafe timeout"
         ));
+        server_options.timed_sequences_enabled = parse_boolean(
+            environment_or("GAMEAGENT_TIMED_SEQUENCES", "1"),
+            "timed-sequences flag"
+        );
+        server_options.sequence_input_hold = std::chrono::milliseconds(
+            parse_positive_size(
+                environment_or("GAMEAGENT_SEQUENCE_INPUT_HOLD_MS", "75"),
+                "sequence input hold"
+            )
+        );
+        server_options.sequence_neutral_hold = std::chrono::milliseconds(
+            parse_positive_size(
+                environment_or("GAMEAGENT_SEQUENCE_NEUTRAL_HOLD_MS", "40"),
+                "sequence neutral hold"
+            )
+        );
+        server_options.sequence_final_release = std::chrono::milliseconds(
+            parse_positive_size(
+                environment_or("GAMEAGENT_SEQUENCE_FINAL_RELEASE_MS", "100"),
+                "sequence final release"
+            )
+        );
+        server_options.sequence_actionable_ticks = parse_positive_size(
+            environment_or("GAMEAGENT_SEQUENCE_ACTIONABLE_TICKS", "2"),
+            "sequence actionable ticks"
+        );
         server_options.max_jpeg_bytes = parse_megabytes(
             environment_or("GAMEAGENT_MAX_JPEG_MB", "8")
         );

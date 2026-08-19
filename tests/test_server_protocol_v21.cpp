@@ -140,6 +140,56 @@ int main() {
         require(session.mode() == AgentMode::evaluation,
                 "pending evaluation applied at episode boundary");
 
+        const ResetTransition retry_requested = session.request_reset(
+            ResetReason::stream_stalled,
+            813,
+            95,
+            1780000000900,
+            false
+        );
+        require(
+            retry_requested.accepted && session.decisions_blocked(),
+            "recovery reset did not initially block decisions"
+        );
+        const ResetFailed failed = {
+            .metadata = {
+                .request_id = 14,
+                .timestamp_ms = 1780000001000,
+            },
+            .reset_id = 95,
+            .reason = "client save-state load failed",
+        };
+        const ResetTransition failed_result =
+            session.mark_reset_failed(failed);
+        require(
+            failed_result.accepted && !failed_result.duplicate &&
+                failed_result.state == ResetState::failed,
+            "reset failure was not recorded"
+        );
+        require(
+            !session.decisions_blocked(),
+            "failed reset permanently blocked decisions"
+        );
+        const ResetTransition duplicate_failure =
+            session.mark_reset_failed(failed);
+        require(
+            duplicate_failure.accepted && duplicate_failure.duplicate,
+            "duplicate reset failure was not idempotent"
+        );
+        const ResetTransition second_attempt = session.request_reset(
+            ResetReason::stream_stalled,
+            813,
+            96,
+            1780000001100,
+            false
+        );
+        require(
+            second_attempt.accepted &&
+                second_attempt.reset_id == 96 &&
+                session.decisions_blocked(),
+            "new reset was rejected after recoverable failure"
+        );
+
         std::cout << "[PASS] Game Agent server protocol V2.1 state machine passed\n";
         return 0;
     } catch (const std::exception& error) {

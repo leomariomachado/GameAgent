@@ -188,6 +188,54 @@ int main() {
         require_near(terminal.terminal_reward, 5.0f, 0.001f, "round win bonus is inaccurate");
         require_near(terminal.reward, 20.0f, 0.2f, "round win did not include damage and terminal bonus");
 
+        gameagent::FightStateTracker external_tracker({
+            .player_side = gameagent::PlayerSide::left,
+            .valid_frames_to_acquire = 3,
+            .terminal_frames = 2,
+            .round_intro_grace_ms = 100,
+            .round_win_bonus = 10.0f,
+            .round_loss_penalty = 5.0f,
+        });
+        external_tracker.set_external_encounter_lifecycle(true);
+        external_tracker.observe(make_frame(30, 2000, 1.0f, 1.0f));
+        external_tracker.observe(make_frame(31, 2050, 1.0f, 1.0f));
+        external_tracker.observe(make_frame(32, 2100, 1.0f, 1.0f));
+        external_tracker.observe(make_frame(33, 2150, 0.0f, 1.0f));
+        external_tracker.observe(make_frame(34, 2200, 0.0f, 1.0f));
+        auto external_loss = external_tracker.consume(2210);
+        require(
+            external_loss.terminal && external_loss.episode_ended &&
+                external_loss.transition_reason == "round_lost",
+            "external encounter did not commit a detected player loss"
+        );
+        require_near(
+            external_loss.terminal_reward, -5.0f, 0.001f,
+            "external encounter loss penalty is inaccurate"
+        );
+        external_tracker.finish_encounter(false);
+        auto duplicate_external_loss = external_tracker.consume(2220);
+        require(
+            !duplicate_external_loss.terminal &&
+                !duplicate_external_loss.episode_ended &&
+                duplicate_external_loss.terminal_reward == 0.0f,
+            "late client terminal event duplicated the loss penalty"
+        );
+
+        external_tracker.reset();
+        external_tracker.set_external_encounter_lifecycle(true);
+        external_tracker.observe(make_frame(40, 3000, 1.0f, 1.0f));
+        external_tracker.observe(make_frame(41, 3050, 1.0f, 1.0f));
+        external_tracker.observe(make_frame(42, 3100, 1.0f, 1.0f));
+        external_tracker.observe(make_frame(43, 3150, 1.0f, 0.0f));
+        external_tracker.observe(make_frame(44, 3200, 1.0f, 0.0f));
+        auto intermediate_stage = external_tracker.consume(3210);
+        require(
+            !intermediate_stage.terminal &&
+                !intermediate_stage.episode_ended &&
+                intermediate_stage.terminal_reward == 0.0f,
+            "intermediate endurance opponent incorrectly ended encounter"
+        );
+
         gameagent::TrainingResetTracker reset_tracker;
         const gameagent::FightControlSnapshot lost_round{
             .frame_id = 77,

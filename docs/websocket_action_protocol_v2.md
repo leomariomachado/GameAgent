@@ -201,6 +201,16 @@ mode; the top-level `commands` remains authoritative.
 control. Repeating the same array is idempotent and must not generate extra key
 events.
 
+### Atomic timed programs for complex moves
+
+When `timed_sequences_enabled` is advertised, scripted specials, combos and
+other multi-step moves use `action_mode: "timed_sequence"`. The start action
+contains the complete program and per-step durations, allowing the client to
+execute it with a monotonic local scheduler instead of WebSocket arrival
+timing. See [client_timed_sequence_protocol_v2.md](client_timed_sequence_protocol_v2.md)
+for the normative client contract. Primitive actions continue to use
+`action_mode: "state"`.
+
 ## Reinforcement-learning diagnostics and fight gate
 
 When reinforcement mode is enabled, an action may also contain:
@@ -264,11 +274,10 @@ screen-space tracking are estimates, so consumers must check their associated
 confidence. Reward shaping is deliberately limited to consecutive hits,
 extended inactivity and extended corner occupancy.
 
-When
-`control_enabled` is false, the server sends `commands: []` and
-`cancel_pending_sequence: true`. A compliant state-mode client already releases
-all controls when applying that empty state and must still send its normal
-`action_ack`. No new client-side macro queue is introduced.
+When `control_enabled` is false, the server sends `commands: []` and
+`cancel_pending_sequence: true`. The client must cancel any timed program,
+clear its local scheduler and release all controls before sending its normal
+`action_ack`.
 
 Possible `fight_phase` values are `no_hud`, `acquiring`, `round_intro`,
 `active_fight` and `round_end`. Only `active_fight` can carry non-empty RL

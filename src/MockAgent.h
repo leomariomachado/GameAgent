@@ -26,11 +26,13 @@ struct MockMoveDefinition {
 
 struct MockAgentDecision {
     std::vector<int> commands;
+    std::vector<std::vector<int>> sequence_commands;
     std::string move_name;
     std::size_t step_index = 0;
     std::size_t step_count = 0;
     std::string phase;
     std::string action_source;
+    bool sequence_started = false;
 };
 
 std::vector<MockMoveDefinition> make_sub_zero_mock_moves(FighterFacing facing);

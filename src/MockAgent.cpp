@@ -694,6 +694,10 @@ MockAgentDecision MockAgent::infer(
     const MockMoveDefinition& move = moves_[*active_move_];
     MockAgentDecision decision{
         .commands = active_states_[active_step_],
+        .sequence_commands =
+            active_step_ == 0U
+                ? active_states_
+                : std::vector<std::vector<int>>{},
         .move_name = move.name,
         .step_index = active_step_ + 1U,
         .step_count = active_states_.size(),
@@ -702,6 +706,7 @@ MockAgentDecision MockAgent::infer(
                 ? active_phases_[active_step_]
                 : "unspecified",
         .action_source = move.action_source,
+        .sequence_started = active_step_ == 0U,
     };
 
     ++active_step_;

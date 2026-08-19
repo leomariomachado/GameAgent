@@ -419,9 +419,19 @@ int main() {
 
         gameagent::MockAgentDecision decision = agent.infer(observation, history);
         const auto& selected = find_move(curriculum, decision.move_name);
+        require(
+            decision.sequence_started &&
+                decision.sequence_commands == selected.states,
+            "mock did not publish the complete move at sequence start"
+        );
         for (std::size_t step = 0; step < selected.states.size(); ++step) {
             if (step != 0) {
                 decision = agent.infer(observation, history);
+                require(
+                    !decision.sequence_started &&
+                        decision.sequence_commands.empty(),
+                    "mock republished an already-running timed sequence"
+                );
             }
             require(decision.move_name == selected.name,
                     "mock changed move before completing its sequence");

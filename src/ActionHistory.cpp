@@ -34,7 +34,8 @@ void ActionHistory::record_sent(
     std::uint64_t decision_id,
     std::uint64_t based_on_frame_id,
     const std::vector<int>& commands,
-    std::int64_t generated_timestamp_ms
+    std::int64_t generated_timestamp_ms,
+    bool commands_advisory
 ) {
     if (decision_id == 0 || generated_timestamp_ms <= 0) {
         throw std::invalid_argument("sent action has invalid identifiers or timestamp");
@@ -50,6 +51,7 @@ void ActionHistory::record_sent(
         .based_on_frame_id = based_on_frame_id,
         .commands = commands,
         .generated_timestamp_ms = generated_timestamp_ms,
+        .commands_advisory = commands_advisory,
     });
     last_sent_decision_id_ = decision_id;
     while (sent_.size() > capacity_) {
@@ -95,6 +97,7 @@ ActionAcknowledgementResult ActionHistory::acknowledge(
         .applied_timestamp_ms = acknowledgement.applied_timestamp_ms,
         .acknowledgement_received_timestamp_ms = received_timestamp_ms,
         .commands_match = sent_state == applied_state,
+        .commands_advisory = sent->commands_advisory,
     };
     const std::int64_t server_roundtrip_ms =
         received_timestamp_ms - sent->generated_timestamp_ms;
@@ -111,6 +114,7 @@ ActionAcknowledgementResult ActionHistory::acknowledge(
     return {
         .accepted = true,
         .commands_match = record.commands_match,
+        .commands_advisory = record.commands_advisory,
         .reason = {},
         .server_roundtrip_ms = server_roundtrip_ms,
         .applied = std::move(record),

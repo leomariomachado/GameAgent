@@ -733,6 +733,85 @@ int main() {
             "ground-only tactical mask did not complete its sample"
         );
 
+        auto actionable_mask_config = cooldown_config;
+        actionable_mask_config.random_seed = 88317;
+        gameagent::ReinforcementAgent actionable_mask_agent(
+            actionable_mask_config
+        );
+        decision_id = 24000;
+        for (std::size_t sample = 0; sample < 200U; ++sample) {
+            const auto masked = actionable_mask_agent.step({
+                .state = state_a,
+                .action_allowed = true,
+                .episode_started = sample == 0U,
+                .episode_id = 52,
+                .frame_id = decision_id,
+                .decision_id = decision_id,
+                .fighter_distance = 0.40f,
+                .player_x = 0.20f,
+                .opponent_x = 0.70f,
+                .spatial_valid = true,
+                .player_on_ground = true,
+                .opponent_on_ground = true,
+                .player_attacking = sample < 100U,
+                .player_action_stable = sample < 100U,
+            });
+            ++decision_id;
+            require(
+                !masked.scripted_sequence &&
+                    !masked.sequence_started &&
+                    masked.sequence_commands.empty(),
+                "scripted sequence started from an attacking/unstable pose"
+            );
+            actionable_mask_agent.suspend();
+        }
+
+        auto atomic_config = cooldown_config;
+        atomic_config.character = gameagent::FighterCharacter::scorpion;
+        atomic_config.random_seed = 88417;
+        gameagent::ReinforcementAgent atomic_agent(atomic_config);
+        bool observed_atomic_spear = false;
+        decision_id = 26000;
+        for (std::size_t sample = 0;
+             sample < 1000U && !observed_atomic_spear;
+             ++sample) {
+            const auto atomic = atomic_agent.step({
+                .state = state_a,
+                .action_allowed = true,
+                .episode_started = sample == 0U,
+                .episode_id = 53,
+                .frame_id = decision_id,
+                .decision_id = decision_id,
+                .fighter_distance = 0.40f,
+                .player_x = 0.20f,
+                .opponent_x = 0.70f,
+                .spatial_valid = true,
+                .player_on_ground = true,
+                .opponent_on_ground = true,
+                .player_attacking = false,
+                .player_action_stable = true,
+            });
+            if (atomic.option_name == "Arpão") {
+                require(
+                    atomic.scripted_sequence &&
+                        atomic.sequence_started &&
+                        atomic.sequence_id == decision_id &&
+                        atomic.sequence_commands ==
+                            std::vector<std::vector<int>>{
+                                {8}, {}, {8}, {2}, {}, {}
+                            },
+                    "Scorpion spear was not published atomically"
+                );
+                observed_atomic_spear = true;
+            }
+            ++decision_id;
+            atomic_agent.suspend();
+        }
+        require(
+            observed_atomic_spear,
+            "scripted exploration did not expose an atomic Scorpion spear"
+        );
+
         auto facing_config = cooldown_config;
         facing_config.random_seed = 99117;
         gameagent::ReinforcementAgent facing_right_agent(facing_config);

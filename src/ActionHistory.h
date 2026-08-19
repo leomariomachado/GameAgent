@@ -21,11 +21,13 @@ struct AppliedActionRecord {
     std::int64_t applied_timestamp_ms = 0;
     std::int64_t acknowledgement_received_timestamp_ms = 0;
     bool commands_match = false;
+    bool commands_advisory = false;
 };
 
 struct ActionAcknowledgementResult {
     bool accepted = false;
     bool commands_match = false;
+    bool commands_advisory = false;
     std::string reason;
     std::int64_t server_roundtrip_ms = -1;
     AppliedActionRecord applied;
@@ -39,7 +41,8 @@ public:
         std::uint64_t decision_id,
         std::uint64_t based_on_frame_id,
         const std::vector<int>& commands,
-        std::int64_t generated_timestamp_ms
+        std::int64_t generated_timestamp_ms,
+        bool commands_advisory = false
     );
 
     ActionAcknowledgementResult acknowledge(
@@ -59,6 +62,7 @@ private:
         std::uint64_t based_on_frame_id = 0;
         std::vector<int> commands;
         std::int64_t generated_timestamp_ms = 0;
+        bool commands_advisory = false;
     };
 
     const std::size_t capacity_;

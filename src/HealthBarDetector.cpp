@@ -363,10 +363,17 @@ FightControlSnapshot FightStateTracker::observe(const BufferedFrame& frame) {
             terminal_frames_ = 0;
             latest_.action_allowed = true;
         }
-        if (terminal_frames_ >= config_.terminal_frames &&
-            !external_encounter_lifecycle_) {
+        if (terminal_frames_ >= config_.terminal_frames) {
             const bool won = opponent_empty && !player_empty;
             const bool lost = player_empty && !opponent_empty;
+            // Endurance encounters keep their intermediate opponent
+            // transitions under the explicit V2.1 lifecycle. A depleted
+            // player bar is always terminal, though: waiting for a client
+            // encounter_lost event used to turn almost every real loss into
+            // a reward-less hud_lost recovery.
+            if (external_encounter_lifecycle_ && !lost) {
+                return latest_;
+            }
             const float terminal_reward =
                 won ? config_.round_win_bonus :
                 lost ? -config_.round_loss_penalty : 0.0f;

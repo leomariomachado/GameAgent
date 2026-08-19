@@ -328,8 +328,35 @@ int main() {
         require(first_action.value("type", "") == "action", "first response is not an action");
         require(first_action.value("protocol_version", 0) == 2,
                 "action protocol version is not 2");
-        require(first_action.value("action_mode", "") == "state",
-                "action mode is not state");
+        require(first_action.value("action_mode", "") == "timed_sequence",
+                "scripted move did not use timed-sequence mode");
+        require(first_action.value("sequence_status", "") == "start" &&
+                    first_action.value("commands_role", "") ==
+                        "expected_state_only" &&
+                    first_action.contains("timed_sequence"),
+                "timed-sequence start metadata is incomplete");
+        const auto& timed_sequence = first_action.at("timed_sequence");
+        require(
+            timed_sequence.value("sequence_id", 0U) ==
+                    first_action.value("sequence_id", 1U) &&
+                timed_sequence.value("start_policy", "") == "replace" &&
+                timed_sequence.value("clock", "") == "monotonic" &&
+                timed_sequence.value("release_on_complete", false) &&
+                timed_sequence.at("steps").is_array() &&
+                timed_sequence.at("steps").size() ==
+                    first_action.value("mock_steps", 0U),
+            "timed-sequence payload is invalid"
+        );
+        require(
+            timed_sequence.at("steps").front().value(
+                "duration_ms", 0
+            ) == 75 &&
+                timed_sequence.at("steps").back().value(
+                    "duration_ms", 0
+                ) == 100 &&
+                timed_sequence.at("steps").back().at("commands").empty(),
+            "timed-sequence input/release timing is incorrect"
+        );
         require(first_action.value("player_character", "") == "subzero",
                 "legacy connection did not use the Sub-Zero default");
         require(first_action.value("control_interval_ms", 0) == 20,

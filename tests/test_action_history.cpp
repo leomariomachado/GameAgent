@@ -56,9 +56,28 @@ int main() {
         require(history.last_applied_decision_id() == 2,
                 "last applied decision ID is incorrect");
 
+        history.record_sent(3, 102, {8}, 1'070, true);
+        const auto advisory = history.acknowledge(
+            gameagent::ActionAcknowledgement{
+                .decision_id = 3,
+                .applied_timestamp_ms = 1'080,
+                .applied_commands = {2},
+            },
+            1'085
+        );
+        require(
+            advisory.accepted && !advisory.commands_match &&
+                advisory.commands_advisory &&
+                advisory.applied.commands_advisory,
+            "timed-sequence advisory state was not classified correctly"
+        );
+
         const auto latest = history.latest_applied(8);
-        require(latest.size() == 2, "applied history size is incorrect");
-        require(latest.back().commands.empty(), "empty applied state was not retained");
+        require(latest.size() == 3, "applied history size is incorrect");
+        require(
+            latest.back().commands == std::vector<int>{2},
+            "actual timed-sequence state was not retained"
+        );
 
         std::cout << "[PASS] GameAgent applied action history test passed\n";
         return 0;

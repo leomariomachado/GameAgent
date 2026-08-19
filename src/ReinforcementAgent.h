@@ -130,16 +130,20 @@ struct ReinforcementStepInput {
     bool spatial_valid = false;
     bool player_on_ground = true;
     bool opponent_on_ground = true;
+    bool player_attacking = false;
     bool opponent_attacking = false;
+    bool player_action_stable = true;
 };
 
 struct ReinforcementDecision {
     std::vector<int> commands;
+    std::vector<std::vector<int>> sequence_commands;
     std::string option_name = "release";
     std::string selection_source = "fight_gate";
     std::size_t option_index = 0;
     std::size_t option_step = 0;
     std::size_t option_steps = 0;
+    std::uint64_t sequence_id = 0;
     float epsilon = 0.0f;
     float selected_q = 0.0f;
     float reward_consumed = 0.0f;
@@ -151,6 +155,8 @@ struct ReinforcementDecision {
     std::size_t throw_cooldown_remaining = 0;
     std::size_t sweep_cooldown_remaining = 0;
     bool commands_mirrored = false;
+    bool scripted_sequence = false;
+    bool sequence_started = false;
     bool greedy_training_episode = false;
     float episode_return = 0.0f;
     float training_loss = 0.0f;

@@ -166,7 +166,9 @@ struct ActionContext {
     bool spatial_valid = false;
     bool player_on_ground = true;
     bool opponent_on_ground = true;
+    bool player_attacking = false;
     bool opponent_attacking = false;
+    bool player_action_stable = true;
 
     [[nodiscard]] bool player_is_right_of_opponent() const {
         return player_x > opponent_x;
@@ -1051,6 +1053,19 @@ struct ReinforcementAgent::Implementation {
             (!context.player_on_ground || !context.opponent_on_ground)) {
             return false;
         }
+        // Scripted inputs must begin from a stable pose. Starting a special
+        // during another attack or in the air makes the game discard its
+        // opening directions even when transport and mirroring are correct.
+        if (
+            option.scripted &&
+            (
+                !context.player_on_ground ||
+                context.player_attacking ||
+                !context.player_action_stable
+            )
+        ) {
+            return false;
+        }
         if (context.spatial_valid && is_throw_option(option) &&
             context.distance > config.throw_max_distance) {
             return false;
@@ -1167,14 +1182,14 @@ struct ReinforcementAgent::Implementation {
             const bool choose_scripted =
                 probability(random_engine) <
                     config.scripted_exploration_probability;
-            const auto& unfiltered_candidates = choose_scripted
+            const auto& preferred_candidates = choose_scripted
                 ? scripted_options
                 : primitive_options;
             std::vector<std::size_t> candidates;
-            candidates.reserve(unfiltered_candidates.size());
+            candidates.reserve(preferred_candidates.size());
             std::copy_if(
-                unfiltered_candidates.begin(),
-                unfiltered_candidates.end(),
+                preferred_candidates.begin(),
+                preferred_candidates.end(),
                 std::back_inserter(candidates),
                 allowed
             );
@@ -1200,6 +1215,20 @@ struct ReinforcementAgent::Implementation {
                 }
             }
             if (candidates.empty()) {
+                const auto& fallback_candidates = choose_scripted
+                    ? primitive_options
+                    : scripted_options;
+                std::copy_if(
+                    fallback_candidates.begin(),
+                    fallback_candidates.end(),
+                    std::back_inserter(candidates),
+                    allowed
+                );
+                source = choose_scripted
+                    ? "epsilon_primitive_actionability_fallback"
+                    : "epsilon_scripted_fallback";
+            }
+            if (candidates.empty()) {
                 throw std::runtime_error(
                     "reinforcement tactical mask removed every candidate"
                 );
@@ -1208,9 +1237,11 @@ struct ReinforcementAgent::Implementation {
                 0, candidates.size() - 1U
             );
             selected = candidates[distribution(random_engine)];
-            source = choose_scripted
-                ? "epsilon_scripted"
-                : "epsilon_primitive";
+            if (source == "dqn_exploit") {
+                source = choose_scripted
+                    ? "epsilon_scripted"
+                    : "epsilon_primitive";
+            }
         } else {
             selected = options().size();
             for (std::size_t index = 0; index < values.size(); ++index) {
@@ -1660,6 +1691,7 @@ struct ReinforcementAgent::Implementation {
         }
         if (option_start_state.size() != config.input_size) {
             active_option.reset();
+            active_sequence_id = 0;
             return false;
         }
         bool trained = false;
@@ -1705,6 +1737,7 @@ struct ReinforcementAgent::Implementation {
             }
         }
         active_option.reset();
+        active_sequence_id = 0;
         active_step = 0;
         option_start_state.clear();
         option_reward = 0.0f;
@@ -2062,6 +2095,7 @@ struct ReinforcementAgent::Implementation {
     std::vector<ReplayTransition> replay;
     std::size_t replay_next = 0;
     std::optional<std::size_t> active_option;
+    std::uint64_t active_sequence_id = 0;
     std::size_t active_step = 0;
     std::vector<float> option_start_state;
     float option_reward = 0.0f;
@@ -2168,7 +2202,9 @@ ReinforcementDecision ReinforcementAgent::step(
         .spatial_valid = input.spatial_valid,
         .player_on_ground = input.player_on_ground,
         .opponent_on_ground = input.opponent_on_ground,
+        .player_attacking = input.player_attacking,
         .opponent_attacking = input.opponent_attacking,
+        .player_action_stable = input.player_action_stable,
     };
     if (
         state.recurrent_backend != nullptr &&
@@ -2338,6 +2374,7 @@ ReinforcementDecision ReinforcementAgent::step(
         input.action_allowed &&
         input.state.size() == state.config.input_size
     ) {
+        bool option_started = false;
         if (!state.active_option.has_value()) {
             float q = 0.0f;
             std::size_t allowed_options = 0;
@@ -2349,6 +2386,8 @@ ReinforcementDecision ReinforcementAgent::step(
                     allowed_options
                 );
             state.active_option = selected;
+            state.active_sequence_id = input.decision_id;
+            option_started = true;
             state.active_step = 0;
             state.option_start_state.assign(
                 input.state.begin(), input.state.end()
@@ -2394,6 +2433,23 @@ ReinforcementDecision ReinforcementAgent::step(
         }
         const std::size_t selected = *state.active_option;
         const OptionDefinition& option = options.at(selected);
+        decision.sequence_id = state.active_sequence_id;
+        decision.scripted_sequence = option.scripted;
+        decision.sequence_started = option.scripted && option_started;
+        if (decision.sequence_started) {
+            decision.sequence_commands = option.states;
+            if (state.active_commands_mirrored) {
+                for (auto& sequence_state : decision.sequence_commands) {
+                    for (int& command : sequence_state) {
+                        if (command == kLeft) {
+                            command = kRight;
+                        } else if (command == kRight) {
+                            command = kLeft;
+                        }
+                    }
+                }
+            }
+        }
         if (state.active_step < option.states.size()) {
             decision.commands = option.states[state.active_step];
             if (state.active_commands_mirrored) {
@@ -2548,6 +2604,7 @@ void ReinforcementAgent::set_exploration(
 void ReinforcementAgent::suspend() {
     auto& state = *implementation_;
     state.active_option.reset();
+    state.active_sequence_id = 0;
     state.active_step = 0;
     state.option_start_state.clear();
     state.option_reward = 0.0f;
@@ -2564,6 +2621,7 @@ void ReinforcementAgent::suspend() {
 void ReinforcementAgent::reset_episode(bool save_checkpoint) {
     auto& state = *implementation_;
     state.active_option.reset();
+    state.active_sequence_id = 0;
     state.active_step = 0;
     state.option_start_state.clear();
     state.option_reward = 0.0f;

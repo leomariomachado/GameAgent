@@ -504,6 +504,12 @@ ResetTransition ServerSessionV21::mark_reset_failed(
         result.message = "reset_failed does not match active reset";
         return result;
     }
+    if (reset_state_ == ResetState::failed) {
+        result.accepted = true;
+        result.duplicate = true;
+        result.message = failure.reason;
+        return result;
+    }
     reset_state_ = ResetState::failed;
     result.accepted = true;
     result.state = reset_state_;
@@ -568,7 +574,8 @@ std::uint64_t ServerSessionV21::active_reset_id() const {
 ResetReason ServerSessionV21::reset_reason() const { return reset_reason_; }
 bool ServerSessionV21::decisions_blocked() const {
     return reset_state_ != ResetState::idle &&
-        reset_state_ != ResetState::completed;
+        reset_state_ != ResetState::completed &&
+        reset_state_ != ResetState::failed;
 }
 bool ServerSessionV21::consume_health_delta_ignore() {
     return std::exchange(ignore_opponent_health_delta_, false);

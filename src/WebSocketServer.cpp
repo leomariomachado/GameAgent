@@ -50,6 +50,62 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr std::size_t kMaximumHeaderBytes = 64U * 1024U;
 constexpr std::size_t kMaximumFragmentOverhead = 1024U * 1024U;
+// A reset blocks normal actions.  Waiting for a second failed reset used to
+// leave the client without controls for roughly 15-20 seconds.  One timeout
+// is enough evidence that the reset handshake cannot make progress on the
+// current socket; reconnecting is the safe recovery because it also releases
+// every controller input.
+constexpr std::size_t kResetFailuresBeforeReconnect = 1U;
+
+bool is_direction_command(int command) {
+    return command >= 6 && command <= 9;
+}
+
+std::vector<int> keep_terminal_direction_pressed(
+    const std::vector<int>& previous,
+    const std::vector<int>& current
+) {
+    if (previous.empty() || current.empty() ||
+        std::ranges::any_of(current, is_direction_command)) {
+        return current;
+    }
+
+    std::vector<int> result;
+    for (int command : previous) {
+        if (is_direction_command(command)) {
+            result.push_back(command);
+        }
+    }
+    if (result.empty()) {
+        return current;
+    }
+    result.insert(result.end(), current.begin(), current.end());
+    return result;
+}
+
+bool requires_external_encounter_lifecycle(
+    const EncounterConfiguration& encounter
+) {
+    return encounter.type == EncounterType::endurance &&
+        encounter.current_stage + 1U < encounter.opponent_count;
+}
+
+ResetReason terminal_reset_reason_from_trigger(
+    std::string_view trigger_reason,
+    bool compatibility_recovery
+) {
+    if (trigger_reason == "round_won" ||
+        trigger_reason == "encounter_won") {
+        return ResetReason::encounter_completed;
+    }
+    if (trigger_reason == "round_lost" ||
+        trigger_reason == "encounter_lost") {
+        return ResetReason::player_defeated;
+    }
+    return compatibility_recovery
+        ? ResetReason::stream_stalled
+        : ResetReason::invalid_game_state;
+}
 
 struct SocketHandle {
     int value = -1;
@@ -91,6 +147,55 @@ std::int64_t epoch_milliseconds() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()
     ).count();
+}
+
+nlohmann::json make_timed_sequence_payload(
+    std::uint64_t sequence_id,
+    std::string_view option_name,
+    const std::vector<std::vector<int>>& commands,
+    const WebSocketServerOptions& options
+) {
+    nlohmann::json steps = nlohmann::json::array();
+    std::int64_t total_duration_ms = 0;
+    for (std::size_t index = 0; index < commands.size(); ++index) {
+        const std::vector<int> applied_commands = index == 0U
+            ? commands[index]
+            : keep_terminal_direction_pressed(
+                  commands[index - 1U], commands[index]
+              );
+        const bool final_step = index + 1U == commands.size();
+        const std::int64_t duration_ms = final_step
+            ? options.sequence_final_release.count()
+            : commands[index].empty()
+                ? options.sequence_neutral_hold.count()
+                : options.sequence_input_hold.count();
+        steps.push_back({
+            {"step_index", index + 1U},
+            {"commands", applied_commands},
+            {"duration_ms", duration_ms},
+        });
+        total_duration_ms += duration_ms;
+    }
+    if (commands.empty() || !commands.back().empty()) {
+        const std::int64_t duration_ms =
+            options.sequence_final_release.count();
+        steps.push_back({
+            {"step_index", steps.size() + 1U},
+            {"commands", nlohmann::json::array()},
+            {"duration_ms", duration_ms},
+        });
+        total_duration_ms += duration_ms;
+    }
+    return {
+        {"sequence_id", sequence_id},
+        {"option_name", option_name},
+        {"start_policy", "replace"},
+        {"clock", "monotonic"},
+        {"release_on_complete", true},
+        {"step_count", steps.size()},
+        {"total_duration_ms", total_duration_ms},
+        {"steps", std::move(steps)},
+    };
 }
 
 std::string lowercase(std::string value) {
@@ -1264,6 +1369,19 @@ void handle_websocket_connection(
                 {"rl_checkpoint_interval_episodes",
                  options
                      .reinforcement_checkpoint_interval_episodes},
+                {"timed_sequences_enabled",
+                 options.timed_sequences_enabled},
+                {"supported_action_modes", {
+                    "state", "timed_sequence"
+                }},
+                {"sequence_input_hold_ms",
+                 options.sequence_input_hold.count()},
+                {"sequence_neutral_hold_ms",
+                 options.sequence_neutral_hold.count()},
+                {"sequence_final_release_ms",
+                 options.sequence_final_release.count()},
+                {"sequence_actionable_ticks",
+                 options.sequence_actionable_ticks},
                 {"training_reset_state_enabled",
                  reinforcement_agent != nullptr &&
                      options.training_reset_state_enabled},
@@ -1551,7 +1669,11 @@ void handle_websocket_connection(
             .round_loss_penalty =
                 options.reinforcement_round_loss_penalty,
         });
-        fight_tracker->set_external_encounter_lifecycle(v21_session);
+        fight_tracker->set_external_encounter_lifecycle(
+            v21_session && requires_external_encounter_lifecycle(
+                encounter_configuration
+            )
+        );
         combat_tracker = std::make_unique<CombatStateTracker>(
             CombatStateConfig{
                 .player_side = player_is_left
@@ -1767,6 +1889,7 @@ void handle_websocket_connection(
         EpisodeStatistics episode_statistics;
         std::map<std::string, ModeStatistics> mode_statistics;
         ResetStatistics reset_statistics;
+        std::size_t consecutive_reset_failures = 0;
         const auto statistics_key = [&](AgentMode mode) {
             std::ostringstream key;
             key << agent_mode_slug(mode) << ':'
@@ -1803,6 +1926,46 @@ void handle_websocket_connection(
             marker["connection_id"] = connection_id;
             metrics.write(marker);
         };
+        const auto require_client_reconnect = [&] (
+            std::uint64_t reset_id,
+            std::uint64_t episode_id,
+            std::string_view failure_reason
+        ) {
+            const std::int64_t timestamp_ms = epoch_milliseconds();
+            nlohmann::json message{
+                {"protocol_version", kServerProtocolVersion},
+                {"request_id", telemetry_request_id++},
+                {"timestamp_ms", timestamp_ms},
+                {"type", "reconnect_required"},
+                {"reason", "reset_recovery_exhausted"},
+                {"failure_reason", failure_reason},
+                {"reset_id", reset_id},
+                {"episode_id", episode_id},
+                {"reconnect_after_ms", 1000},
+                {"release_controls", true},
+                {"discard_inflight_action", true},
+                {"must_reconfigure_session", true},
+            };
+            writer.send_json(message);
+            message["event"] = "reconnect_required";
+            message["connection_id"] = connection_id;
+            message["consecutive_reset_failures"] =
+                consecutive_reset_failures;
+            metrics.write(message);
+            std::cerr
+                << "[TRAINING_RESET] connection=" << connection_id
+                << " reset_id=" << reset_id
+                << " recovery exhausted after "
+                << consecutive_reset_failures
+                << " failures; forcing WebSocket reconnect\n";
+            send_close(
+                writer,
+                1012,
+                "reset recovery requires reconnect"
+            );
+            connected.store(false);
+            shutdown(socket, SHUT_RDWR);
+        };
         std::uint64_t handled_repeated_frame_reset_generation = 0;
         bool inference_repeated_frame_paused = false;
         auto next_training_reset_retry = Clock::time_point::min();
@@ -1822,6 +1985,7 @@ void handle_websocket_connection(
         float neutral_penalty_log_accumulator = 0.0f;
         std::uint64_t reward_log_decisions = 0;
         std::uint64_t reward_log_active_decisions = 0;
+        std::size_t player_actionable_ticks = 0;
         while (!thread_stop.stop_requested() && connected.load() && !stop_requested.load()) {
             std::this_thread::sleep_until(next_decision);
             if (thread_stop.stop_requested() || !connected.load() || stop_requested.load()) {
@@ -1843,6 +2007,10 @@ void handle_websocket_connection(
                 opponent_health_delta_ignored = false;
                 latest_stage_bonus = 0.0f;
                 bool stage_completed_this_tick = false;
+                bool reset_reconnect_required = false;
+                std::uint64_t reconnect_reset_id = 0;
+                std::uint64_t reconnect_episode_id = 0;
+                std::string reconnect_failure_reason;
                 std::deque<ClientTextMessage> control_messages;
                 {
                     std::lock_guard lock(control_queue_mutex);
@@ -1871,6 +2039,11 @@ void handle_websocket_connection(
                             );
                             encounter_configuration.current_stage =
                                 request.current_stage;
+                            fight_tracker->set_external_encounter_lifecycle(
+                                requires_external_encounter_lifecycle(
+                                    encounter_configuration
+                                )
+                            );
                             reinforcement_agent->configure_encounter_stage(
                                 transition.current_opponent
                             );
@@ -1960,6 +2133,12 @@ void handle_websocket_connection(
                                 encounter_configuration.current_stage =
                                     static_cast<std::uint8_t>(
                                         request.encounter_stage + 1U
+                                    );
+                                fight_tracker
+                                    ->set_external_encounter_lifecycle(
+                                        requires_external_encounter_lifecycle(
+                                            encounter_configuration
+                                        )
                                     );
                                 reinforcement_agent
                                     ->configure_encounter_stage(
@@ -2220,6 +2399,7 @@ void handle_websocket_connection(
                         }
                         if (result.accepted && !result.duplicate) {
                             ++reset_statistics.resets_completed;
+                            consecutive_reset_failures = 0;
                             if (pending_training_reset_request.has_value()) {
                                 const float latency = static_cast<float>(
                                     epoch_milliseconds() -
@@ -2243,8 +2423,11 @@ void handle_websocket_connection(
                             reinforcement_agent->set_agent_mode(effective_mode);
                             temporal_agent->reset();
                             fight_tracker->reset();
+                            encounter_configuration.current_stage = 0;
                             fight_tracker->set_external_encounter_lifecycle(
-                                true
+                                requires_external_encounter_lifecycle(
+                                    encounter_configuration
+                                )
                             );
                             if (training_reset_tracker != nullptr) {
                                 training_reset_tracker->reset();
@@ -2255,7 +2438,6 @@ void handle_websocket_connection(
                             active_opponent_character.store(
                                 encounter_configuration.opponents[0]
                             );
-                            encounter_configuration.current_stage = 0;
                             reinforcement_agent->configure_encounter_stage(
                                 encounter_configuration.opponents[0]
                             );
@@ -2295,8 +2477,42 @@ void handle_websocket_connection(
                                 failure
                             );
                         }
-                        if (result.accepted) {
+                        if (result.accepted && !result.duplicate) {
                             ++reset_statistics.resets_failed;
+                            ++consecutive_reset_failures;
+                            pending_training_reset_request.reset();
+                            pending_training_reset_detected_reason.reset();
+                            pending_training_reset_attempt = 0;
+                            next_training_reset_retry =
+                                Clock::time_point::min();
+                            metrics.write({
+                                {"protocol_version",
+                                 kServerProtocolVersion},
+                                {"event", "reset_failed"},
+                                {"timestamp_ms", epoch_milliseconds()},
+                                {"connection_id", connection_id},
+                                {"reset_id", failure.reset_id},
+                                {"episode_id", result.episode_id},
+                                {"reason", failure.reason},
+                                {"recoverable", true},
+                                {"retry_after_ms",
+                                 options
+                                     .training_reset_non_fight_timeout
+                                     .count()},
+                            });
+                            std::cerr
+                                << "[TRAINING_RESET] reset_id="
+                                << failure.reset_id
+                                << " connection=" << connection_id
+                                << " failed: " << failure.reason
+                                << "; recovery enabled\n";
+                            if (consecutive_reset_failures >=
+                                kResetFailuresBeforeReconnect) {
+                                reset_reconnect_required = true;
+                                reconnect_reset_id = failure.reset_id;
+                                reconnect_episode_id = result.episode_id;
+                                reconnect_failure_reason = failure.reason;
+                            }
                         }
                         writer.send_json({
                             {"protocol_version", kServerProtocolVersion},
@@ -2307,9 +2523,20 @@ void handle_websocket_connection(
                                 : "error"},
                             {"reset_id", failure.reset_id},
                             {"state", reset_state_slug(result.state)},
+                            {"recoverable", result.accepted},
+                            {"retry_after_ms",
+                             options.training_reset_non_fight_timeout.count()},
                             {"message", result.message},
                         });
                     }
+                }
+                if (reset_reconnect_required) {
+                    require_client_reconnect(
+                        reconnect_reset_id,
+                        reconnect_episode_id,
+                        reconnect_failure_reason
+                    );
+                    break;
                 }
                 if (v21_session) {
                     ResetTransition timeout;
@@ -2325,6 +2552,12 @@ void handle_websocket_connection(
                         timeout.state == ResetState::failed) {
                         ++reset_statistics.resets_failed;
                         ++reset_statistics.reset_timeouts;
+                        ++consecutive_reset_failures;
+                        pending_training_reset_request.reset();
+                        pending_training_reset_detected_reason.reset();
+                        pending_training_reset_attempt = 0;
+                        next_training_reset_retry =
+                            Clock::time_point::min();
                         writer.send_json({
                             {"protocol_version", kServerProtocolVersion},
                             {"request_id", telemetry_request_id++},
@@ -2333,7 +2566,31 @@ void handle_websocket_connection(
                             {"reset_id", timeout.reset_id},
                             {"episode_id", timeout.episode_id},
                             {"reason", timeout.message},
+                            {"recoverable", true},
+                            {"retry_after_ms",
+                             options.training_reset_non_fight_timeout.count()},
                         });
+                        metrics.write({
+                            {"protocol_version", kServerProtocolVersion},
+                            {"event", "reset_timeout"},
+                            {"timestamp_ms", decision_tick_ms},
+                            {"connection_id", connection_id},
+                            {"reset_id", timeout.reset_id},
+                            {"episode_id", timeout.episode_id},
+                            {"reason", timeout.message},
+                            {"recoverable", true},
+                            {"retry_after_ms",
+                             options.training_reset_non_fight_timeout.count()},
+                        });
+                        if (consecutive_reset_failures >=
+                            kResetFailuresBeforeReconnect) {
+                            require_client_reconnect(
+                                timeout.reset_id,
+                                timeout.episode_id,
+                                timeout.message
+                            );
+                            break;
+                        }
                     }
                 }
                 FightControlSnapshot fight;
@@ -2435,6 +2692,21 @@ void handle_websocket_connection(
                     : pending_training_reset_request.has_value() ||
                         last_training_reset_id.load() >
                             last_training_reset_ack_id.load();
+                const bool player_actionable_now =
+                    fight.action_allowed && combat.spatial_valid &&
+                    combat.player_on_ground && !combat.player_attacking &&
+                    !repeated_frame_paused && !training_reset_pending;
+                if (player_actionable_now) {
+                    player_actionable_ticks = std::min(
+                        player_actionable_ticks + 1U,
+                        options.sequence_actionable_ticks
+                    );
+                } else {
+                    player_actionable_ticks = 0;
+                }
+                const bool player_action_stable =
+                    player_actionable_ticks >=
+                        options.sequence_actionable_ticks;
                 std::optional<TemporalAgentOutput> temporal_output;
                 const bool temporal_control_allowed =
                     (
@@ -2520,8 +2792,10 @@ void handle_websocket_connection(
                             .spatial_valid = combat.spatial_valid,
                             .player_on_ground = combat.player_on_ground,
                             .opponent_on_ground = combat.opponent_on_ground,
+                            .player_attacking = combat.player_attacking,
                             .opponent_attacking =
                                 combat.opponent_attacking,
+                            .player_action_stable = player_action_stable,
                         });
                         commands = reinforcement_decision.commands;
                     } catch (const std::exception& error) {
@@ -2887,11 +3161,56 @@ void handle_websocket_connection(
                     }
                 }
 
+                const bool timed_sequence_active =
+                    options.timed_sequences_enabled &&
+                    (
+                        reinforcement_agent != nullptr
+                            ? reinforcement_decision.scripted_sequence
+                            : mock_decision.step_count > 0U
+                    );
+                const bool timed_sequence_started =
+                    timed_sequence_active &&
+                    (
+                        reinforcement_agent != nullptr
+                            ? reinforcement_decision.sequence_started
+                            : mock_decision.sequence_started
+                    );
+                const std::uint64_t timed_sequence_id =
+                    reinforcement_agent != nullptr
+                        ? reinforcement_decision.sequence_id
+                        : current_decision_id -
+                            static_cast<std::uint64_t>(
+                                mock_decision.step_index - 1U
+                            );
+                const std::string_view timed_sequence_name =
+                    reinforcement_agent != nullptr
+                        ? std::string_view(
+                              reinforcement_decision.option_name
+                          )
+                        : std::string_view(mock_decision.move_name);
+                const auto& timed_sequence_commands =
+                    reinforcement_agent != nullptr
+                        ? reinforcement_decision.sequence_commands
+                        : mock_decision.sequence_commands;
+
                 nlohmann::json response{
                     {"protocol_version", kActionProtocolVersion},
                     {"request_id", telemetry_request_id++},
                     {"type", "action"},
                     {"action_mode", kActionMode},
+                    {"supported_action_modes", {
+                        "state", "timed_sequence"
+                    }},
+                    {"timed_sequences_enabled",
+                     options.timed_sequences_enabled},
+                    {"sequence_input_hold_ms",
+                     options.sequence_input_hold.count()},
+                    {"sequence_neutral_hold_ms",
+                     options.sequence_neutral_hold.count()},
+                    {"sequence_final_release_ms",
+                     options.sequence_final_release.count()},
+                    {"sequence_actionable_ticks",
+                     options.sequence_actionable_ticks},
                     {"player_character",
                      fighter_character_slug(player_character)},
                     {"opponent_character",
@@ -2955,6 +3274,24 @@ void handle_websocket_connection(
                         {"persistence_errors", persistence_errors.load()},
                     }},
                 };
+                if (timed_sequence_active) {
+                    response["action_mode"] = "timed_sequence";
+                    response["sequence_id"] = timed_sequence_id;
+                    response["sequence_status"] =
+                        timed_sequence_started ? "start" : "running";
+                    response["commands_role"] = "expected_state_only";
+                    if (timed_sequence_started) {
+                        response["timed_sequence"] =
+                            make_timed_sequence_payload(
+                                timed_sequence_id,
+                                timed_sequence_name,
+                                timed_sequence_commands,
+                                options
+                            );
+                    }
+                } else {
+                    response["commands_role"] = "apply_immediately";
+                }
                 if (reinforcement_agent != nullptr) {
                     const ReinforcementAgentStats rl_stats =
                         reinforcement_agent->stats();
@@ -3301,7 +3638,8 @@ void handle_websocket_connection(
                         current_decision_id,
                         latest->frame_id,
                         commands,
-                        now_ms
+                        now_ms,
+                        timed_sequence_active
                     );
                     if (!writer.send_json(response)) {
                         connected.store(false);
@@ -3547,12 +3885,12 @@ void handle_websocket_connection(
                     if (v21_session) {
                         ResetReason reason =
                             pending_terminal_reset_reason.value_or(
-                                compatibility_recovery
-                                    ? ResetReason::stream_stalled
-                                    : ResetReason::invalid_game_state
+                                terminal_reset_reason_from_trigger(
+                                    training_reset_trigger->reason,
+                                    compatibility_recovery
+                                )
                             );
                         const bool terminal_committed =
-                            pending_terminal_reset_reason.has_value() &&
                             fight.episode_ended && fight.terminal;
                         ResetTransition reset_transition;
                         {
@@ -3637,12 +3975,22 @@ void handle_websocket_connection(
                     pending_terminal_reset_reason.reset();
                 }
                 const auto reset_send_now = Clock::now();
+                const bool reset_waiting_for_ack = [&] {
+                    if (!v21_session) {
+                        return true;
+                    }
+                    std::lock_guard lock(protocol_session_mutex);
+                    const ResetState state = protocol_session.reset_state();
+                    return state == ResetState::requested ||
+                        state == ResetState::command_sent ||
+                        state == ResetState::client_executing;
+                }();
                 if (
                     pending_training_reset_request.has_value() &&
+                    reset_waiting_for_ack &&
                     (
                         created_training_reset ||
-                        (!v21_session &&
-                         reset_send_now >= next_training_reset_retry)
+                        reset_send_now >= next_training_reset_retry
                     )
                 ) {
                     nlohmann::json reset_request =
@@ -4049,6 +4397,8 @@ void handle_websocket_connection(
                                  result.applied.based_on_frame_id},
                                 {"applied_commands", result.applied.commands},
                                 {"commands_match", result.commands_match},
+                                {"commands_advisory",
+                                 result.commands_advisory},
                                 {"generated_timestamp_ms",
                                  result.applied.generated_timestamp_ms},
                                 {"applied_timestamp_ms",
@@ -4059,7 +4409,8 @@ void handle_websocket_connection(
                                 {"server_roundtrip_ms",
                                  result.server_roundtrip_ms},
                             });
-                            if (!result.commands_match) {
+                            if (!result.commands_match &&
+                                !result.commands_advisory) {
                                 std::cerr
                                     << "[ACTION_ACK] connection=" << connection_id
                                     << " decision="
@@ -4342,6 +4693,10 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
         options_.persistence_queue_capacity == 0 ||
         options_.max_jpeg_bytes == 0 ||
         options_.decision_interval.count() <= 0 || options_.failsafe_timeout.count() <= 0 ||
+        options_.sequence_input_hold.count() <= 0 ||
+        options_.sequence_neutral_hold.count() <= 0 ||
+        options_.sequence_final_release.count() <= 0 ||
+        options_.sequence_actionable_ticks == 0 ||
         options_.reinforcement_reward_log_interval.count() <= 0 ||
         options_.training_reset_non_fight_timeout.count() <= 0 ||
         options_.reset_ack_timeout.count() <= 0 ||
@@ -4610,6 +4965,19 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                     {"websocket_path", "/ws"},
                     {"protocol_version", kActionProtocolVersion},
                     {"action_mode", kActionMode},
+                    {"supported_action_modes", {
+                        "state", "timed_sequence"
+                    }},
+                    {"timed_sequences_enabled",
+                     options_.timed_sequences_enabled},
+                    {"sequence_input_hold_ms",
+                     options_.sequence_input_hold.count()},
+                    {"sequence_neutral_hold_ms",
+                     options_.sequence_neutral_hold.count()},
+                    {"sequence_final_release_ms",
+                     options_.sequence_final_release.count()},
+                    {"sequence_actionable_ticks",
+                     options_.sequence_actionable_ticks},
                     {"decision_hz", 1000.0 / options_.decision_interval.count()},
                     {"control_interval_ms", options_.decision_interval.count()},
                     {"failsafe_timeout_ms", options_.failsafe_timeout.count()},

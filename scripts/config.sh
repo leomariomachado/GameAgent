@@ -23,11 +23,11 @@ dpkg -l | grep nccl
 watch -n 1 nvidia-smi
 
 rsync -avz --delete \
--e "ssh -p 38293 -i ~/.ssh/id_ed25519" \
+-e "ssh -p 25295 -i ~/.ssh/id_ed25519" \
 ~/CLionProjects/BaseAI/ \
-root@213.173.110.21:/tmp/BaseAI/
+root@213.173.110.237:/tmp/BaseAI/
 
 rsync -avz --delete \
--e "ssh -p 38293 -i ~/.ssh/id_ed25519" \
+-e "ssh -p 19851 -i ~/.ssh/id_ed25519" \
 ~/CLionProjects/GameAgent/ \
-root@213.173.110.21:/tmp/GameAgent/
+root@213.173.111.12:/tmp/GameAgent/
