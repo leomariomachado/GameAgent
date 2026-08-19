@@ -109,7 +109,8 @@ class TrainingResetTracker {
 public:
     explicit TrainingResetTracker(
         bool reset_after_round_win = false,
-        std::int64_t non_fight_timeout_ms = 5000
+        std::int64_t non_fight_timeout_ms = 5000,
+        std::int64_t round_intro_timeout_ms = 15000
     );
     [[nodiscard]] std::optional<TrainingResetTrigger> observe(
         const FightControlSnapshot& fight,
@@ -120,6 +121,7 @@ public:
 private:
     bool reset_after_round_win_ = false;
     std::int64_t non_fight_timeout_ms_ = 5000;
+    std::int64_t round_intro_timeout_ms_ = 15000;
     std::optional<std::int64_t> non_fight_since_ms_;
     std::uint64_t last_reset_episode_id_ = 0;
 };

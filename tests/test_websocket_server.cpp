@@ -190,7 +190,7 @@ nlohmann::json receive_json_frame(int socket_fd) {
     return nlohmann::json::parse(payload.begin(), payload.end());
 }
 
-nlohmann::json send_one_frame_and_receive_action(int socket_fd, std::uint64_t frame_id) {
+void send_one_frame(int socket_fd, std::uint64_t frame_id) {
     constexpr std::string_view jpeg_base64 =
         "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/2wBDAQMDAwQDBAgEBAgQCwkLEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBD/wAARCAACAAIDAREAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAAB//EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAH/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AIi2L3//Z";
     const auto jpeg = gameagent::decode_base64(jpeg_base64);
@@ -199,7 +199,40 @@ nlohmann::json send_one_frame_and_receive_action(int socket_fd, std::uint64_t fr
     ).count();
     const auto envelope = gameagent::make_binary_frame_envelope(frame_id, now_ms, jpeg);
     send_masked_frame(socket_fd, 0x2U, envelope);
-    return receive_json_frame(socket_fd);
+}
+
+nlohmann::json receive_message_type(
+    int socket_fd,
+    std::string_view expected_type,
+    int maximum_messages = 50
+) {
+    for (int attempt = 0; attempt < maximum_messages; ++attempt) {
+        nlohmann::json message = receive_json_frame(socket_fd);
+        if (message.value("type", "") == expected_type) {
+            return message;
+        }
+    }
+    throw std::runtime_error(
+        "expected WebSocket message was not received: " +
+        std::string(expected_type)
+    );
+}
+
+nlohmann::json send_one_frame_and_receive_action(
+    int socket_fd,
+    std::uint64_t frame_id
+) {
+    send_one_frame(socket_fd, frame_id);
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        nlohmann::json message = receive_json_frame(socket_fd);
+        if (message.value("type", "") == "action" &&
+            message.value("frame_id", 0U) == frame_id) {
+            return message;
+        }
+    }
+    throw std::runtime_error(
+        "action for submitted frame was not received"
+    );
 }
 
 void send_action_acknowledgement(
@@ -307,6 +340,10 @@ int main() {
             .failsafe_timeout = std::chrono::milliseconds(100),
             .api_token = "test-secret",
             .random_seed = 12345U,
+            .frame_stream_stall_timeout =
+                std::chrono::milliseconds(250),
+            .frame_stream_recovery_interval =
+                std::chrono::milliseconds(50),
             .metrics_path = root / "metrics.jsonl",
             .capture_directory = root / "captures",
             .save_frames = true,
@@ -337,9 +374,14 @@ int main() {
                 "timed-sequence start metadata is incomplete");
         const auto& timed_sequence = first_action.at("timed_sequence");
         require(
-            timed_sequence.value("sequence_id", 0U) ==
+            timed_sequence.value("version", 0) == 2 &&
+                timed_sequence.value("sequence_id", 0U) ==
                     first_action.value("sequence_id", 1U) &&
                 timed_sequence.value("start_policy", "") == "replace" &&
+                timed_sequence.value("step_semantics", "") ==
+                    "exact_controller_state" &&
+                timed_sequence.value("transition_policy", "") ==
+                    "replace_state" &&
                 timed_sequence.value("clock", "") == "monotonic" &&
                 timed_sequence.value("release_on_complete", false) &&
                 timed_sequence.at("steps").is_array() &&
@@ -348,9 +390,20 @@ int main() {
             "timed-sequence payload is invalid"
         );
         require(
+            first_action.value("timed_sequence_version", 0) == 2 &&
+                first_action.value("timed_sequence_step_semantics", "") ==
+                    "exact_controller_state",
+            "timed-sequence V2 capability was not announced"
+        );
+        require(
             timed_sequence.at("steps").front().value(
                 "duration_ms", 0
             ) == 75 &&
+                timed_sequence.at("steps").front().value("apply", "") ==
+                    "replace_state" &&
+                !timed_sequence.at("steps").front().value(
+                    "state_kind", ""
+                ).empty() &&
                 timed_sequence.at("steps").back().value(
                     "duration_ms", 0
                 ) == 100 &&
@@ -410,6 +463,33 @@ int main() {
             "confirmed action history size was not exposed"
         );
         send_action_acknowledgement(first_client, action_after_first_ack);
+        const nlohmann::json stream_recovery = receive_message_type(
+            first_client,
+            "frame_stream_recovery"
+        );
+        require(
+            stream_recovery.value("recovery_id", 0U) == 1U &&
+                stream_recovery.value("reason", "") ==
+                    "no_new_frames" &&
+                stream_recovery.value("last_frame_id", 0U) == 13U &&
+                stream_recovery.value(
+                    "restart_capture_pipeline", false
+                ) &&
+                stream_recovery.value("preserve_websocket", false) &&
+                !stream_recovery.value("ack_required", true),
+            "stalled frame stream did not request in-place recovery"
+        );
+        send_one_frame(first_client, 14U);
+        const nlohmann::json stream_resumed = receive_message_type(
+            first_client,
+            "frame_stream_resumed"
+        );
+        require(
+            stream_resumed.value("recovery_id", 0U) == 1U &&
+                stream_resumed.value("frame_id", 0U) == 14U &&
+                stream_resumed.value("websocket_preserved", false),
+            "fresh frame did not recover the existing WebSocket session"
+        );
         close_websocket(first_client);
         first_client = -1;
 
@@ -442,6 +522,15 @@ int main() {
                 session_ack.value(
                     "training_reset_non_fight_timeout_ms", 0
                 ) == 5000 &&
+                session_ack.value(
+                    "training_reset_round_intro_timeout_ms", 0
+                ) == 15000 &&
+                session_ack.value(
+                    "frame_stream_stall_timeout_ms", 0
+                ) == 250 &&
+                session_ack.value(
+                    "frame_stream_recovery_interval_ms", 0
+                ) == 50 &&
                 session_ack.value(
                     "repeated_frame_pause_ms", 0
                 ) == 2000 &&
@@ -498,6 +587,13 @@ int main() {
                 "accepted action acknowledgement was not recorded");
         require(metrics_text.find(R"("commands_match":true)") != std::string::npos,
                 "acknowledged applied commands did not match the sent state");
+        require(
+            metrics_text.find(R"("event":"frame_stream_stalled")") !=
+                    std::string::npos &&
+                metrics_text.find(R"("event":"frame_stream_resumed")") !=
+                    std::string::npos,
+            "frame-stream recovery lifecycle was not recorded"
+        );
         const std::filesystem::path capture_session =
             root / "captures" / ("session_" + std::to_string(getpid()));
         require(

@@ -575,12 +575,16 @@ void FightStateTracker::reset() {
 
 TrainingResetTracker::TrainingResetTracker(
     bool reset_after_round_win,
-    std::int64_t non_fight_timeout_ms
+    std::int64_t non_fight_timeout_ms,
+    std::int64_t round_intro_timeout_ms
 ) : reset_after_round_win_(reset_after_round_win),
-    non_fight_timeout_ms_(non_fight_timeout_ms) {
-    if (non_fight_timeout_ms_ <= 0) {
+    non_fight_timeout_ms_(non_fight_timeout_ms),
+    round_intro_timeout_ms_(round_intro_timeout_ms) {
+    if (non_fight_timeout_ms_ <= 0 ||
+        round_intro_timeout_ms_ < non_fight_timeout_ms_) {
         throw std::invalid_argument(
-            "non-fight reset timeout must be positive"
+            "reset timeouts must be positive and round-intro timeout "
+            "must not be shorter than the general non-fight timeout"
         );
     }
 }
@@ -620,7 +624,11 @@ std::optional<TrainingResetTrigger> TrainingResetTracker::observe(
         non_fight_since_ms_ = now_ms;
         return std::nullopt;
     }
-    if (now_ms - *non_fight_since_ms_ < non_fight_timeout_ms_) {
+    const std::int64_t timeout_ms =
+        fight.phase == FightPhase::round_intro
+            ? round_intro_timeout_ms_
+            : non_fight_timeout_ms_;
+    if (now_ms - *non_fight_since_ms_ < timeout_ms) {
         return std::nullopt;
     }
     non_fight_since_ms_ = now_ms;

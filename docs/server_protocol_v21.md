@@ -161,6 +161,46 @@ The client may request a non-terminal reset using `request_reset` with one of
 `manual`, `invalid_game_state`, `stream_stalled` or `stuck`. Such an episode is
 aborted and does not count as a win or loss.
 
+## In-place frame-stream recovery
+
+The frame stream has a separate watchdog. If the WebSocket remains connected
+but no new binary JPEG envelope arrives for
+`frame_stream_stall_timeout_ms` (2000 ms by default), the server releases
+controls and periodically sends:
+
+```json
+{
+  "protocol_version": 2,
+  "type": "frame_stream_recovery",
+  "recovery_id": 7,
+  "reason": "no_new_frames",
+  "last_frame_id": 812,
+  "frame_age_ms": 2051,
+  "attempt": 1,
+  "restart_capture_pipeline": true,
+  "clear_pending_frames": true,
+  "preserve_websocket": true,
+  "release_controls": true,
+  "cancel_pending_sequence": true,
+  "ack_required": false
+}
+```
+
+The client must restart only its capture/encoding/frame-sender pipeline,
+clear queued stale frames and continue on the same WebSocket. It must not
+reconfigure the session, reload a save state or reconnect. The operation is
+idempotent by `recovery_id`; retries only ensure delivery and must not create
+additional workers.
+
+The server observes recovery directly from the next fresh frame. It then
+sends `frame_stream_resumed` with the same `recovery_id` and resumes normal
+inference after fresh temporal observations are available. No explicit ACK is
+required.
+
+Normal `round_intro` is not considered stalled after only five seconds. It
+uses `training_reset_round_intro_timeout_ms` (15000 ms by default), while
+menus and other non-fight states retain the regular 5000 ms watchdog.
+
 ## Server output
 
 At 10 Hz the action stream includes encounter context, effective mode,

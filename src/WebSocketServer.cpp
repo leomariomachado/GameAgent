@@ -57,29 +57,92 @@ constexpr std::size_t kMaximumFragmentOverhead = 1024U * 1024U;
 // every controller input.
 constexpr std::size_t kResetFailuresBeforeReconnect = 1U;
 
-bool is_direction_command(int command) {
-    return command >= 6 && command <= 9;
+std::string displayed_action_name(
+    std::string_view base_name,
+    bool mirrored
+) {
+    std::string result(base_name);
+    if (mirrored && !result.empty() && result != "release") {
+        result += " (E)";
+    }
+    return result;
 }
 
-std::vector<int> keep_terminal_direction_pressed(
-    const std::vector<int>& previous,
-    const std::vector<int>& current
-) {
-    if (previous.empty() || current.empty() ||
-        std::ranges::any_of(current, is_direction_command)) {
-        return current;
+std::string_view controller_state_kind(const std::vector<int>& commands) {
+    if (commands.empty()) {
+        return "neutral";
     }
+    const bool has_direction = std::ranges::any_of(commands, [](int command) {
+        return command >= 6 && command <= 9;
+    });
+    const bool has_button = std::ranges::any_of(commands, [](int command) {
+        return command >= 0 && command <= 5;
+    });
+    if (has_direction && has_button) {
+        return "direction_button_chord";
+    }
+    return has_direction ? "direction" : "buttons";
+}
 
-    std::vector<int> result;
-    for (int command : previous) {
-        if (is_direction_command(command)) {
-            result.push_back(command);
+// The reinforcement checkpoint fingerprints its compact option programs.  The
+// controller program sent to a client is intentionally a separate, explicit
+// representation: a special's terminal direction-button chord is declared by
+// the move profile, rather than inferred by the transport from adjacent steps.
+struct TimedChordStep {
+    std::string_view option_prefix;
+    std::size_t command_step;
+    std::size_t direction_step;
+};
+
+bool has_option_prefix(std::string_view option_name, std::string_view prefix) {
+    return option_name == prefix ||
+        (option_name.size() > prefix.size() &&
+         option_name.starts_with(prefix) && option_name[prefix.size()] == ' ');
+}
+
+std::vector<std::vector<int>> make_explicit_controller_program(
+    std::string_view option_name,
+    const std::vector<std::vector<int>>& compact_program
+) {
+    static constexpr std::array<TimedChordStep, 13> kChordSteps{{
+        {"Congelar", 2U, 1U},
+        {"Clone de Gelo", 2U, 1U},
+        {"Chuva de Gelo (Frente)", 2U, 1U},
+        {"Chuva de Gelo (Perto)", 3U, 2U},
+        {"Arremesso de Sombra", 3U, 2U},
+        {"Nuvem de Desativação", 2U, 1U},
+        {"Arpão", 3U, 2U},
+        {"Soco Teleportado (Aéreo)", 5U, 4U},
+        {"Soco Teleportado", 2U, 1U},
+        {"Bola de Fogo (Aérea)", 6U, 5U},
+        {"Bola de Fogo", 3U, 2U},
+        {"Grito", 5U, 4U},
+        {"Levitar", 4U, 3U},
+    }};
+
+    std::vector<std::vector<int>> result = compact_program;
+    for (const TimedChordStep& chord : kChordSteps) {
+        if (!has_option_prefix(option_name, chord.option_prefix)) {
+            continue;
         }
+        if (chord.command_step >= result.size() ||
+            chord.direction_step >= result.size()) {
+            throw std::logic_error(
+                "timed controller program does not match its move profile"
+            );
+        }
+        for (int command : result[chord.direction_step]) {
+            if (command < 6 || command > 9 ||
+                std::ranges::find(result[chord.command_step], command) !=
+                    result[chord.command_step].end()) {
+                continue;
+            }
+            result[chord.command_step].insert(
+                result[chord.command_step].begin(), command
+            );
+        }
+        break;
     }
-    if (result.empty()) {
-        return current;
-    }
-    result.insert(result.end(), current.begin(), current.end());
     return result;
 }
 
@@ -155,41 +218,45 @@ nlohmann::json make_timed_sequence_payload(
     const std::vector<std::vector<int>>& commands,
     const WebSocketServerOptions& options
 ) {
+    const std::vector<std::vector<int>> controller_program =
+        make_explicit_controller_program(option_name, commands);
     nlohmann::json steps = nlohmann::json::array();
     std::int64_t total_duration_ms = 0;
-    for (std::size_t index = 0; index < commands.size(); ++index) {
-        const std::vector<int> applied_commands = index == 0U
-            ? commands[index]
-            : keep_terminal_direction_pressed(
-                  commands[index - 1U], commands[index]
-              );
-        const bool final_step = index + 1U == commands.size();
+    for (std::size_t index = 0; index < controller_program.size(); ++index) {
+        const bool final_step = index + 1U == controller_program.size();
         const std::int64_t duration_ms = final_step
             ? options.sequence_final_release.count()
-            : commands[index].empty()
+            : controller_program[index].empty()
                 ? options.sequence_neutral_hold.count()
                 : options.sequence_input_hold.count();
         steps.push_back({
             {"step_index", index + 1U},
-            {"commands", applied_commands},
+            {"commands", controller_program[index]},
+            {"state_kind", controller_state_kind(controller_program[index])},
+            {"apply", "replace_state"},
             {"duration_ms", duration_ms},
         });
         total_duration_ms += duration_ms;
     }
-    if (commands.empty() || !commands.back().empty()) {
+    if (controller_program.empty() || !controller_program.back().empty()) {
         const std::int64_t duration_ms =
             options.sequence_final_release.count();
         steps.push_back({
             {"step_index", steps.size() + 1U},
             {"commands", nlohmann::json::array()},
+            {"state_kind", "neutral"},
+            {"apply", "replace_state"},
             {"duration_ms", duration_ms},
         });
         total_duration_ms += duration_ms;
     }
     return {
+        {"version", 2},
         {"sequence_id", sequence_id},
         {"option_name", option_name},
         {"start_policy", "replace"},
+        {"step_semantics", "exact_controller_state"},
+        {"transition_policy", "replace_state"},
         {"clock", "monotonic"},
         {"release_on_complete", true},
         {"step_count", steps.size()},
@@ -1371,6 +1438,9 @@ void handle_websocket_connection(
                      .reinforcement_checkpoint_interval_episodes},
                 {"timed_sequences_enabled",
                  options.timed_sequences_enabled},
+                {"timed_sequence_version", 2},
+                {"timed_sequence_step_semantics",
+                 "exact_controller_state"},
                 {"supported_action_modes", {
                     "state", "timed_sequence"
                 }},
@@ -1387,6 +1457,12 @@ void handle_websocket_connection(
                      options.training_reset_state_enabled},
                 {"training_reset_non_fight_timeout_ms",
                  options.training_reset_non_fight_timeout.count()},
+                {"training_reset_round_intro_timeout_ms",
+                 options.training_reset_round_intro_timeout.count()},
+                {"frame_stream_stall_timeout_ms",
+                 options.frame_stream_stall_timeout.count()},
+                {"frame_stream_recovery_interval_ms",
+                 options.frame_stream_recovery_interval.count()},
                 {"repeated_frame_pause_ms",
                  options.repeated_frame_pause_timeout.count()},
                 {"repeated_frame_reset_ms",
@@ -1584,6 +1660,12 @@ void handle_websocket_connection(
              options.training_reset_state_enabled},
         {"training_reset_non_fight_timeout_ms",
          options.training_reset_non_fight_timeout.count()},
+        {"training_reset_round_intro_timeout_ms",
+         options.training_reset_round_intro_timeout.count()},
+        {"frame_stream_stall_timeout_ms",
+         options.frame_stream_stall_timeout.count()},
+        {"frame_stream_recovery_interval_ms",
+         options.frame_stream_recovery_interval.count()},
         {"repeated_frame_pause_ms",
          options.repeated_frame_pause_timeout.count()},
         {"repeated_frame_reset_ms",
@@ -1696,7 +1778,8 @@ void handle_websocket_connection(
             training_reset_tracker =
                 std::make_unique<TrainingResetTracker>(
                     !options.reinforcement_training_enabled,
-                    options.training_reset_non_fight_timeout.count()
+                    options.training_reset_non_fight_timeout.count(),
+                    options.training_reset_round_intro_timeout.count()
                 );
         }
         reinforcement_agent->reset_episode(false);
@@ -1971,6 +2054,12 @@ void handle_websocket_connection(
         auto next_training_reset_retry = Clock::time_point::min();
         const auto training_reset_retry_interval =
             std::chrono::milliseconds(500);
+        bool frame_stream_recovery_active = false;
+        std::uint64_t frame_stream_recovery_id = 0;
+        std::uint64_t frame_stream_recovery_last_frame_id = 0;
+        std::size_t frame_stream_recovery_attempt = 0;
+        std::int64_t frame_stream_recovery_started_ms = 0;
+        auto next_frame_stream_recovery = Clock::time_point::min();
         auto next_reward_log =
             Clock::now() + options.reinforcement_reward_log_interval;
         float reward_log_accumulator = 0.0f;
@@ -2994,7 +3083,10 @@ void handle_websocket_connection(
                             << reinforcement_decision
                                    .greedy_training_episode
                             << " option=\""
-                            << reinforcement_decision.option_name << '"'
+                            << displayed_action_name(
+                                   reinforcement_decision.option_name,
+                                   reinforcement_decision.commands_mirrored
+                               ) << '"'
                             << "\n\n" << std::flush;
                         reward_log_accumulator = 0.0f;
                         terminal_reward_log_accumulator = 0.0f;
@@ -3023,6 +3115,97 @@ void handle_websocket_connection(
                     : -1;
                 const std::int64_t server_frame_age_ms =
                     now_ms - latest->received_timestamp_ms;
+                std::optional<nlohmann::json>
+                    frame_stream_control_message;
+                const bool frame_stream_stalled =
+                    server_frame_age_ms >=
+                        options.frame_stream_stall_timeout.count();
+                if (frame_stream_stalled) {
+                    if (!frame_stream_recovery_active) {
+                        frame_stream_recovery_active = true;
+                        ++frame_stream_recovery_id;
+                        frame_stream_recovery_last_frame_id =
+                            latest->frame_id;
+                        frame_stream_recovery_attempt = 0;
+                        frame_stream_recovery_started_ms = now_ms;
+                        next_frame_stream_recovery =
+                            Clock::time_point::min();
+                        if (temporal_agent != nullptr) {
+                            temporal_agent->reset();
+                        }
+                        if (reinforcement_agent != nullptr) {
+                            reinforcement_agent->suspend();
+                        }
+                        metrics.write({
+                            {"protocol_version", kServerProtocolVersion},
+                            {"event", "frame_stream_stalled"},
+                            {"timestamp_ms", now_ms},
+                            {"connection_id", connection_id},
+                            {"recovery_id", frame_stream_recovery_id},
+                            {"last_frame_id", latest->frame_id},
+                            {"frame_age_ms", server_frame_age_ms},
+                        });
+                        std::cerr
+                            << "[FRAME_STREAM] connection=" << connection_id
+                            << " recovery_id=" << frame_stream_recovery_id
+                            << " stalled at frame=" << latest->frame_id
+                            << " age_ms=" << server_frame_age_ms
+                            << "; requesting in-place capture restart\n";
+                    }
+                    const auto recovery_now = Clock::now();
+                    if (recovery_now >= next_frame_stream_recovery) {
+                        ++frame_stream_recovery_attempt;
+                        frame_stream_control_message = nlohmann::json{
+                            {"protocol_version", kServerProtocolVersion},
+                            {"request_id", telemetry_request_id++},
+                            {"timestamp_ms", now_ms},
+                            {"type", "frame_stream_recovery"},
+                            {"recovery_id", frame_stream_recovery_id},
+                            {"reason", "no_new_frames"},
+                            {"last_frame_id",
+                             frame_stream_recovery_last_frame_id},
+                            {"frame_age_ms", server_frame_age_ms},
+                            {"attempt", frame_stream_recovery_attempt},
+                            {"restart_capture_pipeline", true},
+                            {"clear_pending_frames", true},
+                            {"preserve_websocket", true},
+                            {"release_controls", true},
+                            {"cancel_pending_sequence", true},
+                            {"ack_required", false},
+                        };
+                        next_frame_stream_recovery = recovery_now +
+                            options.frame_stream_recovery_interval;
+                    }
+                } else if (frame_stream_recovery_active) {
+                    const std::int64_t stalled_duration_ms =
+                        now_ms - frame_stream_recovery_started_ms;
+                    frame_stream_recovery_active = false;
+                    frame_stream_recovery_attempt = 0;
+                    frame_stream_control_message = nlohmann::json{
+                        {"protocol_version", kServerProtocolVersion},
+                        {"request_id", telemetry_request_id++},
+                        {"timestamp_ms", now_ms},
+                        {"type", "frame_stream_resumed"},
+                        {"recovery_id", frame_stream_recovery_id},
+                        {"frame_id", latest->frame_id},
+                        {"stalled_duration_ms", stalled_duration_ms},
+                        {"websocket_preserved", true},
+                    };
+                    metrics.write({
+                        {"protocol_version", kServerProtocolVersion},
+                        {"event", "frame_stream_resumed"},
+                        {"timestamp_ms", now_ms},
+                        {"connection_id", connection_id},
+                        {"recovery_id", frame_stream_recovery_id},
+                        {"frame_id", latest->frame_id},
+                        {"stalled_duration_ms", stalled_duration_ms},
+                    });
+                    std::cout
+                        << "[FRAME_STREAM] connection=" << connection_id
+                        << " recovery_id=" << frame_stream_recovery_id
+                        << " resumed at frame=" << latest->frame_id
+                        << " after_ms=" << stalled_duration_ms << '\n';
+                }
                 std::vector<std::uint64_t> frame_ids;
                 frame_ids.reserve(observation.size());
                 for (const auto& frame : observation) {
@@ -3182,12 +3365,13 @@ void handle_websocket_connection(
                             static_cast<std::uint64_t>(
                                 mock_decision.step_index - 1U
                             );
-                const std::string_view timed_sequence_name =
+                const std::string timed_sequence_name =
                     reinforcement_agent != nullptr
-                        ? std::string_view(
-                              reinforcement_decision.option_name
+                        ? displayed_action_name(
+                              reinforcement_decision.option_name,
+                              reinforcement_decision.commands_mirrored
                           )
-                        : std::string_view(mock_decision.move_name);
+                        : mock_decision.move_name;
                 const auto& timed_sequence_commands =
                     reinforcement_agent != nullptr
                         ? reinforcement_decision.sequence_commands
@@ -3203,6 +3387,9 @@ void handle_websocket_connection(
                     }},
                     {"timed_sequences_enabled",
                      options.timed_sequences_enabled},
+                    {"timed_sequence_version", 2},
+                    {"timed_sequence_step_semantics",
+                     "exact_controller_state"},
                     {"sequence_input_hold_ms",
                      options.sequence_input_hold.count()},
                     {"sequence_neutral_hold_ms",
@@ -3249,6 +3436,12 @@ void handle_websocket_connection(
                     {"metrics", {
                         {"frame_latency_ms", latency_ms},
                         {"server_frame_age_ms", server_frame_age_ms},
+                        {"frame_stream_stalled", frame_stream_stalled},
+                        {"frame_stream_recovery_active",
+                         frame_stream_recovery_active},
+                        {"frame_stream_recovery_id",
+                         frame_stream_recovery_active
+                            ? frame_stream_recovery_id : 0U},
                         {"inference_ms", inference_ms},
                         {"buffer_size", buffer.size()},
                         {"frames_received", received_frames.load()},
@@ -3363,7 +3556,11 @@ void handle_websocket_connection(
                         {"episode_return",
                          reinforcement_decision.episode_return},
                     };
-                    response["rl_option"] =
+                    response["rl_option"] = displayed_action_name(
+                        reinforcement_decision.option_name,
+                        reinforcement_decision.commands_mirrored
+                    );
+                    response["rl_option_base"] =
                         reinforcement_decision.option_name;
                     response["rl_option_index"] =
                         reinforcement_decision.option_index;
@@ -3760,7 +3957,14 @@ void handle_websocket_connection(
                         {"epsilon_decay_progress",
                          epsilon_decay_progress},
                         {"reward", response["reward_breakdown"]},
-                        {"option_name", reinforcement_decision.option_name},
+                        {"option_name", displayed_action_name(
+                            reinforcement_decision.option_name,
+                            reinforcement_decision.commands_mirrored
+                        )},
+                        {"option_name_base",
+                         reinforcement_decision.option_name},
+                        {"commands_mirrored",
+                         reinforcement_decision.commands_mirrored},
                         {"selection_source",
                          reinforcement_decision.selection_source},
                         {"selected_q", reinforcement_decision.selected_q},
@@ -4051,6 +4255,19 @@ void handle_websocket_connection(
                         << " operation=load_training_state\n\n"
                         << std::flush;
                 }
+                if (frame_stream_control_message.has_value()) {
+                    if (!writer.send_json(*frame_stream_control_message)) {
+                        connected.store(false);
+                        shutdown(socket, SHUT_RDWR);
+                        break;
+                    }
+                    nlohmann::json stream_metric =
+                        *frame_stream_control_message;
+                    stream_metric["event"] =
+                        stream_metric.at("type").get<std::string>();
+                    stream_metric["connection_id"] = connection_id;
+                    metrics.write(stream_metric);
+                }
                 if (decision_id == 1 || decision_id % 20U == 0U) {
                     std::cout << "[DECISION] connection=" << connection_id
                               << " character="
@@ -4106,7 +4323,10 @@ void handle_websocket_connection(
                             << " repeated_frame_ms="
                             << repeated_frame_duration_ms.load()
                             << " option=\""
-                            << reinforcement_decision.option_name << '"'
+                            << displayed_action_name(
+                                   reinforcement_decision.option_name,
+                                   reinforcement_decision.commands_mirrored
+                               ) << '"'
                             << " step="
                             << reinforcement_decision.option_step << '/'
                             << reinforcement_decision.option_steps;
@@ -4699,8 +4919,12 @@ WebSocketServer::WebSocketServer(WebSocketServerOptions options)
         options_.sequence_actionable_ticks == 0 ||
         options_.reinforcement_reward_log_interval.count() <= 0 ||
         options_.training_reset_non_fight_timeout.count() <= 0 ||
+        options_.training_reset_round_intro_timeout <
+            options_.training_reset_non_fight_timeout ||
         options_.reset_ack_timeout.count() <= 0 ||
         options_.reset_ready_timeout.count() <= 0 ||
+        options_.frame_stream_stall_timeout.count() <= 0 ||
+        options_.frame_stream_recovery_interval.count() <= 0 ||
         options_.repeated_frame_pause_timeout.count() <= 0 ||
         options_.repeated_frame_reset_timeout.count() <= 0 ||
         options_.debug_capture_interval.count() <= 0 ||
@@ -4970,6 +5194,9 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                     }},
                     {"timed_sequences_enabled",
                      options_.timed_sequences_enabled},
+                    {"timed_sequence_version", 2},
+                    {"timed_sequence_step_semantics",
+                     "exact_controller_state"},
                     {"sequence_input_hold_ms",
                      options_.sequence_input_hold.count()},
                     {"sequence_neutral_hold_ms",
@@ -5114,6 +5341,13 @@ int WebSocketServer::run(const std::atomic_bool& stop_requested) {
                     {"training_reset_non_fight_timeout_ms",
                      options_
                          .training_reset_non_fight_timeout.count()},
+                    {"training_reset_round_intro_timeout_ms",
+                     options_
+                         .training_reset_round_intro_timeout.count()},
+                    {"frame_stream_stall_timeout_ms",
+                     options_.frame_stream_stall_timeout.count()},
+                    {"frame_stream_recovery_interval_ms",
+                     options_.frame_stream_recovery_interval.count()},
                     {"repeated_frame_pause_ms",
                      options_.repeated_frame_pause_timeout.count()},
                     {"repeated_frame_reset_ms",

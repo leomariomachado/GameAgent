@@ -39,8 +39,11 @@ struct WebSocketServerOptions {
     bool reinforcement_trainable_resnet = false;
     bool training_reset_state_enabled = true;
     std::chrono::milliseconds training_reset_non_fight_timeout{5000};
+    std::chrono::milliseconds training_reset_round_intro_timeout{15000};
     std::chrono::milliseconds reset_ack_timeout{5000};
     std::chrono::milliseconds reset_ready_timeout{10000};
+    std::chrono::milliseconds frame_stream_stall_timeout{2000};
+    std::chrono::milliseconds frame_stream_recovery_interval{500};
     std::chrono::milliseconds repeated_frame_pause_timeout{2000};
     std::chrono::milliseconds repeated_frame_reset_timeout{3000};
     bool player_is_left = true;

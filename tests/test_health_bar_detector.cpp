@@ -306,8 +306,9 @@ int main() {
         non_fight.phase = gameagent::FightPhase::round_intro;
         require(
             !watchdog.observe(non_fight, 25100).has_value() &&
-                watchdog.observe(non_fight, 30100).has_value(),
-            "active fight did not reset the non-fight watchdog window"
+                !watchdog.observe(non_fight, 40099).has_value() &&
+                watchdog.observe(non_fight, 40100).has_value(),
+            "round intro did not use its longer recovery window"
         );
 
         tracker.observe(make_frame(21, 1600, 0.0f, 0.0f, false));

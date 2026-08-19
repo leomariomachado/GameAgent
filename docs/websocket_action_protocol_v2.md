@@ -211,6 +211,13 @@ timing. See [client_timed_sequence_protocol_v2.md](client_timed_sequence_protoco
 for the normative client contract. Primitive actions continue to use
 `action_mode: "state"`.
 
+The current timed-program revision is announced as
+`timed_sequence_version: 2` with
+`timed_sequence_step_semantics: "exact_controller_state"`. Every step replaces
+the complete previous controller state; the client must never infer, inherit
+or append a direction. Direction-button chords required by specials are
+declared explicitly by the server.
+
 ## Reinforcement-learning diagnostics and fight gate
 
 When reinforcement mode is enabled, an action may also contain:
@@ -351,6 +358,13 @@ a screen that is still not a fight must remain so for another full timeout
 before a new reset ID is issued. `double_ko`, menus and ordinary transitions do
 not cause an immediate terminal reset, but a persistent non-fight screen is
 recovered by this watchdog.
+
+`round_intro` has a separate 15000 ms window so a normal intro does not cause
+an unnecessary save-state reset. Independently, if binary frame delivery
+stops while the WebSocket stays alive, the server sends
+`frame_stream_recovery`. The client restarts only capture/encoding/sending,
+preserves the socket and session, and waits for `frame_stream_resumed` after a
+fresh frame. See `server_protocol_v21.md` for the complete message contract.
 To remain wire-compatible with clients that validate the original schema, a
 watchdog request is transmitted with `reason: "round_lost"` and an
 `episode_id` of at least 1. Its JSONL metric contains

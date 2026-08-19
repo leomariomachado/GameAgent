@@ -282,6 +282,14 @@ int main(int argc, char** argv) {
                 ),
                 "training reset non-fight timeout"
             ));
+        server_options.training_reset_round_intro_timeout =
+            std::chrono::milliseconds(parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_TRAINING_RESET_ROUND_INTRO_TIMEOUT_MS",
+                    "15000"
+                ),
+                "training reset round-intro timeout"
+            ));
         server_options.reset_ack_timeout =
             std::chrono::milliseconds(parse_positive_size(
                 environment_or("GAMEAGENT_RESET_ACK_TIMEOUT_MS", "5000"),
@@ -291,6 +299,20 @@ int main(int argc, char** argv) {
             std::chrono::milliseconds(parse_positive_size(
                 environment_or("GAMEAGENT_RESET_READY_TIMEOUT_MS", "10000"),
                 "reset ready timeout"
+            ));
+        server_options.frame_stream_stall_timeout =
+            std::chrono::milliseconds(parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_FRAME_STREAM_STALL_TIMEOUT_MS", "2000"
+                ),
+                "frame stream stall timeout"
+            ));
+        server_options.frame_stream_recovery_interval =
+            std::chrono::milliseconds(parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_FRAME_STREAM_RECOVERY_INTERVAL_MS", "500"
+                ),
+                "frame stream recovery interval"
             ));
         server_options.repeated_frame_pause_timeout =
             std::chrono::milliseconds(parse_positive_size(
