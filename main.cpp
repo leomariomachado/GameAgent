@@ -730,6 +730,9 @@ int main(int argc, char** argv) {
                 environment_or("GAMEAGENT_RL_SCRIPTED_EXPLORATION", "0.50"),
                 "RL scripted exploration probability", 0.0f, 1.0f
             );
+        server_options.directed_curriculum_path = environment_or(
+            "GAMEAGENT_RL_DIRECTED_CURRICULUM_PATH", ""
+        );
         server_options.default_facing_right = parse_facing_right(
             environment_or("GAMEAGENT_DEFAULT_FACING", "right")
         );

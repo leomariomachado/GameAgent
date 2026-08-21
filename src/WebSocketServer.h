@@ -117,6 +117,7 @@ struct WebSocketServerOptions {
     std::uint64_t reinforcement_new_matchup_epsilon_decay_selections =
         15000;
     float reinforcement_scripted_exploration_probability = 0.50f;
+    std::filesystem::path directed_curriculum_path;
     std::filesystem::path metrics_path = "metrics.jsonl";
     std::filesystem::path reinforcement_migration_checkpoint;
     std::filesystem::path capture_directory = "captures";

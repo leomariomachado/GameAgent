@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "mode": "exploration_only",
+  "include_mirrors": true,
+  "characters": {
+    "scorpion": ["Arpão", "Salto para frente com chute alto"],
+    "subzero": ["Congelar", "Rasteira"],
+    "noob_saibot": ["Arremesso de Sombra", "Uppercut agachado"],
+    "sindel": ["Bola de Fogo", "Salto para frente com chute alto"]
+  }
+}

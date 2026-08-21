@@ -971,3 +971,33 @@ requiring two nearly identical JPEGs for every decision.
 
 For a server on the same machine, replace the URL with
 `ws://127.0.0.1:8080/ws`.
+# Directed exploration curriculum
+
+The normal training command remains unchanged and does not read a curriculum
+unless `GAMEAGENT_RL_DIRECTED_CURRICULUM_PATH` is explicitly set:
+
+```bash
+cd /tmp/GameAgent
+export GAMEAGENT_API_TOKEN="$(< /workspace/gameagent/api_token)"
+GAMEAGENT_RL_CHECKPOINT_DIR=/workspace/gameagent/rl_v21 \
+GAMEAGENT_RL_RESUME=1 \
+bash scripts/run_character_rl.sh
+```
+
+For a short directed block, copy `configs/directed_curriculum.example.json` to
+`/workspace/gameagent/action_curriculum.json`, edit it, then run:
+
+```bash
+cd /tmp/GameAgent
+export GAMEAGENT_API_TOKEN="$(< /workspace/gameagent/api_token)"
+GAMEAGENT_RL_CHECKPOINT_DIR=/workspace/gameagent/rl_v21 \
+GAMEAGENT_RL_RESUME=1 \
+bash scripts/run_directed_curriculum.sh
+```
+
+The server reloads the JSON during training. `exploration_only` restricts only
+epsilon exploration; DQN exploitation remains normal. `force_only` restricts
+both paths and is intended for short visual/protocol tests. Directional moves
+automatically include their `[Espelho F/B]` variants when `include_mirrors` is
+true. Disable the mode with `{ "enabled": false }` or remove the environment
+variable and normal training immediately resumes with the complete action set.

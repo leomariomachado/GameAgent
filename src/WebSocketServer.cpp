@@ -720,6 +720,56 @@ private:
     std::size_t pending_records_ = 0;
 };
 
+DirectedActionCurriculum load_directed_curriculum(
+    const std::filesystem::path& path,
+    FighterCharacter character
+) {
+    DirectedActionCurriculum result;
+    if (path.empty() || !std::filesystem::is_regular_file(path)) {
+        return result;
+    }
+    std::ifstream input(path);
+    nlohmann::json document;
+    input >> document;
+    result.enabled = document.value("enabled", false);
+    result.include_mirrors = document.value("include_mirrors", true);
+    const std::string mode = document.value("mode", "exploration_only");
+    if (mode != "exploration_only" && mode != "force_only") {
+        throw std::invalid_argument(
+            "directed curriculum mode must be exploration_only or force_only"
+        );
+    }
+    result.force_only = mode == "force_only";
+    if (!result.enabled) {
+        return result;
+    }
+    const nlohmann::json& characters = document.at("characters");
+    const std::string character_key(fighter_character_slug(character));
+    const auto selected = characters.contains(character_key)
+        ? characters.at(character_key)
+        : characters.contains("*") ? characters.at("*")
+        : nlohmann::json::array();
+    if (!selected.is_array()) {
+        throw std::invalid_argument(
+            "directed curriculum character moves must be an array"
+        );
+    }
+    for (const auto& value : selected) {
+        if (!value.is_string()) {
+            throw std::invalid_argument(
+                "directed curriculum move names must be strings"
+            );
+        }
+        result.move_names.push_back(value.get<std::string>());
+    }
+    if (result.move_names.empty()) {
+        throw std::invalid_argument(
+            "directed curriculum has no moves for " + character_key
+        );
+    }
+    return result;
+}
+
 struct FramePersistenceJob {
     std::shared_ptr<const FrameEnvelope> envelope;
     std::int64_t received_timestamp_ms = 0;
@@ -2837,6 +2887,16 @@ void handle_websocket_connection(
                     const float total_reward =
                         fight.reward + combat.shaping_reward;
                     try {
+                        // The file is intentionally read on the decision path
+                        // so edits become effective without a restart. The
+                        // agent applies the new filter only at an option
+                        // boundary, never in the middle of a timed program.
+                        reinforcement_agent->set_directed_action_curriculum(
+                            load_directed_curriculum(
+                                options.directed_curriculum_path,
+                                player_character
+                            )
+                        );
                         reinforcement_decision = reinforcement_agent->step({
                             .state = reinforcement_state,
                             .temporal_visual_feature =

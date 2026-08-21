@@ -135,6 +135,15 @@ struct ReinforcementStepInput {
     bool player_action_stable = true;
 };
 
+// Runtime-only filter for short directed-exploration blocks. It is never
+// checkpointed, so the normal action space is restored when disabled.
+struct DirectedActionCurriculum {
+    bool enabled = false;
+    bool force_only = false;
+    bool include_mirrors = true;
+    std::vector<std::string> move_names;
+};
+
 struct ReinforcementDecision {
     std::vector<int> commands;
     std::vector<std::vector<int>> sequence_commands;
@@ -259,6 +268,8 @@ public:
         float value,
         bool reset_matchup_counter
     );
+    void set_directed_action_curriculum(DirectedActionCurriculum curriculum);
+    [[nodiscard]] DirectedActionCurriculum directed_action_curriculum() const;
     // Cancels the in-flight option without creating a replay transition or
     // changing episode return/epsilon. Used when the visual stream freezes.
     void suspend();

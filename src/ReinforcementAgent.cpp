@@ -85,6 +85,28 @@ struct OptionDefinition {
     OptionTactic tactic = OptionTactic::utility;
 };
 
+bool curriculum_matches_option(
+    const DirectedActionCurriculum& curriculum,
+    const OptionDefinition& option
+) {
+    if (!curriculum.enabled) {
+        return true;
+    }
+    constexpr std::string_view mirror_suffix = " [Espelho F/B]";
+    const bool mirrored = option.name.ends_with(mirror_suffix);
+    if (mirrored && !curriculum.include_mirrors) {
+        return false;
+    }
+    const std::string_view base = mirrored
+        ? std::string_view(option.name).substr(
+              0U, option.name.size() - mirror_suffix.size()
+          )
+        : std::string_view(option.name);
+    return std::ranges::find(
+        curriculum.move_names, std::string(base)
+    ) != curriculum.move_names.end();
+}
+
 bool is_disable_cloud_option(const OptionDefinition& option) {
     return option.name.rfind("Nuvem de Desativação", 0) == 0;
 }
@@ -714,6 +736,8 @@ struct ReinforcementAgent::Implementation {
         }
     }
 
+    DirectedActionCurriculum directed_curriculum;
+
     void initialize_recurrent_backend() {
         std::vector<std::size_t> action_sizes;
         action_sizes.reserve(options_by_character.size());
@@ -1029,6 +1053,13 @@ struct ReinforcementAgent::Implementation {
         }
         const OptionDefinition& option = current_options.at(index);
         if (
+            directed_curriculum.enabled &&
+            directed_curriculum.force_only &&
+            !curriculum_matches_option(directed_curriculum, option)
+        ) {
+            return false;
+        }
+        if (
             disable_cloud_cooldown_options_remaining > 0 &&
             is_disable_cloud_option(option)
         ) {
@@ -1165,6 +1196,11 @@ struct ReinforcementAgent::Implementation {
         const auto allowed = [&](std::size_t index) {
             return option_allowed(index, context);
         };
+        const auto exploration_allowed = [&](std::size_t index) {
+            return allowed(index) && curriculum_matches_option(
+                directed_curriculum, current_options.at(index)
+            );
+        };
         allowed_options = 0;
         for (std::size_t index = 0; index < options().size(); ++index) {
             allowed_options += allowed(index) ? 1U : 0U;
@@ -1191,7 +1227,7 @@ struct ReinforcementAgent::Implementation {
                 preferred_candidates.begin(),
                 preferred_candidates.end(),
                 std::back_inserter(candidates),
-                allowed
+                exploration_allowed
             );
             if (
                 choose_scripted &&
@@ -1220,9 +1256,9 @@ struct ReinforcementAgent::Implementation {
                     : scripted_options;
                 std::copy_if(
                     fallback_candidates.begin(),
-                    fallback_candidates.end(),
-                    std::back_inserter(candidates),
-                    allowed
+                fallback_candidates.end(),
+                std::back_inserter(candidates),
+                exploration_allowed
                 );
                 source = choose_scripted
                     ? "epsilon_primitive_actionability_fallback"
@@ -1239,8 +1275,12 @@ struct ReinforcementAgent::Implementation {
             selected = candidates[distribution(random_engine)];
             if (source == "dqn_exploit") {
                 source = choose_scripted
-                    ? "epsilon_scripted"
-                    : "epsilon_primitive";
+                    ? (directed_curriculum.enabled
+                        ? "epsilon_directed_scripted"
+                        : "epsilon_scripted")
+                    : (directed_curriculum.enabled
+                        ? "epsilon_directed_primitive"
+                        : "epsilon_primitive");
             }
         } else {
             selected = options().size();
@@ -2599,6 +2639,22 @@ void ReinforcementAgent::set_exploration(
         state.exploration_selection_origin[player][opponent] =
             state.matchup_action_selections[player][opponent];
     }
+}
+
+void ReinforcementAgent::set_directed_action_curriculum(
+    DirectedActionCurriculum curriculum
+) {
+    auto& state = *implementation_;
+    if (curriculum.enabled && curriculum.move_names.empty()) {
+        throw std::invalid_argument(
+            "directed curriculum requires at least one move name"
+        );
+    }
+    state.directed_curriculum = std::move(curriculum);
+}
+
+DirectedActionCurriculum ReinforcementAgent::directed_action_curriculum() const {
+    return implementation_->directed_curriculum;
 }
 
 void ReinforcementAgent::suspend() {
