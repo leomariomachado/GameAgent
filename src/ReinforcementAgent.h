@@ -65,10 +65,10 @@ struct ReinforcementAgentConfig {
     // Damage arrives at different delays for melee, teleport and projectile
     // options. These post-program settle windows keep the option responsible
     // for the corresponding health change.
-    std::size_t melee_impact_credit_steps = 2;
-    std::size_t teleport_impact_credit_steps = 4;
-    std::size_t projectile_impact_credit_min_steps = 4;
-    std::size_t projectile_impact_credit_max_steps = 8;
+    std::size_t melee_impact_credit_steps = 4;
+    std::size_t teleport_impact_credit_steps = 6;
+    std::size_t projectile_impact_credit_min_steps = 6;
+    std::size_t projectile_impact_credit_max_steps = 10;
     // Every Nth training episode runs nearly greedily while still writing its
     // failures to replay. This closes the train/evaluation distribution gap.
     std::size_t greedy_training_episode_interval = 10;

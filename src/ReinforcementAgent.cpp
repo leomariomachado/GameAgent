@@ -213,6 +213,13 @@ std::size_t impact_credit_steps(
     const ActionContext& context,
     const ReinforcementAgentConfig& config
 ) {
+    // The jump-kick is intentionally kept as a movement tactic so that its
+    // distance gating remains independent from grounded close attacks.  Its
+    // damage, however, lands after the airborne input program finishes and
+    // therefore needs the same post-program attribution window as melee.
+    if (option.name.rfind("Salto para frente com chute", 0) == 0) {
+        return config.melee_impact_credit_steps;
+    }
     if (
         option.tactic == OptionTactic::close_attack ||
         option.tactic == OptionTactic::combo ||

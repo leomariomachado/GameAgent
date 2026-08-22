@@ -251,6 +251,21 @@ int main(int argc, char** argv) {
             environment_or("GAMEAGENT_COLLECT_TRAINING_DATA", "0"),
             "training data collection flag"
         );
+        server_options.reinforcement_audit_capture = parse_boolean(
+            environment_or("GAMEAGENT_RL_AUDIT_CAPTURE", "0"),
+            "RL audit capture flag"
+        );
+        server_options.reinforcement_audit_directory = environment_or(
+            "GAMEAGENT_RL_AUDIT_CAPTURE_DIR",
+            "/workspace/gameagent/reward_audit"
+        );
+        server_options.reinforcement_audit_interval =
+            std::chrono::milliseconds(parse_positive_size(
+                environment_or(
+                    "GAMEAGENT_RL_AUDIT_CAPTURE_INTERVAL_MS", "3000"
+                ),
+                "RL audit capture interval"
+            ));
         server_options.training_capture_directory = environment_or(
             "GAMEAGENT_TRAINING_CAPTURE_DIR",
             "/workspace/gameagent/training_captures"
@@ -513,28 +528,28 @@ int main(int argc, char** argv) {
         server_options.reinforcement_melee_impact_credit_steps =
             parse_positive_size(
                 environment_or(
-                    "GAMEAGENT_RL_MELEE_CREDIT_STEPS", "2"
+                    "GAMEAGENT_RL_MELEE_CREDIT_STEPS", "4"
                 ),
                 "RL melee impact credit steps"
             );
         server_options.reinforcement_teleport_impact_credit_steps =
             parse_positive_size(
                 environment_or(
-                    "GAMEAGENT_RL_TELEPORT_CREDIT_STEPS", "4"
+                    "GAMEAGENT_RL_TELEPORT_CREDIT_STEPS", "6"
                 ),
                 "RL teleport impact credit steps"
             );
         server_options.reinforcement_projectile_impact_credit_min_steps =
             parse_positive_size(
                 environment_or(
-                    "GAMEAGENT_RL_PROJECTILE_CREDIT_MIN_STEPS", "4"
+                    "GAMEAGENT_RL_PROJECTILE_CREDIT_MIN_STEPS", "6"
                 ),
                 "RL projectile minimum impact credit steps"
             );
         server_options.reinforcement_projectile_impact_credit_max_steps =
             parse_positive_size(
                 environment_or(
-                    "GAMEAGENT_RL_PROJECTILE_CREDIT_MAX_STEPS", "8"
+                    "GAMEAGENT_RL_PROJECTILE_CREDIT_MAX_STEPS", "10"
                 ),
                 "RL projectile maximum impact credit steps"
             );

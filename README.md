@@ -802,10 +802,13 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_RL_DYNAMIC_FACING` | `1` | derives Forward/Back from live fighter X positions and masks explicit mirrored duplicates |
 | `GAMEAGENT_RL_FACING_STABLE_TICKS` | `3` | consecutive valid side readings required before starting an option containing Left/Right; protects specials when fighters cross |
 | `GAMEAGENT_RL_FACING_MIN_POSITION_DELTA` | `0.04` | minimum normalized horizontal separation required for a side reading to count toward directional stability |
+| `GAMEAGENT_RL_AUDIT_CAPTURE` | `0` | enable event-driven reward-attribution captures; each capture writes original JPEG, annotated SVG and JSON sidecar asynchronously |
+| `GAMEAGENT_RL_AUDIT_CAPTURE_DIR` | `/workspace/gameagent/reward_audit` | root directory for reward-audit captures |
+| `GAMEAGENT_RL_AUDIT_CAPTURE_INTERVAL_MS` | `3000` | periodic audit sample interval; action start, damage, credit-window and terminal events are captured regardless of this interval |
 | `GAMEAGENT_RL_DISABLE_CLOUD_COOLDOWN_OPTIONS` | `2` | complete alternative options required before another Noob Saibot disable cloud; teleports remain unrestricted |
-| `GAMEAGENT_RL_MELEE_CREDIT_STEPS` | `2` | post-program steps retained for melee/combo damage credit |
-| `GAMEAGENT_RL_TELEPORT_CREDIT_STEPS` | `4` | post-program steps retained for teleport impact credit |
-| `GAMEAGENT_RL_PROJECTILE_CREDIT_MIN_STEPS` / `MAX_STEPS` | `4` / `8` | distance-scaled post-program projectile credit window |
+| `GAMEAGENT_RL_MELEE_CREDIT_STEPS` | `4` | post-program steps retained for melee/combo damage credit; also used by the airborne forward jump-kick while preserving its movement distance gating |
+| `GAMEAGENT_RL_TELEPORT_CREDIT_STEPS` | `6` | post-program steps retained for teleport impact credit |
+| `GAMEAGENT_RL_PROJECTILE_CREDIT_MIN_STEPS` / `MAX_STEPS` | `6` / `10` | distance-scaled post-program projectile credit window |
 | `GAMEAGENT_RL_GREEDY_EPISODE_INTERVAL` | `10` | train one near-greedy episode after every ten episodes |
 | `GAMEAGENT_RL_GREEDY_EPISODE_EPSILON` | `0.05` | epsilon used by the near-greedy training episode |
 | `GAMEAGENT_RL_MIGRATION_CHECKPOINT` | unset | optional v7 recurrent checkpoint used only to initialize v8 perception and temporal representation |

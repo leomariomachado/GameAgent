@@ -111,10 +111,10 @@ struct WebSocketServerOptions {
     std::size_t reinforcement_disable_cloud_cooldown_options = 2;
     std::size_t reinforcement_throw_cooldown_options = 2;
     std::size_t reinforcement_sweep_cooldown_options = 1;
-    std::size_t reinforcement_melee_impact_credit_steps = 2;
-    std::size_t reinforcement_teleport_impact_credit_steps = 4;
-    std::size_t reinforcement_projectile_impact_credit_min_steps = 4;
-    std::size_t reinforcement_projectile_impact_credit_max_steps = 8;
+    std::size_t reinforcement_melee_impact_credit_steps = 4;
+    std::size_t reinforcement_teleport_impact_credit_steps = 6;
+    std::size_t reinforcement_projectile_impact_credit_min_steps = 6;
+    std::size_t reinforcement_projectile_impact_credit_max_steps = 10;
     std::size_t reinforcement_greedy_training_episode_interval = 10;
     float reinforcement_greedy_training_epsilon = 0.05f;
     float reinforcement_epsilon_start = 1.0f;
@@ -132,6 +132,12 @@ struct WebSocketServerOptions {
     bool save_frames = false;
     std::chrono::milliseconds debug_capture_interval{3000};
     bool collect_training_data = false;
+    // Event-driven reward-attribution audit. This is intentionally separate
+    // from dataset/debug captures and remains off during normal training.
+    bool reinforcement_audit_capture = false;
+    std::filesystem::path reinforcement_audit_directory =
+        "/workspace/gameagent/reward_audit";
+    std::chrono::milliseconds reinforcement_audit_interval{3000};
 };
 
 class WebSocketServer {

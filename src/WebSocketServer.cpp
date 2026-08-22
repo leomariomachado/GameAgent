@@ -22,6 +22,7 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -777,7 +778,64 @@ struct FramePersistenceJob {
     std::string player_character;
     std::string opponent_character;
     bool training_capture = false;
+    std::optional<nlohmann::json> audit_metadata;
 };
+
+std::string xml_escape(std::string_view value) {
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (const char character : value) {
+        switch (character) {
+            case '&': escaped += "&amp;"; break;
+            case '<': escaped += "&lt;"; break;
+            case '>': escaped += "&gt;"; break;
+            case '\"': escaped += "&quot;"; break;
+            case '\'': escaped += "&apos;"; break;
+            default: escaped.push_back(character); break;
+        }
+    }
+    return escaped;
+}
+
+void save_audit_overlay(
+    const std::filesystem::path& path,
+    std::string_view jpeg_file,
+    const nlohmann::json& audit
+) {
+    std::ofstream output(path);
+    if (!output) {
+        throw std::runtime_error(
+            "could not save audit overlay: " + path.string()
+        );
+    }
+    output << "<svg xmlns=\"http://www.w3.org/2000/svg\" "
+           << "width=\"512\" height=\"700\" viewBox=\"0 0 512 700\">\n"
+           << "<image href=\"" << xml_escape(jpeg_file)
+           << "\" x=\"0\" y=\"0\" width=\"512\" height=\"448\"/>\n"
+           << "<rect x=\"0\" y=\"448\" width=\"512\" height=\"252\" "
+           << "fill=\"#080b10\" opacity=\"0.96\"/>\n"
+           << "<text x=\"12\" y=\"470\" fill=\"#e8edf2\" "
+           << "font-family=\"monospace\" font-size=\"14\">\n";
+    const nlohmann::json lines = audit.value(
+        "overlay_lines", nlohmann::json::array()
+    );
+    std::size_t line_index = 0;
+    for (const auto& line : lines) {
+        if (!line.is_string() || line_index >= 15U) {
+            continue;
+        }
+        output << "<tspan x=\"12\" dy=\"16\">"
+               << xml_escape(line.get<std::string>())
+               << "</tspan>\n";
+        ++line_index;
+    }
+    output << "</text>\n</svg>\n";
+    if (!output) {
+        throw std::runtime_error(
+            "could not finish audit overlay: " + path.string()
+        );
+    }
+}
 
 void save_frame(
     const WebSocketServerOptions& options,
@@ -786,15 +844,23 @@ void save_frame(
 ) {
     const FrameEnvelope& envelope = *job.envelope;
     const std::filesystem::path& capture_root =
-        job.training_capture
+        job.audit_metadata.has_value()
+            ? options.reinforcement_audit_directory
+            : job.training_capture
             ? options.training_capture_directory
             : options.capture_directory;
     const std::filesystem::path directory = capture_root /
         ("session_" + std::to_string(getpid())) /
         ("connection_" + std::to_string(connection_id));
     std::filesystem::create_directories(directory);
-    const std::string filename =
-        ("frame_" + std::to_string(envelope.frame_id) + ".jpg");
+    const std::string capture_stem = "frame_" +
+        std::to_string(envelope.frame_id) +
+        (job.audit_metadata.has_value()
+            ? "_decision_" + std::to_string(
+                job.audit_metadata->value("decision_id", 0ULL)
+            )
+            : std::string{});
+    const std::string filename = capture_stem + ".jpg";
     const std::filesystem::path path = directory / filename;
     std::ofstream output(path, std::ios::binary);
     if (!output) {
@@ -833,6 +899,32 @@ void save_frame(
         metadata_record["acknowledgement_received_timestamp_ms"] =
             job.latest_applied_action
                 ->acknowledgement_received_timestamp_ms;
+    }
+    if (job.audit_metadata.has_value()) {
+        nlohmann::json audit_metadata = *job.audit_metadata;
+        const std::filesystem::path audit_json =
+            directory / (capture_stem + ".json");
+        std::ofstream audit_output(audit_json);
+        if (!audit_output) {
+            throw std::runtime_error(
+                "could not save audit metadata: " + audit_json.string()
+            );
+        }
+        audit_metadata["image_file"] = filename;
+        audit_metadata["overlay_file"] =
+            capture_stem + ".svg";
+        audit_output << audit_metadata.dump(2) << '\n';
+        if (!audit_output) {
+            throw std::runtime_error(
+                "could not finish audit metadata: " + audit_json.string()
+            );
+        }
+        save_audit_overlay(
+            directory / (capture_stem + ".svg"),
+            filename,
+            audit_metadata
+        );
+        metadata_record["audit"] = std::move(audit_metadata);
     }
     metadata << metadata_record.dump() << '\n';
     if (!metadata) {
@@ -1866,6 +1958,8 @@ void handle_websocket_connection(
     std::atomic<std::uint64_t> repeated_frame_reset_generation{0};
     std::atomic<std::uint64_t> repeated_frame_reset_frame_id{0};
     Clock::time_point next_debug_capture = Clock::time_point::min();
+    Clock::time_point next_reinforcement_audit_capture =
+        Clock::time_point::min();
     std::atomic_bool workers_stopping{false};
     std::mutex control_queue_mutex;
     std::deque<ClientTextMessage> control_queue;
@@ -1934,14 +2028,16 @@ void handle_websocket_connection(
     std::deque<FramePersistenceJob> persistence_queue;
     const auto enqueue_persistence =
         [&](std::shared_ptr<const FrameEnvelope> envelope,
-            std::int64_t received_timestamp_ms) {
+            std::int64_t received_timestamp_ms,
+            std::optional<nlohmann::json> audit_metadata = std::nullopt) {
             const bool training_capture =
                 options.collect_training_data;
             const auto persistence_now = Clock::now();
             const bool debug_capture =
                 options.save_frames &&
                 persistence_now >= next_debug_capture;
-            if (!training_capture && !debug_capture) {
+            if (!training_capture && !debug_capture &&
+                !audit_metadata.has_value()) {
                 return;
             }
             if (debug_capture) {
@@ -1962,8 +2058,9 @@ void handle_websocket_connection(
                         opponent_character_slug(
                             active_opponent_character.load()
                         )
-                    ),
+                ),
                 .training_capture = training_capture,
+                .audit_metadata = std::move(audit_metadata),
             };
             {
                 std::lock_guard lock(persistence_queue_mutex);
@@ -3928,6 +4025,159 @@ void handle_websocket_connection(
                 }
                 nlohmann::json metric_record = response;
                 metric_record["connection_id"] = connection_id;
+                if (options.reinforcement_audit_capture &&
+                    reinforcement_agent != nullptr) {
+                    std::vector<std::string> audit_reasons;
+                    if (reinforcement_decision.sequence_started) {
+                        audit_reasons.emplace_back("option_started");
+                    }
+                    if (reinforcement_decision.impact_credit_step > 0U) {
+                        audit_reasons.emplace_back("impact_credit");
+                    }
+                    if (fight.damage_dealt > 0.0f) {
+                        audit_reasons.emplace_back("damage_dealt");
+                    }
+                    if (fight.damage_taken > 0.0f) {
+                        audit_reasons.emplace_back("damage_taken");
+                    }
+                    if (fight.episode_ended) {
+                        audit_reasons.emplace_back("episode_ended");
+                    }
+                    const bool periodic_audit = Clock::now() >=
+                        next_reinforcement_audit_capture;
+                    if (periodic_audit) {
+                        audit_reasons.emplace_back("periodic");
+                        next_reinforcement_audit_capture = Clock::now() +
+                            options.reinforcement_audit_interval;
+                    }
+                    if (!audit_reasons.empty()) {
+                        const auto format_float = [](float value) {
+                            std::ostringstream stream;
+                            stream << std::fixed << std::setprecision(3)
+                                   << value;
+                            return stream.str();
+                        };
+                        const std::string displayed_option =
+                            displayed_action_name(
+                                reinforcement_decision.option_name,
+                                reinforcement_decision.commands_mirrored
+                            );
+                        nlohmann::json audit{
+                            {"event", "reinforcement_reward_audit"},
+                            {"timestamp_ms", now_ms},
+                            {"connection_id", connection_id},
+                            {"decision_id", current_decision_id},
+                            {"frame_id", latest->frame_id},
+                            {"reasons", audit_reasons},
+                            {"option", displayed_option},
+                            {"option_base", reinforcement_decision.option_name},
+                            {"option_step", reinforcement_decision.option_step},
+                            {"option_steps", reinforcement_decision.option_steps},
+                            {"impact_credit_step",
+                             reinforcement_decision.impact_credit_step},
+                            {"impact_credit_steps",
+                             reinforcement_decision.impact_credit_steps},
+                            {"commands", commands},
+                            {"commands_mirrored",
+                             reinforcement_decision.commands_mirrored},
+                            {"selection_source",
+                             reinforcement_decision.selection_source},
+                            {"selected_q", reinforcement_decision.selected_q},
+                            {"episode_return",
+                             reinforcement_decision.episode_return},
+                            {"reward", reinforcement_decision.reward_consumed},
+                            {"health_reward", fight.reward},
+                            {"combat_shaping_reward", combat.shaping_reward},
+                            {"damage_dealt", fight.damage_dealt},
+                            {"damage_taken", fight.damage_taken},
+                            {"player_health", fight.player_health},
+                            {"opponent_health", fight.opponent_health},
+                            {"player_x", combat.player_x},
+                            {"opponent_x", combat.opponent_x},
+                            {"fighter_distance", combat.distance},
+                            {"spatial_valid", combat.spatial_valid},
+                            {"spatial_confidence", combat.spatial_confidence},
+                            {"facing_stable", facing_stable},
+                            {"facing_stable_ticks", facing_stable_ticks},
+                            {"fight_phase", fight_phase_name(fight.phase)},
+                            {"fight_transition_reason",
+                             fight.transition_reason},
+                        };
+                        audit["overlay_lines"] = {
+                            "RL REWARD AUDIT  frame=" +
+                                std::to_string(latest->frame_id) +
+                                " decision=" +
+                                std::to_string(current_decision_id),
+                            "event=" +
+                                [&] {
+                                    std::ostringstream stream;
+                                    for (std::size_t index = 0;
+                                         index < audit_reasons.size();
+                                         ++index) {
+                                        if (index != 0U) stream << ',';
+                                        stream << audit_reasons[index];
+                                    }
+                                    return stream.str();
+                                }(),
+                            "option=" + displayed_option + " step=" +
+                                std::to_string(
+                                    reinforcement_decision.option_step
+                                ) + "/" + std::to_string(
+                                    reinforcement_decision.option_steps
+                                ),
+                            "impact=" + std::to_string(
+                                reinforcement_decision.impact_credit_step
+                            ) + "/" + std::to_string(
+                                reinforcement_decision.impact_credit_steps
+                            ) + " source=" +
+                                reinforcement_decision.selection_source,
+                            "reward=" + format_float(
+                                reinforcement_decision.reward_consumed
+                            ) + " health=" + format_float(fight.reward) +
+                                " shaping=" + format_float(
+                                    combat.shaping_reward
+                                ),
+                            "damage dealt=" + format_float(
+                                fight.damage_dealt
+                            ) + " taken=" + format_float(fight.damage_taken),
+                            "return=" + format_float(
+                                reinforcement_decision.episode_return
+                            ) + " selected_q=" + format_float(
+                                reinforcement_decision.selected_q
+                            ),
+                            "hp player=" + format_float(fight.player_health) +
+                                " opponent=" + format_float(
+                                    fight.opponent_health
+                                ),
+                            "x player=" + format_float(combat.player_x) +
+                                " opponent=" + format_float(
+                                    combat.opponent_x
+                                ) + " distance=" + format_float(
+                                    combat.distance
+                                ),
+                            "spatial=" + std::string(
+                                combat.spatial_valid ? "valid" : "invalid"
+                            ) + " confidence=" + format_float(
+                                combat.spatial_confidence
+                            ) + " facing_stable=" +
+                                (facing_stable ? "1" : "0"),
+                            "fight=" + std::string(
+                                fight_phase_name(fight.phase)
+                            ) + " reason=" + fight.transition_reason,
+                        };
+                        auto audit_envelope =
+                            std::make_shared<FrameEnvelope>(FrameEnvelope{
+                                .frame_id = latest->frame_id,
+                                .timestamp_ms = latest->client_timestamp_ms,
+                                .jpeg = latest->jpeg,
+                            });
+                        enqueue_persistence(
+                            std::move(audit_envelope),
+                            latest->received_timestamp_ms,
+                            std::move(audit)
+                        );
+                    }
+                }
                 if (!training_reset_pending) {
                     action_history.record_sent(
                         current_decision_id,
