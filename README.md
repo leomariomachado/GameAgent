@@ -1,5 +1,28 @@
 # GameAgent streaming WebSocket server
 
+## Perfis de jogo
+
+Transporte, buffer temporal, ResNet50, LSTM, replay, checkpoints e telemetria
+são compartilhados. Cada jogo mantém ações, adaptador de estado, recompensa,
+política e replay isolados; dados de treino não são misturados entre jogos.
+
+| Perfil | Situação | Uso |
+| --- | --- | --- |
+| `ultimate_mortal_kombat_3` (padrão; alias `umk3`) | pronto | preserva toda a integração atual de combate e RL |
+| `megaman_x2` | preparado | catálogo de ações registrado; ainda requer adaptador de estado, recompensa e terminais próprios antes de treinar |
+
+Selecione o perfil com `GAMEAGENT_GAME_PROFILE`. O script atual mantém
+compatibilidade por padrão:
+
+```bash
+GAMEAGENT_GAME_PROFILE=ultimate_mortal_kombat_3 \
+bash scripts/run_character_rl.sh
+```
+
+O catálogo inicial de Mega Man X2 contém: parado, esquerda, direita, pulo,
+tiro, dash, pulo lateral, pulo+tiro e dash+tiro. Ele não reutiliza os pesos,
+replay ou recompensa de Mortal Kombat.
+
 The formal server-side encounter, evaluation, telemetry and transactional-reset
 contract is documented in [docs/server_protocol_v21.md](docs/server_protocol_v21.md).
 The dependency-free smoke client is

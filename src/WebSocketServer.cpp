@@ -1096,6 +1096,26 @@ void handle_websocket_connection(
     std::uint64_t connection_id,
     const std::atomic_bool& stop_requested
 ) {
+    const GameProfile& selected_game_profile =
+        game_profile(options.game_profile);
+    if (!selected_game_profile.reinforcement_runtime_ready) {
+        ConnectionWriter unavailable_writer(socket);
+        unavailable_writer.send_json({
+            {"protocol_version", kServerProtocolVersion},
+            {"type", "game_profile_not_ready"},
+            {"game_profile", selected_game_profile.slug},
+            {"message",
+             "The profile is registered, but its game-state adapter and "
+             "reward model are not implemented yet."},
+            {"action_intents", nlohmann::json::array()},
+        });
+        send_close(
+            unavailable_writer,
+            1008,
+            "game profile runtime is not ready"
+        );
+        return;
+    }
     ConnectionWriter writer(socket);
     const std::size_t maximum_payload =
         options.max_jpeg_bytes + kMaximumFragmentOverhead;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "GameProfile.h"
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -11,6 +12,7 @@
 namespace gameagent {
 
 struct WebSocketServerOptions {
+    GameProfileId game_profile = GameProfileId::ultimate_mortal_kombat_3;
     std::string host = "0.0.0.0";
     std::uint16_t port = 8080;
     std::size_t frame_buffer_capacity = 32;

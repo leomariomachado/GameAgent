@@ -170,6 +170,19 @@ int main(int argc, char** argv) {
     try {
         gameagent::WebSocketServerOptions server_options;
         server_options.host = environment_or("GAMEAGENT_HOST", "0.0.0.0");
+        const std::string configured_game_profile = environment_or(
+            "GAMEAGENT_GAME_PROFILE", "ultimate_mortal_kombat_3"
+        );
+        const auto parsed_game_profile = gameagent::parse_game_profile(
+            configured_game_profile
+        );
+        if (!parsed_game_profile.has_value()) {
+            throw std::invalid_argument(
+                "unsupported GAMEAGENT_GAME_PROFILE: " +
+                configured_game_profile
+            );
+        }
+        server_options.game_profile = *parsed_game_profile;
         server_options.port = parse_port(environment_or("GAMEAGENT_PORT", "8080"));
         server_options.frame_buffer_capacity = parse_positive_size(
             environment_or("GAMEAGENT_FRAME_BUFFER_CAPACITY", "32"), "buffer capacity"
@@ -930,6 +943,10 @@ int main(int argc, char** argv) {
 
         std::cout
             << "GameAgent WebSocket mock server usando BaseAI\n"
+            << "perfil de jogo: "
+            << gameagent::game_profile_name(server_options.game_profile)
+            << " (" << gameagent::game_profile_slug(server_options.game_profile)
+            << ")\n"
             << "observacao: " << base::shape_to_string(observation_shape) << " frames recentes\n"
             << "WebSocket: ws://" << server_options.host << ':'
             << server_options.port << "/ws\n"

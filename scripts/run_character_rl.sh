@@ -8,6 +8,7 @@ GAMEAGENT_ROOT="${GAMEAGENT_ROOT:-/tmp/GameAgent}"
 # character-specific action heads keep incompatible specials isolated.
 export GAMEAGENT_TEMPORAL_MODEL=1
 export GAMEAGENT_REINFORCEMENT_LEARNING=1
+export GAMEAGENT_GAME_PROFILE="${GAMEAGENT_GAME_PROFILE:-ultimate_mortal_kombat_3}"
 export GAMEAGENT_RL_BACKEND="${GAMEAGENT_RL_BACKEND:-cpp}"
 export GAMEAGENT_RL_TRAINABLE_LSTM="${GAMEAGENT_RL_TRAINABLE_LSTM:-1}"
 # The production path is fully native: ResNet50 stage 4, LSTM and twin DQN

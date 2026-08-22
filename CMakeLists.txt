@@ -31,6 +31,7 @@ add_library(
         src/CombatStateTracker.cpp
         src/CppRecurrentPolicyBackend.cu
         src/FrameBuffer.cpp
+        src/GameProfile.cpp
         src/HealthBarDetector.cpp
         src/HttpServer.cpp
         src/MockAgent.cpp
@@ -111,6 +112,19 @@ if (BUILD_TESTING)
     target_link_libraries(
             benchmark_gameagent_cpp_recurrent_backend
             PRIVATE GameAgentMockCore
+    )
+
+    add_executable(
+            test_gameagent_game_profile
+            tests/test_game_profile.cpp
+    )
+    target_link_libraries(
+            test_gameagent_game_profile
+            PRIVATE GameAgentMockCore
+    )
+    add_test(
+            NAME gameagent_game_profile
+            COMMAND test_gameagent_game_profile
     )
 
     add_executable(
