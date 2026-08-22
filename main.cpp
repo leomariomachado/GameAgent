@@ -216,6 +216,18 @@ int main(int argc, char** argv) {
             environment_or("GAMEAGENT_SEQUENCE_ACTIONABLE_TICKS", "2"),
             "sequence actionable ticks"
         );
+        server_options.reinforcement_facing_stable_ticks =
+            parse_positive_size(
+                environment_or("GAMEAGENT_RL_FACING_STABLE_TICKS", "3"),
+                "RL facing stable ticks"
+            );
+        server_options.reinforcement_facing_min_position_delta =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_FACING_MIN_POSITION_DELTA", "0.04"
+                ),
+                "RL facing minimum position delta", 0.0f, 1.0f
+            );
         server_options.max_jpeg_bytes = parse_megabytes(
             environment_or("GAMEAGENT_MAX_JPEG_MB", "8")
         );

@@ -800,6 +800,8 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_RL_ADVANCE_MIN_DISTANCE` | `0.18` | prevents advancing again after already reaching close range |
 | `GAMEAGENT_RL_DEFENSE_MAX_DISTANCE` | `0.32` | prevents distant blocking with no immediate threat |
 | `GAMEAGENT_RL_DYNAMIC_FACING` | `1` | derives Forward/Back from live fighter X positions and masks explicit mirrored duplicates |
+| `GAMEAGENT_RL_FACING_STABLE_TICKS` | `3` | consecutive valid side readings required before starting an option containing Left/Right; protects specials when fighters cross |
+| `GAMEAGENT_RL_FACING_MIN_POSITION_DELTA` | `0.04` | minimum normalized horizontal separation required for a side reading to count toward directional stability |
 | `GAMEAGENT_RL_DISABLE_CLOUD_COOLDOWN_OPTIONS` | `2` | complete alternative options required before another Noob Saibot disable cloud; teleports remain unrestricted |
 | `GAMEAGENT_RL_MELEE_CREDIT_STEPS` | `2` | post-program steps retained for melee/combo damage credit |
 | `GAMEAGENT_RL_TELEPORT_CREDIT_STEPS` | `4` | post-program steps retained for teleport impact credit |

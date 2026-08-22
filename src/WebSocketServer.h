@@ -25,6 +25,12 @@ struct WebSocketServerOptions {
     std::chrono::milliseconds sequence_neutral_hold{40};
     std::chrono::milliseconds sequence_final_release{100};
     std::size_t sequence_actionable_ticks = 2;
+    // Number of consecutive, unambiguous spatial readings required before
+    // starting an option that contains a left/right input.
+    std::size_t reinforcement_facing_stable_ticks = 3;
+    // Normalized horizontal separation below which the side estimate is too
+    // ambiguous to start a front/back-dependent program.
+    float reinforcement_facing_min_position_delta = 0.04f;
     std::chrono::milliseconds reinforcement_reward_log_interval{5000};
     std::optional<std::string> api_token;
     std::optional<std::uint32_t> random_seed;

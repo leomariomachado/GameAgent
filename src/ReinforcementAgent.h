@@ -133,6 +133,9 @@ struct ReinforcementStepInput {
     bool player_attacking = false;
     bool opponent_attacking = false;
     bool player_action_stable = true;
+    // Directional options are allowed only after the server has observed a
+    // stable left/right relation for several controller ticks.
+    bool facing_stable = true;
 };
 
 // Runtime-only filter for short directed-exploration blocks. It is never

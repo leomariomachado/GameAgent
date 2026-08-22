@@ -2125,6 +2125,8 @@ void handle_websocket_connection(
         std::uint64_t reward_log_decisions = 0;
         std::uint64_t reward_log_active_decisions = 0;
         std::size_t player_actionable_ticks = 0;
+        std::optional<bool> stable_player_is_right_of_opponent;
+        std::size_t facing_stable_ticks = 0;
         while (!thread_stop.stop_requested() && connected.load() && !stop_requested.load()) {
             std::this_thread::sleep_until(next_decision);
             if (thread_stop.stop_requested() || !connected.load() || stop_requested.load()) {
@@ -2846,6 +2848,36 @@ void handle_websocket_connection(
                 const bool player_action_stable =
                     player_actionable_ticks >=
                         options.sequence_actionable_ticks;
+                const float player_opponent_delta =
+                    combat.player_x - combat.opponent_x;
+                const bool facing_observation_valid =
+                    combat.spatial_valid &&
+                    std::abs(player_opponent_delta) >=
+                        options.reinforcement_facing_min_position_delta;
+                if (facing_observation_valid) {
+                    const bool player_is_right_of_opponent =
+                        player_opponent_delta > 0.0f;
+                    if (
+                        stable_player_is_right_of_opponent.has_value() &&
+                        *stable_player_is_right_of_opponent ==
+                            player_is_right_of_opponent
+                    ) {
+                        facing_stable_ticks = std::min(
+                            facing_stable_ticks + 1U,
+                            options.reinforcement_facing_stable_ticks
+                        );
+                    } else {
+                        stable_player_is_right_of_opponent =
+                            player_is_right_of_opponent;
+                        facing_stable_ticks = 1U;
+                    }
+                } else {
+                    stable_player_is_right_of_opponent.reset();
+                    facing_stable_ticks = 0;
+                }
+                const bool facing_stable =
+                    facing_stable_ticks >=
+                    options.reinforcement_facing_stable_ticks;
                 std::optional<TemporalAgentOutput> temporal_output;
                 const bool temporal_control_allowed =
                     (
@@ -2945,6 +2977,7 @@ void handle_websocket_connection(
                             .opponent_attacking =
                                 combat.opponent_attacking,
                             .player_action_stable = player_action_stable,
+                            .facing_stable = facing_stable,
                         });
                         commands = reinforcement_decision.commands;
                     } catch (const std::exception& error) {
@@ -3683,6 +3716,11 @@ void handle_websocket_connection(
                         combat.opponent_x;
                     response_metrics["fighter_distance"] =
                         combat.distance;
+                    response_metrics["facing_stable"] = facing_stable;
+                    response_metrics["facing_stable_ticks"] =
+                        facing_stable_ticks;
+                    response_metrics["facing_min_position_delta"] =
+                        options.reinforcement_facing_min_position_delta;
                     response_metrics["player_on_ground"] =
                         combat.player_on_ground;
                     response_metrics["opponent_on_ground"] =

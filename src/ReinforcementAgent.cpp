@@ -191,11 +191,22 @@ struct ActionContext {
     bool player_attacking = false;
     bool opponent_attacking = false;
     bool player_action_stable = true;
+    bool facing_stable = true;
 
     [[nodiscard]] bool player_is_right_of_opponent() const {
         return player_x > opponent_x;
     }
 };
+
+bool uses_horizontal_input(const OptionDefinition& option) {
+    return std::ranges::any_of(
+        option.states,
+        [](const std::vector<int>& state) {
+            return std::ranges::find(state, kLeft) != state.end() ||
+                std::ranges::find(state, kRight) != state.end();
+        }
+    );
+}
 
 std::size_t impact_credit_steps(
     const OptionDefinition& option,
@@ -1095,6 +1106,12 @@ struct ReinforcementAgent::Implementation {
                 !context.player_action_stable
             )
         ) {
+            return false;
+        }
+        // Never gamble a front/back move on a noisy side estimate.  The
+        // agent may still defend, jump vertically or use a non-directional
+        // strike while the tracker re-acquires a reliable orientation.
+        if (uses_horizontal_input(option) && !context.facing_stable) {
             return false;
         }
         if (context.spatial_valid && is_throw_option(option) &&
@@ -2245,6 +2262,7 @@ ReinforcementDecision ReinforcementAgent::step(
         .player_attacking = input.player_attacking,
         .opponent_attacking = input.opponent_attacking,
         .player_action_stable = input.player_action_stable,
+        .facing_stable = input.facing_stable,
     };
     if (
         state.recurrent_backend != nullptr &&
