@@ -799,6 +799,7 @@ between samples remain memory-only. Each capture directory also contains a
 | `GAMEAGENT_RL_DISABLE_CLOUD_MIN_DISTANCE` / `MAX_DISTANCE` | `0.12` / `0.55` | empirically useful range for Noob Saibot's disable cloud |
 | `GAMEAGENT_RL_ADVANCE_MIN_DISTANCE` | `0.18` | prevents advancing again after already reaching close range |
 | `GAMEAGENT_RL_DEFENSE_MAX_DISTANCE` | `0.32` | prevents distant blocking with no immediate threat |
+| `GAMEAGENT_RL_DEFENSE_Q_MARGIN` | `0.75` | when the opponent is attacking at defensive distance, prefer Block unless another legal action has a Q value more than this margin higher |
 | `GAMEAGENT_RL_DYNAMIC_FACING` | `1` | derives Forward/Back from live fighter X positions and masks explicit mirrored duplicates |
 | `GAMEAGENT_RL_FACING_STABLE_TICKS` | `3` | consecutive valid side readings required before starting an option containing Left/Right; protects specials when fighters cross |
 | `GAMEAGENT_RL_FACING_MIN_POSITION_DELTA` | `0.04` | minimum normalized horizontal separation required for a side reading to count toward directional stability |

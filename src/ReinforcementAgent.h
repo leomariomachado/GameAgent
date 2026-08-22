@@ -58,6 +58,9 @@ struct ReinforcementAgentConfig {
     float disable_cloud_max_distance = 0.55f;
     float advance_min_distance = 0.18f;
     float defense_max_distance = 0.32f;
+    // Prefer a defensive response to a close, observed enemy attack unless
+    // another legal action has a meaningfully higher estimated value.
+    float defense_q_preference_margin = 0.75f;
     bool dynamic_facing = true;
     std::size_t disable_cloud_cooldown_options = 2;
     std::size_t throw_cooldown_options = 2;

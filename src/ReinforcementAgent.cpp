@@ -958,6 +958,7 @@ struct ReinforcementAgent::Implementation {
             config.advance_min_distance > 1.0f ||
             config.defense_max_distance <= 0.0f ||
             config.defense_max_distance > 1.0f ||
+            config.defense_q_preference_margin < 0.0f ||
             config.disable_cloud_cooldown_options == 0 ||
             config.throw_cooldown_options == 0 ||
             config.sweep_cooldown_options == 0 ||
@@ -1356,6 +1357,38 @@ struct ReinforcementAgent::Implementation {
                         values[selected]
                 ) {
                     selected = projectile;
+                }
+            }
+            // Do not hard-mask counterattacks: a learned counter may still
+            // win.  However, when the opponent is visibly attacking nearby,
+            // Block is selected whenever its value is sufficiently close to
+            // the best available offensive action.
+            if (
+                context.spatial_valid &&
+                context.opponent_attacking &&
+                context.distance <= config.defense_max_distance
+            ) {
+                std::size_t defense = options().size();
+                for (std::size_t index = 0; index < values.size(); ++index) {
+                    if (
+                        allowed(index) &&
+                        current_options.at(index).tactic ==
+                            OptionTactic::defense &&
+                        (
+                            defense == options().size() ||
+                            values[index] > values[defense]
+                        )
+                    ) {
+                        defense = index;
+                    }
+                }
+                if (
+                    defense != options().size() &&
+                    values[defense] + config.defense_q_preference_margin >=
+                        values[selected]
+                ) {
+                    selected = defense;
+                    source = "dqn_defensive_response";
                 }
             }
         }

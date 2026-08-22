@@ -1386,6 +1386,9 @@ void handle_websocket_connection(
                             options.reinforcement_advance_min_distance,
                         .defense_max_distance =
                             options.reinforcement_defense_max_distance,
+                        .defense_q_preference_margin =
+                            options
+                                .reinforcement_defense_q_preference_margin,
                         .dynamic_facing =
                             options.reinforcement_dynamic_facing,
                         .disable_cloud_cooldown_options =

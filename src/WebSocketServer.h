@@ -107,6 +107,7 @@ struct WebSocketServerOptions {
     float reinforcement_disable_cloud_max_distance = 0.55f;
     float reinforcement_advance_min_distance = 0.18f;
     float reinforcement_defense_max_distance = 0.32f;
+    float reinforcement_defense_q_preference_margin = 0.75f;
     bool reinforcement_dynamic_facing = true;
     std::size_t reinforcement_disable_cloud_cooldown_options = 2;
     std::size_t reinforcement_throw_cooldown_options = 2;

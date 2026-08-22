@@ -500,6 +500,13 @@ int main(int argc, char** argv) {
                 ),
                 "RL defense maximum distance", 0.01f, 1.0f
             );
+        server_options.reinforcement_defense_q_preference_margin =
+            parse_float_range(
+                environment_or(
+                    "GAMEAGENT_RL_DEFENSE_Q_MARGIN", "0.75"
+                ),
+                "RL defense Q preference margin", 0.0f, 25.0f
+            );
         server_options.reinforcement_dynamic_facing = parse_boolean(
             environment_or("GAMEAGENT_RL_DYNAMIC_FACING", "1"),
             "RL dynamic-facing flag"
