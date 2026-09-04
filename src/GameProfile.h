@@ -3,6 +3,7 @@
 #include <string>
 #include <string_view>
 #include <optional>
+#include <cstdint>
 #include <vector>
 
 namespace gameagent {
@@ -18,7 +19,10 @@ enum class GameProfileId {
 struct GameActionIntent {
     std::string id;
     std::string label;
-    std::vector<int> commands;
+    std::vector<std::vector<int>> states;
+    std::uint32_t input_hold_ms = 75;
+    std::uint32_t neutral_hold_ms = 40;
+    std::uint32_t final_release_ms = 100;
 };
 
 struct GameProfile {

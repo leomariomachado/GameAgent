@@ -9,7 +9,7 @@ política e replay isolados; dados de treino não são misturados entre jogos.
 | Perfil | Situação | Uso |
 | --- | --- | --- |
 | `ultimate_mortal_kombat_3` (padrão; alias `umk3`) | pronto | preserva toda a integração atual de combate e RL |
-| `megaman_x2` | preparado | catálogo de ações registrado; ainda requer adaptador de estado, recompensa e terminais próprios antes de treinar |
+| `megaman_x` (aliases `megaman_x1`, `megaman_x2`, `megaman_x3`) | preparado | catálogo temporizado de tiro, carga, pulo, dash e parede registrado; ainda requer adaptador de estado, recompensa e terminais próprios antes de treinar |
 
 Selecione o perfil com `GAMEAGENT_GAME_PROFILE`. O script atual mantém
 compatibilidade por padrão:
@@ -19,9 +19,13 @@ GAMEAGENT_GAME_PROFILE=ultimate_mortal_kombat_3 \
 bash scripts/run_character_rl.sh
 ```
 
-O catálogo inicial de Mega Man X2 contém: parado, esquerda, direita, pulo,
-tiro, dash, pulo lateral, pulo+tiro e dash+tiro. Ele não reutiliza os pesos,
-replay ou recompensa de Mortal Kombat.
+O catálogo inicial de Mega Man X contém tiro, três níveis de carga, pulo, dash
+aéreo, pulo longo B+A e escalada por parede em ambos os lados. Os programas e
+o contrato de controles estão em [docs/megaman_x_profile.md](docs/megaman_x_profile.md).
+Ele não reutiliza os pesos, replay ou recompensa de Mortal Kombat.
+
+Para coletar amostras de Mega Man sem treinar nem enviar comandos, use
+`bash scripts/run_megaman_x_capture.sh`.
 
 The formal server-side encounter, evaluation, telemetry and transactional-reset
 contract is documented in [docs/server_protocol_v21.md](docs/server_protocol_v21.md).

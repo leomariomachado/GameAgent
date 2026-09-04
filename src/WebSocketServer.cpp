@@ -932,6 +932,176 @@ void save_frame(
     }
 }
 
+nlohmann::json game_action_intents_json(const GameProfile& profile) {
+    nlohmann::json actions = nlohmann::json::array();
+    for (const GameActionIntent& action : profile.action_intents) {
+        actions.push_back({
+            {"id", action.id},
+            {"label", action.label},
+            {"states", action.states},
+            {"input_hold_ms", action.input_hold_ms},
+            {"neutral_hold_ms", action.neutral_hold_ms},
+            {"final_release_ms", action.final_release_ms},
+        });
+    }
+    return actions;
+}
+
+void handle_capture_only_connection(
+    int socket,
+    SocketReader& reader,
+    const WebSocketServerOptions& options,
+    MetricsLogger& metrics,
+    std::uint64_t connection_id,
+    const std::atomic_bool& stop_requested,
+    const GameProfile& profile
+) {
+    ConnectionWriter writer(socket);
+    const std::size_t maximum_payload =
+        options.max_jpeg_bytes + kMaximumFragmentOverhead;
+    auto next_capture = Clock::time_point::min();
+    std::uint64_t decision_id = 0;
+    bool announced = false;
+    const auto announce = [&](std::string_view request_type = {},
+                              std::uint64_t request_id = 0U) {
+        if (announced) {
+            return;
+        }
+        announced = true;
+        const bool v21_session = request_type == "configure_session";
+        const char* acknowledgement_type = v21_session
+            ? "configure_session_ack"
+            : "session_config_ack";
+        writer.send_json({
+            {"protocol_version", kServerProtocolVersion},
+            // Match the acknowledgement family used by the request.  This
+            // makes capture-only work with both the legacy session_config
+            // client and the V2.1 configure_session client.
+            {"type", acknowledgement_type},
+            {"request_id", request_id},
+            {"timestamp_ms", epoch_milliseconds()},
+            {"accepted", true},
+            {"game_profile", profile.slug},
+            {"game_profile_name", profile.display_name},
+            {"player_character", profile.slug},
+            {"player_character_name", profile.display_name},
+            {"opponent_character", "unknown"},
+            {"opponent_character_name", "Unknown"},
+            {"player_side", "left"},
+            {"initial_facing", "right"},
+            {"agent_mode", "capture_only"},
+            {"training_enabled", false},
+            {"rl_training_enabled", false},
+            {"rl_read_only", true},
+            {"weights_frozen", true},
+            {"replay_frozen", true},
+            {"scheduler_frozen", true},
+            {"effective_epsilon", 0.0},
+            {"timed_sequences_enabled", true},
+            {"timed_sequence_version", 2},
+            {"supported_action_modes", {"state", "timed_sequence"}},
+            {"capture_enabled", options.save_frames},
+            {"capture_interval_ms", options.debug_capture_interval.count()},
+            {"action_intents", game_action_intents_json(profile)},
+        });
+        std::cout << "[MEGAMAN_CAPTURE] session configured: connection="
+                  << connection_id
+                  << " request_type=" << request_type
+                  << " request_id=" << request_id << '\n';
+    };
+
+    while (!stop_requested.load()) {
+        WebSocketFrame frame;
+        if (!read_websocket_frame(
+                reader, frame, maximum_payload, stop_requested
+            )) {
+            return;
+        }
+        if (frame.opcode == 0x8U) {
+            writer.send_frame(0x8U, frame.payload);
+            return;
+        }
+        if (frame.opcode == 0x9U) {
+            if (!writer.send_frame(0xAU, frame.payload)) {
+                return;
+            }
+            continue;
+        }
+        if (frame.opcode == 0x1U) {
+            try {
+                const nlohmann::json request = nlohmann::json::parse(
+                    std::string(frame.payload.begin(), frame.payload.end())
+                );
+                announce(
+                    request.value("type", std::string{}),
+                    request.value("request_id", 0U)
+                );
+            } catch (const std::exception&) {
+                announce();
+            }
+            continue;
+        }
+        if (frame.opcode != 0x2U || !frame.final) {
+            continue;
+        }
+        announce();
+        try {
+            FrameEnvelope envelope = parse_binary_frame_envelope(frame.payload);
+            const std::int64_t received_ms = epoch_milliseconds();
+            const auto shared_envelope =
+                std::make_shared<FrameEnvelope>(std::move(envelope));
+            const auto decoded = decode_frame(
+                *shared_envelope, options.max_jpeg_bytes, received_ms
+            );
+            const auto now = Clock::now();
+            bool saved = false;
+            if (options.save_frames && now >= next_capture) {
+                save_frame(
+                    options,
+                    connection_id,
+                    FramePersistenceJob{
+                        .envelope = shared_envelope,
+                        .received_timestamp_ms = received_ms,
+                        .player_character = std::string(profile.slug),
+                        .opponent_character = "unknown",
+                    }
+                );
+                next_capture = now + options.debug_capture_interval;
+                saved = true;
+            }
+            metrics.write({
+                {"event", "game_profile_capture"},
+                {"connection_id", connection_id},
+                {"game_profile", profile.slug},
+                {"frame_id", decoded->frame_id},
+                {"width", decoded->image.width()},
+                {"height", decoded->image.height()},
+                {"saved", saved},
+                {"timestamp_ms", received_ms},
+            });
+            writer.send_json({
+                {"protocol_version", kServerProtocolVersion},
+                {"type", "action"},
+                {"decision_id", ++decision_id},
+                {"frame_id", decoded->frame_id},
+                {"commands", nlohmann::json::array()},
+                {"action_name", "capture_only"},
+                {"metrics", {
+                    {"game_profile", profile.slug},
+                    {"capture_only", true},
+                    {"capture_saved", saved},
+                }},
+            });
+        } catch (const std::exception& error) {
+            writer.send_json({
+                {"protocol_version", kServerProtocolVersion},
+                {"type", "error"},
+                {"message", error.what()},
+            });
+        }
+    }
+}
+
 std::optional<AppliedActionRecord> latest_applied_record(
     const ActionHistory& action_history
 ) {
@@ -1099,20 +1269,14 @@ void handle_websocket_connection(
     const GameProfile& selected_game_profile =
         game_profile(options.game_profile);
     if (!selected_game_profile.reinforcement_runtime_ready) {
-        ConnectionWriter unavailable_writer(socket);
-        unavailable_writer.send_json({
-            {"protocol_version", kServerProtocolVersion},
-            {"type", "game_profile_not_ready"},
-            {"game_profile", selected_game_profile.slug},
-            {"message",
-             "The profile is registered, but its game-state adapter and "
-             "reward model are not implemented yet."},
-            {"action_intents", nlohmann::json::array()},
-        });
-        send_close(
-            unavailable_writer,
-            1008,
-            "game profile runtime is not ready"
+        handle_capture_only_connection(
+            socket,
+            reader,
+            options,
+            metrics,
+            connection_id,
+            stop_requested,
+            selected_game_profile
         );
         return;
     }

@@ -25,11 +25,16 @@ int main() {
     const auto& profile = game_profile(*megaman);
     require(!profile.reinforcement_runtime_ready,
             "Mega Man was marked trainable before its state adapter exists");
-    require(profile.action_intents.size() == 10U,
+    require(profile.action_intents.size() == 12U,
             "Mega Man action catalogue is incomplete");
-    require(profile.action_intents.at(7).id == "jump_right" &&
-                profile.action_intents.at(7).commands == std::vector<int>({6, 9}),
-            "Mega Man jump-right intent is inconsistent");
+    require(profile.action_intents.at(4).id == "charge_shot" &&
+                profile.action_intents.at(4).states ==
+                    std::vector<std::vector<int>>({{2}}) &&
+                profile.action_intents.at(4).input_hold_ms == 600U,
+            "Mega Man charge-shot intent is inconsistent");
+    require(profile.action_intents.at(10).id == "wall_climb_right" &&
+                profile.action_intents.at(10).states.size() == 5U,
+            "Mega Man wall-climb intent is inconsistent");
     require(!parse_game_profile("unknown").has_value(),
             "unknown game profile was accepted");
     std::cout << "[PASS] game profiles are isolated and UMK3 remains ready\n";
